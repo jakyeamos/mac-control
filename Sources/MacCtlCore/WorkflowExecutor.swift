@@ -8,6 +8,8 @@ public enum WorkflowExecutionError: Error, LocalizedError {
     case assertionFailed(String)
     case blocked(String)
     case unsafeInput(String)
+    case backgroundUnsupported(String)
+    case focusChanged(expected: String, actual: String)
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +25,10 @@ public enum WorkflowExecutionError: Error, LocalizedError {
             return "Workflow blocked: \(message)"
         case .unsafeInput(let message):
             return "Unsafe workflow input: \(message)"
+        case .backgroundUnsupported(let message):
+            return "Background workflow is unsupported: \(message)"
+        case .focusChanged(let expected, let actual):
+            return "Background workflow changed foreground focus from \(expected) to \(actual)"
         }
     }
 }
@@ -58,17 +64,31 @@ public final class WorkflowExecutor {
     ) throws -> ExecutionReport {
         let validation = WorkflowRegistry().validate(workflow)
         guard validation.valid else { throw WorkflowExecutionError.invalidWorkflow(validation.errors) }
+
+        let runID = UUID().uuidString
+        let initialForeground = workflow.focusPolicy == .background
+            ? appController.foregroundApplication()
+            : nil
         var evidence: [Evidence] = []
         var result: [String: JSONValue] = [:]
         var completedActions = 0
+        var targetProcessIDs = Set<pid_t>()
 
         for action in workflow.actions {
-            let actionEvidence = try execute(action, ephemeralInputs: ephemeralInputs)
-            evidence.append(contentsOf: actionEvidence.evidence)
-            for (key, value) in actionEvidence.result {
+            let actionResult = try execute(
+                action,
+                ephemeralInputs: ephemeralInputs,
+                focusPolicy: workflow.focusPolicy
+            )
+            evidence.append(contentsOf: actionResult.evidence)
+            for (key, value) in actionResult.result {
                 result[key] = value
             }
+            targetProcessIDs.formUnion(actionResult.targetProcessIDs)
             completedActions += 1
+            if workflow.focusPolicy == .background {
+                try ensureFocusPreserved(initialForeground)
+            }
         }
 
         if workflow.recipe == "iphone-open-tinder" {
@@ -105,7 +125,7 @@ public final class WorkflowExecutor {
         }
 
         for assertion in workflow.assertions {
-            try verify(assertion)
+            try verify(assertion, focusPolicy: workflow.focusPolicy)
             evidence.append(Evidence(
                 kind: "assertion",
                 message: "Assertion passed: \(assertion.kind)",
@@ -113,29 +133,69 @@ public final class WorkflowExecutor {
             ))
         }
 
+        if workflow.focusPolicy == .background {
+            try ensureFocusPreserved(initialForeground)
+            let finalForeground = appController.foregroundApplication()
+            evidence.append(Evidence(
+                kind: "focus_guard",
+                message: "Foreground application was preserved for the background workflow",
+                source: "macctl",
+                metadata: [
+                    "policy": .string(workflow.focusPolicy.rawValue),
+                    "initial_foreground": .string(applicationLabel(initialForeground)),
+                    "final_foreground": .string(applicationLabel(finalForeground))
+                ]
+            ))
+        }
+
+        result["run_id"] = .string(runID)
+        result["focus_policy"] = .string(workflow.focusPolicy.rawValue)
+
         return ExecutionReport(
             workflowID: workflow.id,
             completedActions: completedActions,
             evidence: evidence,
-            result: result
+            result: result,
+            runID: runID,
+            focusPolicy: workflow.focusPolicy,
+            targetProcessIDs: targetProcessIDs.sorted()
         )
     }
 
     private struct ActionResult {
         let evidence: [Evidence]
         let result: [String: JSONValue]
+        let targetProcessIDs: [pid_t]
+
+        init(
+            evidence: [Evidence],
+            result: [String: JSONValue],
+            targetProcessIDs: [pid_t] = []
+        ) {
+            self.evidence = evidence
+            self.result = result
+            self.targetProcessIDs = targetProcessIDs
+        }
     }
 
-    private func execute(_ action: ActionSpec, ephemeralInputs: [String: String]) throws -> ActionResult {
+    private func execute(
+        _ action: ActionSpec,
+        ephemeralInputs: [String: String],
+        focusPolicy: FocusPolicy
+    ) throws -> ActionResult {
         switch action.kind {
         case .launchApp:
             let app = try parameter(action, name: "app")
-            let info = try appController.open(app)
+            let info = try appController.open(app, focusPolicy: focusPolicy)
             return ActionResult(
                 evidence: [Evidence(kind: "app", message: "Application opened", source: info.name)],
-                result: ["app": .string(info.name)]
+                result: ["app": .string(info.name)],
+                targetProcessIDs: info.processID.map { [$0] } ?? []
             )
         case .activateWindow:
+            if focusPolicy == .background {
+                throw WorkflowExecutionError.backgroundUnsupported("activateWindow would change foreground focus")
+            }
             let app = try parameter(action, name: "app")
             let info = try appController.activate(app)
             return ActionResult(
@@ -143,9 +203,32 @@ public final class WorkflowExecutor {
                 result: ["app": .string(info.name)]
             )
         case .click:
-            return try executeClick(action)
+            return try executeClick(action, focusPolicy: focusPolicy)
         case .type:
             let text = try ephemeralText(action, inputs: ephemeralInputs)
+            if focusPolicy == .background {
+                guard action.surface == .macApp,
+                      let selector = action.selector,
+                      selector.tier == .accessibility else {
+                    throw WorkflowExecutionError.backgroundUnsupported(
+                        "type requires an Accessibility selector on a macOS app"
+                    )
+                }
+                let pid = try requiredTargetPID(for: action)
+                _ = try accessibilityController.setValue(pid: pid, selector: selector, value: text)
+                return ActionResult(
+                    evidence: [Evidence(
+                        kind: "input",
+                        message: "Ephemeral text was set through the target Accessibility element",
+                        metadata: [
+                            "focus_policy": .string(focusPolicy.rawValue),
+                            "selector_tier": .number(Double(SelectorTier.accessibility.rawValue))
+                        ]
+                    )],
+                    result: ["typed": .bool(true)],
+                    targetProcessIDs: [pid]
+                )
+            }
             try inputController.type(text)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Ephemeral text was typed")],
@@ -153,12 +236,28 @@ public final class WorkflowExecutor {
             )
         case .key:
             let key = try parameter(action, name: "key")
+            if focusPolicy == .background {
+                let pid = try requiredTargetPID(for: action)
+                try inputController.key(key, toProcess: pid)
+                return ActionResult(
+                    evidence: [Evidence(
+                        kind: "input",
+                        message: "Keyboard key was sent to the target process",
+                        metadata: ["focus_policy": .string(focusPolicy.rawValue)]
+                    )],
+                    result: ["key": .string(key)],
+                    targetProcessIDs: [pid]
+                )
+            }
             try inputController.key(key)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Keyboard key was sent")],
                 result: ["key": .string(key)]
             )
         case .scroll:
+            if focusPolicy == .background {
+                throw WorkflowExecutionError.backgroundUnsupported("scroll uses global mouse input")
+            }
             let direction = try parameter(action, name: "direction")
             let amount = action.parameters["amount"]?.intValue ?? 3
             try inputController.scroll(amount: Int32(amount), direction: direction)
@@ -174,6 +273,13 @@ public final class WorkflowExecutor {
                 result: ["seconds": .number(seconds)]
             )
         case .capture:
+            if focusPolicy == .background {
+                guard action.surface == .macApp, hasAppParameter(action.parameters) else {
+                    throw WorkflowExecutionError.backgroundUnsupported(
+                        "background capture requires a named macOS app"
+                    )
+                }
+            }
             let app = action.parameters["app"]?.stringValue
             let frame = try captureController.capture(surface: action.surface, app: app)
             return ActionResult(
@@ -189,6 +295,13 @@ public final class WorkflowExecutor {
                 result: ["captured": .bool(true)]
             )
         case .ocr:
+            if focusPolicy == .background {
+                guard action.surface == .macApp, hasAppParameter(action.parameters) else {
+                    throw WorkflowExecutionError.backgroundUnsupported(
+                        "background OCR requires a named macOS app"
+                    )
+                }
+            }
             let app = action.parameters["app"]?.stringValue
             let frame = try captureController.capture(surface: action.surface, app: app)
             let ocr = try captureController.ocr(frame)
@@ -202,7 +315,7 @@ public final class WorkflowExecutor {
                 result: ["match_count": .number(Double(ocr.matches.count))]
             )
         case .assert:
-            try verifyActionAssertion(action)
+            try verifyActionAssertion(action, focusPolicy: focusPolicy)
             return ActionResult(
                 evidence: [Evidence(kind: "assertion", message: "Inline assertion passed")],
                 result: ["assertion": .bool(true)]
@@ -210,7 +323,33 @@ public final class WorkflowExecutor {
         }
     }
 
-    private func executeClick(_ action: ActionSpec) throws -> ActionResult {
+    private func executeClick(_ action: ActionSpec, focusPolicy: FocusPolicy) throws -> ActionResult {
+        if focusPolicy == .background {
+            guard action.surface == .macApp,
+                  let selector = action.selector,
+                  selector.tier == .accessibility else {
+                throw WorkflowExecutionError.backgroundUnsupported(
+                    "click requires an Accessibility selector on a macOS app"
+                )
+            }
+            let pid = try requiredTargetPID(for: action)
+            let bounds = try accessibilityController.press(pid: pid, selector: selector)
+            return ActionResult(
+                evidence: [Evidence(
+                    kind: "click",
+                    message: "Clicked an Accessibility element in the target process",
+                    metadata: [
+                        "focus_policy": .string(focusPolicy.rawValue),
+                        "selector_tier": .number(Double(SelectorTier.accessibility.rawValue)),
+                        "x": .number(Double(bounds.midX)),
+                        "y": .number(Double(bounds.midY))
+                    ]
+                )],
+                result: ["selector_tier": .number(Double(SelectorTier.accessibility.rawValue))],
+                targetProcessIDs: [pid]
+            )
+        }
+
         if let selector = action.selector {
             if selector.tier == .accessibility,
                let pid = try targetPID(for: action) {
@@ -225,7 +364,8 @@ public final class WorkflowExecutor {
                             "y": .number(Double(bounds.midY))
                         ]
                     )],
-                    result: ["selector_tier": .number(Double(SelectorTier.accessibility.rawValue))]
+                    result: ["selector_tier": .number(Double(SelectorTier.accessibility.rawValue))],
+                    targetProcessIDs: [pid]
                 )
             }
             if selector.tier == .visual {
@@ -310,9 +450,12 @@ public final class WorkflowExecutor {
         throw WorkflowExecutionError.blocked("click has no usable selector")
     }
 
-    private func verify(_ assertion: AssertionSpec) throws {
+    private func verify(_ assertion: AssertionSpec, focusPolicy: FocusPolicy) throws {
         switch assertion.kind {
         case "foregroundApp":
+            if focusPolicy == .background {
+                throw WorkflowExecutionError.backgroundUnsupported("foregroundApp is not a background assertion")
+            }
             let actual = appController.foregroundApplication()?.name
             guard let expected = assertion.expected,
                   actual?.caseInsensitiveCompare(expected) == .orderedSame else {
@@ -321,10 +464,20 @@ public final class WorkflowExecutor {
                 )
             }
         case "iphoneMirroringForeground":
+            if focusPolicy == .background {
+                throw WorkflowExecutionError.backgroundUnsupported("iPhone Mirroring requires foreground focus")
+            }
             guard iphoneController.state().foreground else {
                 throw WorkflowExecutionError.assertionFailed("iPhone Mirroring is not foreground")
             }
         case "ocrContains":
+            if focusPolicy == .background {
+                guard assertion.surface == .macApp, hasAppParameter(assertion.parameters) else {
+                    throw WorkflowExecutionError.backgroundUnsupported(
+                        "background OCR requires a named macOS app"
+                    )
+                }
+            }
             guard let expected = assertion.expected else {
                 throw WorkflowExecutionError.assertionFailed("ocrContains has no expected text")
             }
@@ -338,7 +491,11 @@ public final class WorkflowExecutor {
             }
         case "elementExists":
             guard let selector = assertion.selector,
-                  let pid = try targetPID(surface: assertion.surface, parameters: assertion.parameters) else {
+                  let pid = try targetPID(
+                      surface: assertion.surface,
+                      parameters: assertion.parameters,
+                      requiresRunning: focusPolicy == .background
+                  ) else {
                 throw WorkflowExecutionError.assertionFailed("elementExists has no app or selector")
             }
             _ = try accessibilityController.findElement(pid: pid, selector: selector)
@@ -347,7 +504,10 @@ public final class WorkflowExecutor {
         }
     }
 
-    private func verifyActionAssertion(_ action: ActionSpec) throws {
+    private func verifyActionAssertion(
+        _ action: ActionSpec,
+        focusPolicy: FocusPolicy
+    ) throws {
         let kind = action.parameters["condition"]?.stringValue ?? "foregroundApp"
         let assertion = AssertionSpec(
             kind: kind,
@@ -356,21 +516,43 @@ public final class WorkflowExecutor {
             selector: action.selector,
             parameters: action.parameters
         )
-        try verify(assertion)
+        try verify(assertion, focusPolicy: focusPolicy)
     }
 
     private func targetPID(for action: ActionSpec) throws -> pid_t? {
         try targetPID(surface: action.surface, parameters: action.parameters)
     }
 
-    private func targetPID(surface: SurfaceKind, parameters: [String: JSONValue]) throws -> pid_t? {
+    private func requiredTargetPID(for action: ActionSpec) throws -> pid_t {
+        guard let pid = try targetPID(
+            surface: action.surface,
+            parameters: action.parameters,
+            requiresRunning: true
+        ) else {
+            throw WorkflowExecutionError.backgroundUnsupported(
+                "the target app is not running; launch it with launchApp first"
+            )
+        }
+        return pid
+    }
+
+    private func targetPID(
+        surface: SurfaceKind,
+        parameters: [String: JSONValue],
+        requiresRunning: Bool = false
+    ) throws -> pid_t? {
         switch surface {
         case .macDesktop:
             return nil
         case .macApp:
             let app = parameters["app"]?.stringValue
-            guard let app else { return appController.foregroundApplication()?.processID }
-            return try appController.resolve(app).processID
+            guard let app else {
+                if requiresRunning { return nil }
+                return appController.foregroundApplication()?.processID
+            }
+            let resolved = try appController.resolve(app)
+            if requiresRunning, !resolved.isRunning { return nil }
+            return resolved.processID
         case .iphoneMirroring:
             return try appController.resolve("iPhone Mirroring").processID
         }
@@ -397,11 +579,44 @@ public final class WorkflowExecutor {
         return try CoordinateMapper.mainDisplayPoint(NormalizedPoint(x: x, y: y))
     }
 
+    private func ensureFocusPreserved(_ expected: AppInfo?) throws {
+        let actual = appController.foregroundApplication()
+        guard sameApplication(expected, actual) else {
+            throw WorkflowExecutionError.focusChanged(
+                expected: applicationLabel(expected),
+                actual: applicationLabel(actual)
+            )
+        }
+    }
+
+    private func sameApplication(_ lhs: AppInfo?, _ rhs: AppInfo?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case (let lhs?, let rhs?):
+            if let lhsBundleID = lhs.bundleID, let rhsBundleID = rhs.bundleID {
+                return lhsBundleID == rhsBundleID
+            }
+            return lhs.path == rhs.path || lhs.name == rhs.name
+        default:
+            return false
+        }
+    }
+
+    private func applicationLabel(_ app: AppInfo?) -> String {
+        app?.bundleID ?? app?.path ?? app?.name ?? "none"
+    }
+
     private func parameter(_ action: ActionSpec, name: String) throws -> String {
         guard let value = action.parameters[name]?.stringValue, !value.isEmpty else {
             throw WorkflowExecutionError.missingParameter(name)
         }
         return value
+    }
+
+    private func hasAppParameter(_ parameters: [String: JSONValue]) -> Bool {
+        guard let app = parameters["app"]?.stringValue else { return false }
+        return !app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func ephemeralText(_ action: ActionSpec, inputs: [String: String]) throws -> String {

@@ -156,7 +156,7 @@ public final class ApprovalHUD: NSObject {
     private func makePanelIfNeeded() -> MacCtlPanel {
         if let panel { return panel }
         let newPanel = MacCtlPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 164),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 190),
             styleMask: [.titled, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -184,6 +184,9 @@ public final class ApprovalHUD: NSObject {
         heading.font = NSFont.boldSystemFont(ofSize: 13)
         let summary = NSTextField(wrappingLabelWithString: approval.summary)
         summary.maximumNumberOfLines = 2
+        let focusLabel = NSTextField(labelWithString: "Focus policy: \(approval.focusPolicy.rawValue)")
+        focusLabel.textColor = .secondaryLabelColor
+        focusLabel.font = NSFont.systemFont(ofSize: 11)
         let expiry = DateFormatter()
         expiry.dateStyle = .none
         expiry.timeStyle = .short
@@ -206,6 +209,7 @@ public final class ApprovalHUD: NSObject {
 
         root.addArrangedSubview(heading)
         root.addArrangedSubview(summary)
+        root.addArrangedSubview(focusLabel)
         root.addArrangedSubview(expiryLabel)
         root.addArrangedSubview(buttons)
         root.addArrangedSubview(status)

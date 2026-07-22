@@ -132,6 +132,151 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertFalse(prepared.record.summary.contains("one"))
     }
 
+    func testFocusPolicyDefaultsToForegroundAndBindsApprovalDigest() throws {
+        let workflow = WorkflowSpec(
+            id: "test.focus",
+            name: "Focus",
+            summary: "Test",
+            surface: .macDesktop,
+            actions: [ActionSpec(kind: .waitFor, surface: .macDesktop)]
+        )
+        XCTAssertEqual(workflow.focusPolicy, .foreground)
+
+        let background = workflow.withFocusPolicy(.background)
+        XCTAssertNotEqual(
+            ApprovalStore.digest(workflow),
+            ApprovalStore.digest(background)
+        )
+        let roundTrip = try JSONCodec.decode(
+            WorkflowSpec.self,
+            from: try JSONCodec.encode(background)
+        )
+        XCTAssertEqual(roundTrip, background)
+
+        let legacy = try JSONCodec.decode(
+            WorkflowSpec.self,
+            from: Data(
+                #"{"id":"legacy.focus","name":"Legacy","summary":"Legacy","surface":"mac_desktop","actions":[]}"#.utf8
+            )
+        )
+        XCTAssertEqual(legacy.focusPolicy, .foreground)
+    }
+
+    func testBackgroundValidationRejectsGlobalSelectorsAndAcceptsAccessibilityTargets() {
+        let visual = WorkflowSpec(
+            id: "test.background.visual",
+            name: "Visual",
+            summary: "Test",
+            surface: .macApp,
+            focusPolicy: .background,
+            actions: [ActionSpec(
+                kind: .click,
+                surface: .macApp,
+                selector: Selector(containsText: "Save"),
+                parameters: [
+                    "app": .string("TextEdit"),
+                    "approval_reason": .string("test")
+                ]
+            )]
+        )
+        let visualValidation = WorkflowRegistry().validate(visual)
+        XCTAssertFalse(visualValidation.valid)
+        XCTAssertTrue(visualValidation.errors.contains { $0.contains("Accessibility selector") })
+
+        let accessibility = WorkflowSpec(
+            id: "test.background.accessibility",
+            name: "Accessibility",
+            summary: "Test",
+            surface: .macApp,
+            focusPolicy: .background,
+            actions: [ActionSpec(
+                kind: .click,
+                surface: .macApp,
+                selector: Selector(role: "AXButton", title: "Save"),
+                parameters: [
+                    "app": .string("TextEdit"),
+                    "approval_reason": .string("test")
+                ]
+            )]
+        )
+        XCTAssertTrue(WorkflowRegistry().validate(accessibility).valid)
+    }
+
+    func testBackgroundApprovalExecutionPreservesPolicyInResponseAndReceipt() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-background-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "client"
+        )
+
+        let prepared = service.handle(RequestEnvelope(
+            method: "workflow.prepare",
+            params: [
+                "workflow": .string("approval.smoke"),
+                "focus_policy": .string("background")
+            ]
+        ))
+        XCTAssertEqual(prepared.status, .prepared)
+        XCTAssertEqual(prepared.result["focus_policy"]?.stringValue, "background")
+        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
+        XCTAssertEqual(approval["focusPolicy"]?.stringValue, "background")
+        let token = try XCTUnwrap(approval["token"]?.stringValue)
+
+        let executed = service.handle(RequestEnvelope(
+            method: "approval.approve",
+            params: [
+                "token": .string(token),
+                "source": .string("test")
+            ]
+        ))
+        XCTAssertEqual(executed.status, .succeeded)
+        XCTAssertEqual(executed.result["focus_policy"]?.stringValue, "background")
+        XCTAssertTrue(executed.evidence.contains { $0.kind == "focus_guard" })
+
+        let receipts = try OperationReceiptStore(directory: receiptDirectory).list(limit: 10)
+        XCTAssertEqual(
+            receipts.first(where: { $0.method == "workflow.prepare" })?.focusPolicy,
+            .background
+        )
+        XCTAssertEqual(
+            receipts.first(where: { $0.method == "approval.approve" })?.focusPolicy,
+            .background
+        )
+    }
+
+    func testMismatchedBackgroundRunDoesNotConsumeApprovalToken() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-policy-mismatch-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "client"
+        )
+        let prepared = service.handle(RequestEnvelope(
+            method: "workflow.prepare",
+            params: ["workflow": .string("approval.smoke")]
+        ))
+        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
+        let token = try XCTUnwrap(approval["token"]?.stringValue)
+
+        let mismatched = service.handle(RequestEnvelope(
+            method: "workflow.run",
+            params: [
+                "workflow": .string("approval.smoke"),
+                "approval_token": .string(token),
+                "focus_policy": .string("background")
+            ]
+        ))
+        XCTAssertEqual(mismatched.status, .blocked)
+        XCTAssertEqual(mismatched.error?.code, MacCtlErrorCode.approvalRequired.rawValue)
+
+        let approved = service.handle(RequestEnvelope(
+            method: "approval.approve",
+            params: ["token": .string(token)]
+        ))
+        XCTAssertEqual(approved.status, .succeeded)
+    }
+
     func testApprovalExpiresAndCannotBeReused() throws {
         let store = ApprovalStore(lifetime: 0.02)
         let workflow = WorkflowSpec(
@@ -524,6 +669,7 @@ final class MacCtlCoreTests: XCTestCase {
         let receipt = try JSONCodec.decode(OperationReceipt.self, from: data)
         XCTAssertEqual(receipt.executionResult, "not_run")
         XCTAssertEqual(receipt.verificationResult, "not_run")
+        XCTAssertNil(receipt.focusPolicy)
     }
 
     func testUnavailableDoctorDoesNotReportClientPermissionsAsDaemonPermissions() throws {

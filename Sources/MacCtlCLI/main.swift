@@ -65,7 +65,9 @@ struct CLI {
             return render(sendOrLocal(method: "app.list", params: [:], localFallback: true))
         case "open":
             guard let name = args.dropFirst().first else { throw CLIError.usage("Usage: macctl app open <name-or-bundle-id>") }
-            return render(sendOrLocal(method: "app.open", params: ["name": .string(name)], localFallback: false))
+            var params: [String: JSONValue] = ["name": .string(name)]
+            try addFocusPolicy(from: args, to: &params)
+            return render(sendOrLocal(method: "app.open", params: params, localFallback: false))
         default:
             throw CLIError.usage("Usage: macctl app list|open <name-or-bundle-id>")
         }
@@ -80,29 +82,41 @@ struct CLI {
             return render(sendOrLocal(method: "workflow.list", params: [:], localFallback: true))
         case "validate":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow validate <workflow>")
-            }
-            return render(sendOrLocal(method: "workflow.validate", params: ["workflow": .string(workflow)], localFallback: true))
-        case "prepare":
-            guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow prepare <workflow> [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow validate <workflow> [--background]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
+            try addFocusPolicy(from: args, to: &params)
+            return render(sendOrLocal(method: "workflow.validate", params: params, localFallback: true))
+        case "prepare":
+            guard let workflow = args.dropFirst().first else {
+                throw CLIError.usage("Usage: macctl workflow prepare <workflow> [--background] [--ephemeral-stdin]")
+            }
+            var params: [String: JSONValue] = ["workflow": .string(workflow)]
+            try addFocusPolicy(from: args, to: &params)
             try addEphemeralInputs(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.prepare", params: params, localFallback: false))
         case "run":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow run <workflow> [--approval-token <token>] [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow run <workflow> [--background] [--approval-token <token>] [--ephemeral-stdin]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
+            try addFocusPolicy(from: args, to: &params)
             if let tokenIndex = args.firstIndex(of: "--approval-token"), args.indices.contains(tokenIndex + 1) {
                 params["approval_token"] = .string(args[tokenIndex + 1])
             }
             try addEphemeralInputs(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.run", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--ephemeral-stdin]")
+            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]")
         }
+    }
+
+    private func addFocusPolicy(
+        from args: [String],
+        to params: inout [String: JSONValue]
+    ) throws {
+        guard args.contains("--background") else { return }
+        params["focus_policy"] = .string(FocusPolicy.background.rawValue)
     }
 
     private func addEphemeralInputs(
@@ -276,8 +290,8 @@ struct CLI {
         macctl capabilities --json
         macctl status --json
         macctl app list [--json]
-        macctl app open <name-or-bundle-id>
-        macctl workflow list|validate|prepare|run <workflow> [--ephemeral-stdin]
+        macctl app open <name-or-bundle-id> [--background]
+        macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]
         macctl approval list|approve|deny <token>
         macctl receipts list|status
         macctl release check [--json]

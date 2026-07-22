@@ -57,6 +57,19 @@ public final class AccessibilityController {
     }
 
     @discardableResult
+    public func setValue(pid: pid_t, selector: Selector, value: String) throws -> CGRect? {
+        let element = try findElement(pid: pid, selector: selector)
+        guard AXUIElementSetAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            value as CFTypeRef
+        ) == .success else {
+            throw AccessibilityControllerError.actionFailed(kAXValueAttribute as String)
+        }
+        return try? bounds(of: element)
+    }
+
+    @discardableResult
     public func raiseFocusedWindow(pid: pid_t) throws -> CGRect? {
         guard PermissionDiagnostics.hasAccessibility() else {
             throw AccessibilityControllerError.permissionDenied

@@ -93,6 +93,39 @@ be prepared first and approved through a short-lived, single-use token. The
 daemon never accepts credentials or other secrets as command-line arguments,
 and screenshot/OCR frames are held in memory only for the requested operation.
 
+### Focus-preserving background workflows
+
+Workflows default to `focusPolicy: "foreground"`. A caller can request
+`focus_policy: "background"` for a workflow or app launch when the operation
+must not bring its target to the front:
+
+```sh
+~/.local/bin/macctl workflow validate my.workflow --background --json
+~/.local/bin/macctl workflow prepare my.workflow --background --json
+~/.local/bin/macctl app open "TextEdit" --background --json
+```
+
+Background workflow execution is deliberately narrower than foreground
+execution. It launches apps with a non-activating AppKit configuration, targets
+Accessibility actions at a named macOS app process, sends keyboard events to
+that process, and checks the foreground application before and after every
+action. The focus policy is part of the approval digest and is preserved in
+execution reports and receipts.
+
+The background validator rejects activation, scroll, desktop capture/OCR,
+iPhone Mirroring, visual selectors, coordinate fallbacks, and foreground
+assertions. This keeps a workflow from silently falling back to global mouse or
+keyboard input. Background window capture/OCR is available only when it names a
+macOS app explicitly. The mode still requires a logged-in Aqua session and the
+user-granted Accessibility, Input Monitoring, Post Events, and Screen Recording
+permissions; it is focus-preserving in-session execution, not a displayless
+server.
+
+True displayless browser/API headless execution remains the responsibility of a
+caller such as Career Ops or OpenCLI. Those callers can invoke this local
+control plane when they need macOS GUI interaction; the local background
+interaction contract stays owned by `mac-control`.
+
 Generic workflow JSON files may be placed in
 `~/Library/Application Support/macctl/workflows/`. Accessibility, keyboard,
 and mouse input actions are classified conservatively: click, key, and type
@@ -158,5 +191,5 @@ result is `approval_expired`. Finally run
 must be blocked. Double-tapping Caps Lock may bring the HUD forward but never
 approves a plan or changes the Caps Lock state.
 
-The project does not modify AIOS or career-ops. Integration adapters remain a
-later step after this standalone control plane is permissioned and proven.
+The project does not modify AIOS or career-ops. Career Ops can invoke this
+standalone control plane when a local macOS interaction is required.

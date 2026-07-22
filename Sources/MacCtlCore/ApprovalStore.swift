@@ -69,6 +69,7 @@ public final class ApprovalStore {
             workflowID: workflow.id,
             summary: workflow.summary,
             risk: ActionRiskClassifier.classify(workflow),
+            focusPolicy: workflow.focusPolicy,
             expiresAt: expiresAt
         )
         let prepared = PreparedApproval(

@@ -211,6 +211,11 @@ public enum SurfaceKind: String, Codable, Equatable, CaseIterable {
     case iphoneMirroring = "iphone_mirroring"
 }
 
+public enum FocusPolicy: String, Codable, Equatable, CaseIterable {
+    case foreground
+    case background
+}
+
 public enum ActionKind: String, Codable, Equatable, CaseIterable {
     case launchApp
     case activateWindow
@@ -337,6 +342,7 @@ public struct WorkflowSpec: Codable, Equatable {
     public let name: String
     public let summary: String
     public let surface: SurfaceKind
+    public let focusPolicy: FocusPolicy
     public let actions: [ActionSpec]
     public let assertions: [AssertionSpec]
     public let recipe: String?
@@ -346,6 +352,7 @@ public struct WorkflowSpec: Codable, Equatable {
         name: String,
         summary: String,
         surface: SurfaceKind,
+        focusPolicy: FocusPolicy = .foreground,
         actions: [ActionSpec],
         assertions: [AssertionSpec] = [],
         recipe: String? = nil
@@ -354,9 +361,46 @@ public struct WorkflowSpec: Codable, Equatable {
         self.name = name
         self.summary = summary
         self.surface = surface
+        self.focusPolicy = focusPolicy
         self.actions = actions
         self.assertions = assertions
         self.recipe = recipe
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case summary
+        case surface
+        case focusPolicy
+        case actions
+        case assertions
+        case recipe
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.summary = try container.decode(String.self, forKey: .summary)
+        self.surface = try container.decode(SurfaceKind.self, forKey: .surface)
+        self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        self.actions = try container.decode([ActionSpec].self, forKey: .actions)
+        self.assertions = try container.decodeIfPresent([AssertionSpec].self, forKey: .assertions) ?? []
+        self.recipe = try container.decodeIfPresent(String.self, forKey: .recipe)
+    }
+
+    public func withFocusPolicy(_ focusPolicy: FocusPolicy) -> WorkflowSpec {
+        WorkflowSpec(
+            id: id,
+            name: name,
+            summary: summary,
+            surface: surface,
+            focusPolicy: focusPolicy,
+            actions: actions,
+            assertions: assertions,
+            recipe: recipe
+        )
     }
 }
 
@@ -577,6 +621,7 @@ public struct ApprovalRecord: Codable, Equatable {
     public let workflowID: String
     public let summary: String
     public let risk: RiskLevel
+    public let focusPolicy: FocusPolicy
     public let expiresAt: Date
 
     public init(
@@ -585,6 +630,7 @@ public struct ApprovalRecord: Codable, Equatable {
         workflowID: String,
         summary: String,
         risk: RiskLevel,
+        focusPolicy: FocusPolicy = .foreground,
         expiresAt: Date
     ) {
         self.token = token
@@ -592,13 +638,38 @@ public struct ApprovalRecord: Codable, Equatable {
         self.workflowID = workflowID
         self.summary = summary
         self.risk = risk
+        self.focusPolicy = focusPolicy
         self.expiresAt = expiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case token
+        case operationID
+        case workflowID
+        case summary
+        case risk
+        case focusPolicy
+        case expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.token = try container.decode(String.self, forKey: .token)
+        self.operationID = try container.decode(String.self, forKey: .operationID)
+        self.workflowID = try container.decode(String.self, forKey: .workflowID)
+        self.summary = try container.decode(String.self, forKey: .summary)
+        self.risk = try container.decode(RiskLevel.self, forKey: .risk)
+        self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
     }
 }
 
 public struct ExecutionReport: Codable, Equatable {
+    public let runID: String
     public let workflowID: String
+    public let focusPolicy: FocusPolicy
     public let completedActions: Int
+    public let targetProcessIDs: [Int32]
     public let evidence: [Evidence]
     public let result: [String: JSONValue]
 
@@ -606,12 +677,39 @@ public struct ExecutionReport: Codable, Equatable {
         workflowID: String,
         completedActions: Int,
         evidence: [Evidence],
-        result: [String: JSONValue] = [:]
+        result: [String: JSONValue] = [:],
+        runID: String = UUID().uuidString,
+        focusPolicy: FocusPolicy = .foreground,
+        targetProcessIDs: [Int32] = []
     ) {
+        self.runID = runID
         self.workflowID = workflowID
+        self.focusPolicy = focusPolicy
         self.completedActions = completedActions
+        self.targetProcessIDs = targetProcessIDs
         self.evidence = evidence
         self.result = result
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runID
+        case workflowID
+        case focusPolicy
+        case completedActions
+        case targetProcessIDs
+        case evidence
+        case result
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.runID = try container.decodeIfPresent(String.self, forKey: .runID) ?? UUID().uuidString
+        self.workflowID = try container.decode(String.self, forKey: .workflowID)
+        self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        self.completedActions = try container.decode(Int.self, forKey: .completedActions)
+        self.targetProcessIDs = try container.decodeIfPresent([Int32].self, forKey: .targetProcessIDs) ?? []
+        self.evidence = try container.decodeIfPresent([Evidence].self, forKey: .evidence) ?? []
+        self.result = try container.decodeIfPresent([String: JSONValue].self, forKey: .result) ?? [:]
     }
 }
 
@@ -629,6 +727,8 @@ public enum MacCtlErrorCode: String {
     case operationFailed = "operation_failed"
     case invalidSelector = "invalid_selector"
     case unsafeInput = "unsafe_input"
+    case backgroundUnsupported = "background_unsupported"
+    case focusChanged = "focus_changed"
     case launchAgentUnhealthy = "launch_agent_unhealthy"
     case receiptUnavailable = "receipt_unavailable"
 }

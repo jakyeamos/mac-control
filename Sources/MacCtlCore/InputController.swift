@@ -149,6 +149,28 @@ public final class InputController {
         up.post(tap: .cghidEventTap)
     }
 
+    public func key(_ specification: String, toProcess processID: pid_t) throws {
+        try requirePostEventAccess()
+        let parsed = try KeySpecification.parse(specification)
+        let down = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: parsed.keyCode,
+            keyDown: true
+        )
+        let up = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: parsed.keyCode,
+            keyDown: false
+        )
+        for modifier in parsed.modifiers {
+            down?.flags.insert(modifier)
+            up?.flags.insert(modifier)
+        }
+        guard let down, let up else { throw InputControllerError.permissionDenied }
+        down.postToPid(processID)
+        up.postToPid(processID)
+    }
+
     public func scroll(amount: Int32, direction: String) throws {
         try requirePostEventAccess()
         let normalizedDirection = direction.lowercased()

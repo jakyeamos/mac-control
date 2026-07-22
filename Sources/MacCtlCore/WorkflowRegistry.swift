@@ -115,12 +115,107 @@ public final class WorkflowRegistry {
                 errors.append("Sensitive action \(index) must declare approval_reason")
             }
         }
+        if workflow.focusPolicy == .background {
+            if workflow.surface == .iphoneMirroring {
+                errors.append("Background workflows cannot target iPhone Mirroring")
+            }
+            if workflow.recipe == "iphone-open-tinder" {
+                errors.append("The iPhone Mirroring recipe requires foreground focus")
+            }
+            for (index, action) in workflow.actions.enumerated() {
+                switch action.kind {
+                case .activateWindow, .scroll:
+                    errors.append("Background action \(index) cannot use \(action.kind.rawValue)")
+                case .click:
+                    if action.surface != .macApp {
+                        errors.append("Background click action \(index) must target a macOS app")
+                    }
+                    if action.selector?.tier != .accessibility {
+                        errors.append("Background click action \(index) requires an Accessibility selector")
+                    }
+                    if !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background click action \(index) must name its target app")
+                    }
+                case .type:
+                    if action.surface != .macApp {
+                        errors.append("Background type action \(index) must target a macOS app")
+                    }
+                    if action.selector?.tier != .accessibility {
+                        errors.append("Background type action \(index) requires an Accessibility selector")
+                    }
+                    if !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background type action \(index) must name its target app")
+                    }
+                case .key:
+                    if action.surface != .macApp {
+                        errors.append("Background key action \(index) must target a macOS app")
+                    }
+                    if !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background key action \(index) must name its target app")
+                    }
+                case .capture, .ocr:
+                    if action.surface != .macApp {
+                        errors.append("Background \(action.kind.rawValue) action \(index) must target a macOS app")
+                    }
+                    if !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background \(action.kind.rawValue) action \(index) must name its target app")
+                    }
+                case .launchApp:
+                    if action.surface != .macApp || !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background launchApp action \(index) must name a macOS app")
+                    }
+                case .waitFor:
+                    break
+                case .assert:
+                    let condition = action.parameters["condition"]?.stringValue ?? "foregroundApp"
+                    if condition == "foregroundApp" || condition == "iphoneMirroringForeground" {
+                        errors.append("Background assert action \(index) cannot inspect foreground focus")
+                    }
+                    if condition == "ocrContains"
+                        && (action.surface != .macApp || !Self.hasAppParameter(action.parameters)) {
+                        errors.append("Background OCR assert action \(index) must target a named macOS app")
+                    }
+                    if condition == "elementExists" {
+                        if action.surface != .macApp || !Self.hasAppParameter(action.parameters) {
+                            errors.append("Background element assert action \(index) must target a named macOS app")
+                        }
+                        if action.selector?.tier != .accessibility {
+                            errors.append("Background element assert action \(index) requires an Accessibility selector")
+                        }
+                    }
+                }
+            }
+            for (index, assertion) in workflow.assertions.enumerated() {
+                switch assertion.kind {
+                case "foregroundApp", "iphoneMirroringForeground":
+                    errors.append("Background assertion \(index) cannot inspect foreground focus")
+                case "ocrContains":
+                    if assertion.surface != .macApp || !Self.hasAppParameter(assertion.parameters) {
+                        errors.append("Background OCR assertion \(index) must target a named macOS app")
+                    }
+                case "elementExists":
+                    if assertion.surface != .macApp || !Self.hasAppParameter(assertion.parameters) {
+                        errors.append("Background element assertion \(index) must target a named macOS app")
+                    }
+                    if assertion.selector?.tier != .accessibility {
+                        errors.append("Background element assertion \(index) requires an Accessibility selector")
+                    }
+                default:
+                    break
+                }
+            }
+        }
         return WorkflowValidation(
             workflowID: workflow.id,
             valid: errors.isEmpty,
             risk: ActionRiskClassifier.classify(workflow),
             errors: errors
         )
+    }
+
+    private static func hasAppParameter(_ parameters: [String: JSONValue]) -> Bool {
+        guard let app = parameters["app"]?.stringValue else { return false }
+        return !app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func loadExternalWorkflows() -> [WorkflowSpec] {

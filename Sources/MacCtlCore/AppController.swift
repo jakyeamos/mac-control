@@ -5,6 +5,7 @@ public enum AppControllerError: Error, LocalizedError {
     case appNotFound(String)
     case openFailed(String)
     case activationFailed(String)
+    case focusChanged(expected: String, actual: String)
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ public enum AppControllerError: Error, LocalizedError {
             return "Could not open application: \(name)"
         case .activationFailed(let name):
             return "Could not activate application: \(name)"
+        case .focusChanged(let expected, let actual):
+            return "Background application open changed foreground focus from \(expected) to \(actual)"
         }
     }
 }
@@ -54,16 +57,39 @@ public final class AppController {
     }
 
     @discardableResult
-    public func open(_ nameOrBundleID: String) throws -> AppInfo {
+    public func open(
+        _ nameOrBundleID: String,
+        focusPolicy: FocusPolicy = .foreground
+    ) throws -> AppInfo {
         let app = try resolve(nameOrBundleID)
-        let opened = workspace.open(URL(fileURLWithPath: app.path))
-        guard opened else { throw AppControllerError.openFailed(nameOrBundleID) }
-        return app
+        let initialForeground = focusPolicy == .background ? foregroundApplication() : nil
+        let opened: AppInfo
+        if focusPolicy == .background {
+            if let running = runningInfo(for: app) {
+                opened = running
+            } else {
+                opened = try openInBackground(app)
+            }
+        } else {
+            let didOpen = workspace.open(URL(fileURLWithPath: app.path))
+            guard didOpen else { throw AppControllerError.openFailed(nameOrBundleID) }
+            opened = runningInfo(for: app) ?? app
+        }
+        if focusPolicy == .background {
+            let actualForeground = foregroundApplication()
+            guard sameApplication(initialForeground, actualForeground) else {
+                throw AppControllerError.focusChanged(
+                    expected: applicationLabel(initialForeground),
+                    actual: applicationLabel(actualForeground)
+                )
+            }
+        }
+        return opened
     }
 
     @discardableResult
     public func activate(_ nameOrBundleID: String) throws -> AppInfo {
-        let app = try open(nameOrBundleID)
+        let app = try open(nameOrBundleID, focusPolicy: .foreground)
         let deadline = Date().addingTimeInterval(2.0)
         while Date() < deadline {
             if let running = workspace.runningApplications.first(where: {
@@ -84,6 +110,69 @@ public final class AppController {
             return nil
         }
         return appInfo(for: url)
+    }
+
+    private func openInBackground(_ app: AppInfo) throws -> AppInfo {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.addsToRecentItems = false
+        configuration.promptsUserIfNeeded = false
+
+        var launchError: Error?
+        let completion = DispatchSemaphore(value: 0)
+        workspace.openApplication(at: URL(fileURLWithPath: app.path), configuration: configuration) { _, error in
+            launchError = error
+            completion.signal()
+        }
+        guard completion.wait(timeout: .now() + 5) == .success else {
+            throw AppControllerError.openFailed(app.name)
+        }
+        if let launchError {
+            throw AppControllerError.openFailed("\(app.name): \(launchError.localizedDescription)")
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if let running = runningInfo(for: app) {
+                return running
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        throw AppControllerError.openFailed(app.name)
+    }
+
+    private func runningInfo(for app: AppInfo) -> AppInfo? {
+        guard let running = workspace.runningApplications.first(where: {
+            (app.bundleID != nil && $0.bundleIdentifier == app.bundleID)
+                || $0.bundleURL?.path == app.path
+        }) else {
+            return nil
+        }
+        return AppInfo(
+            name: app.name,
+            bundleID: app.bundleID,
+            path: app.path,
+            isRunning: true,
+            processID: running.processIdentifier
+        )
+    }
+
+    private func sameApplication(_ lhs: AppInfo?, _ rhs: AppInfo?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case (let lhs?, let rhs?):
+            if let lhsBundleID = lhs.bundleID, let rhsBundleID = rhs.bundleID {
+                return lhsBundleID == rhsBundleID
+            }
+            return lhs.path == rhs.path || lhs.name == rhs.name
+        default:
+            return false
+        }
+    }
+
+    private func applicationLabel(_ app: AppInfo?) -> String {
+        app?.bundleID ?? app?.path ?? app?.name ?? "none"
     }
 
     private func applicationURLs() -> [URL] {

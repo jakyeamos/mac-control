@@ -18,6 +18,7 @@ public struct OperationReceipt: Codable, Equatable {
     public let source: String?
     public let workflowID: String?
     public let targetSurface: SurfaceKind?
+    public let focusPolicy: FocusPolicy?
     public let risk: RiskLevel?
     public let approvalState: String
     public let executionResult: String
@@ -40,6 +41,7 @@ public struct OperationReceipt: Codable, Equatable {
         case source
         case workflowID
         case targetSurface
+        case focusPolicy
         case risk
         case approvalState
         case executionResult
@@ -62,6 +64,7 @@ public struct OperationReceipt: Codable, Equatable {
         source: String? = nil,
         workflowID: String?,
         targetSurface: SurfaceKind?,
+        focusPolicy: FocusPolicy? = nil,
         risk: RiskLevel?,
         approvalState: String = "not_required",
         executionResult: String = "not_run",
@@ -84,6 +87,7 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = source
         self.workflowID = workflowID
         self.targetSurface = targetSurface
+        self.focusPolicy = focusPolicy
         self.risk = risk
         self.approvalState = approvalState
         self.executionResult = executionResult
@@ -108,6 +112,7 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.workflowID = try container.decodeIfPresent(String.self, forKey: .workflowID)
         self.targetSurface = try container.decodeIfPresent(SurfaceKind.self, forKey: .targetSurface)
+        self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy)
         self.risk = try container.decodeIfPresent(RiskLevel.self, forKey: .risk)
         self.approvalState = try container.decodeIfPresent(String.self, forKey: .approvalState) ?? "not_required"
         self.executionResult = try container.decodeIfPresent(String.self, forKey: .executionResult) ?? "not_run"

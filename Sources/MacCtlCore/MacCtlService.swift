@@ -11,6 +11,7 @@ public final class MacCtlService {
     private let receiptStore: OperationReceiptStore
     private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
+    private let executionLock = NSLock()
 
     public init(
         appController: AppController = AppController(),
@@ -78,14 +79,32 @@ public final class MacCtlService {
                 return try success(request, value: appController.listApplications())
             case "app.open":
                 let name = try requiredString(request, key: "name")
-                let app = try appController.open(name)
-                logger.record(event: "app_opened", metadata: ["app": app.name])
-                return try success(request, value: app)
+                let focusPolicy = try requestedFocusPolicy(from: request) ?? .foreground
+                let app = try withExecutionLock {
+                    try appController.open(name, focusPolicy: focusPolicy)
+                }
+                logger.record(event: "app_opened", metadata: [
+                    "app": app.name,
+                    "focus_policy": focusPolicy.rawValue
+                ])
+                return try success(
+                    request,
+                    value: app,
+                    evidence: [Evidence(
+                        kind: "focus_policy",
+                        message: "Application open used the requested focus policy",
+                        metadata: ["policy": .string(focusPolicy.rawValue)]
+                    )]
+                )
             case "workflow.list":
                 return try success(request, value: workflowRegistry.list())
             case "workflow.validate":
                 let id = try requiredString(request, key: "workflow")
-                return try success(request, value: workflowRegistry.validate(id: id))
+                guard let baseWorkflow = workflowRegistry.workflow(id: id) else {
+                    return try success(request, value: workflowRegistry.validate(id: id))
+                }
+                let workflow = try workflowApplyingRequestedFocusPolicy(baseWorkflow, request: request)
+                return try success(request, value: workflowRegistry.validate(workflow))
             case "workflow.prepare":
                 return try prepareWorkflow(request)
             case "workflow.run":
@@ -106,7 +125,9 @@ public final class MacCtlService {
                 return try success(request, value: iphoneController.state())
             case "iphone.open-app":
                 let appName = try requiredString(request, key: "name")
-                let match = try iphoneController.openMirroredApp(appName)
+                let match = try withExecutionLock {
+                    try iphoneController.openMirroredApp(appName)
+                }
                 return try success(
                     request,
                     result: [
@@ -136,9 +157,10 @@ public final class MacCtlService {
 
     private func prepareWorkflow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let id = try requiredString(request, key: "workflow")
-        guard let workflow = workflowRegistry.workflow(id: id) else {
+        guard let baseWorkflow = workflowRegistry.workflow(id: id) else {
             return failure(request, status: .failed, code: .workflowNotFound, message: "Workflow does not exist")
         }
+        let workflow = try workflowApplyingRequestedFocusPolicy(baseWorkflow, request: request)
         let validation = workflowRegistry.validate(workflow)
         guard validation.valid else {
             return failure(
@@ -168,6 +190,7 @@ public final class MacCtlService {
                 "approval": try JSONValue.fromEncodable(prepared.record),
                 "plan_digest": .string(prepared.planDigest),
                 "risk": .string(validation.risk.rawValue),
+                "focus_policy": .string(workflow.focusPolicy.rawValue),
                 "expires_at": try JSONValue.fromEncodable(prepared.record.expiresAt)
             ],
             evidence: [Evidence(
@@ -180,9 +203,11 @@ public final class MacCtlService {
 
     private func runWorkflow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let id = try requiredString(request, key: "workflow")
-        guard let workflow = workflowRegistry.workflow(id: id) else {
+        guard let baseWorkflow = workflowRegistry.workflow(id: id) else {
             return failure(request, status: .failed, code: .workflowNotFound, message: "Workflow does not exist")
         }
+        let requestedPolicy = try requestedFocusPolicy(from: request)
+        let workflow = baseWorkflow.withFocusPolicy(requestedPolicy ?? baseWorkflow.focusPolicy)
         let validation = workflowRegistry.validate(workflow)
         guard validation.valid else {
             return failure(
@@ -203,20 +228,62 @@ public final class MacCtlService {
                     message: "Sensitive workflow requires workflow.prepare followed by approval.approve"
                 )
             }
+            guard let record = approvalStore.record(for: token) else {
+                return approvalFailure(request, token: token, error: .notFound)
+            }
+            guard record.workflowID == id else {
+                return failure(
+                    request,
+                    status: .blocked,
+                    code: .approvalRequired,
+                    message: "Approval token was prepared for a different workflow",
+                    operationID: record.operationID,
+                    details: [
+                        "requested_workflow_id": .string(id),
+                        "prepared_workflow_id": .string(record.workflowID)
+                    ]
+                )
+            }
+            guard requestedPolicy == nil || requestedPolicy == record.focusPolicy else {
+                return failure(
+                    request,
+                    status: .blocked,
+                    code: .approvalRequired,
+                    message: "Approval token was prepared for a different focus policy",
+                    operationID: record.operationID,
+                    details: [
+                        "requested_focus_policy": .string(requestedPolicy?.rawValue ?? "unknown"),
+                        "prepared_focus_policy": .string(record.focusPolicy.rawValue)
+                    ]
+                )
+            }
             let prepared = try approvalStore.approve(token: token)
+            guard requestedPolicy == nil || requestedPolicy == prepared.workflow.focusPolicy else {
+                return failure(
+                    request,
+                    status: .blocked,
+                    code: .approvalRequired,
+                    message: "Approval token was prepared for a different focus policy",
+                    operationID: prepared.record.operationID,
+                    details: [
+                        "requested_focus_policy": .string(requestedPolicy?.rawValue ?? "unknown"),
+                        "prepared_focus_policy": .string(prepared.workflow.focusPolicy.rawValue)
+                    ]
+                )
+            }
             guard suppliedInputs.isEmpty || suppliedInputs == prepared.ephemeralInputs else {
                 throw WorkflowExecutionError.unsafeInput("ephemeral inputs did not match the prepared plan")
             }
             return try executePrepared(request, prepared: prepared)
         }
-        let report = try workflowExecutor.execute(
-            workflow,
-            ephemeralInputs: suppliedInputs
-        )
+        let report = try executeWorkflow(workflow, ephemeralInputs: suppliedInputs)
         logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["workflow_id"] = .string(workflow.id)
         result["plan_digest"] = .string(ApprovalStore.digest(workflow, ephemeralInputs: suppliedInputs))
+        result["run_id"] = .string(report.runID)
+        result["focus_policy"] = .string(report.focusPolicy.rawValue)
+        result["target_process_ids"] = .array(report.targetProcessIDs.map { .number(Double($0)) })
         return try success(
             request,
             result: result,
@@ -247,7 +314,30 @@ public final class MacCtlService {
                 message: "Prepared plan digest did not match; refusing execution"
             )
         }
-        let report = try workflowExecutor.execute(
+        let requestedPolicy = try requestedFocusPolicy(from: request)
+        guard requestedPolicy == nil || requestedPolicy == prepared.workflow.focusPolicy else {
+            return failure(
+                request,
+                status: .blocked,
+                code: .approvalRequired,
+                message: "Approval token was prepared for a different focus policy",
+                operationID: prepared.record.operationID,
+                details: [
+                    "requested_focus_policy": .string(requestedPolicy?.rawValue ?? "unknown"),
+                    "prepared_focus_policy": .string(prepared.workflow.focusPolicy.rawValue)
+                ]
+            )
+        }
+        guard prepared.record.focusPolicy == prepared.workflow.focusPolicy else {
+            return failure(
+                request,
+                status: .blocked,
+                code: .approvalRequired,
+                message: "Approval record focus policy did not match the prepared workflow",
+                operationID: prepared.record.operationID
+            )
+        }
+        let report = try executeWorkflow(
             prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs
         )
@@ -260,6 +350,9 @@ public final class MacCtlService {
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["workflow_id"] = .string(prepared.workflow.id)
         result["plan_digest"] = .string(prepared.planDigest)
+        result["run_id"] = .string(report.runID)
+        result["focus_policy"] = .string(report.focusPolicy.rawValue)
+        result["target_process_ids"] = .array(report.targetProcessIDs.map { .number(Double($0)) })
         return try success(
             request,
             operationID: prepared.record.operationID,
@@ -327,13 +420,15 @@ public final class MacCtlService {
             capabilities: [
                 "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key",
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
-                "approval.approve", "approval.deny", "iphoneMirroring"
+                "workflow.background", "approval.approve", "approval.deny", "iphoneMirroring"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
             permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
             safety: [
                 "sensitive workflows require a short-lived single-use approval token",
                 "raw coordinates require an explicit coordinate_mode=raw marker",
+                "background workflows require named macOS app targets and preserve foreground focus",
+                "background input is sent to target processes; global mouse, desktop, and foreground paths are rejected",
                 "screenshots and OCR frames are discarded after an operation",
                 "no TCP or network listener is created"
             ]
@@ -449,6 +544,39 @@ public final class MacCtlService {
         return inputs
     }
 
+    private func requestedFocusPolicy(from request: RequestEnvelope) throws -> FocusPolicy? {
+        guard let raw = request.params["focus_policy"] else { return nil }
+        guard let value = raw.stringValue, let policy = FocusPolicy(rawValue: value) else {
+            throw WorkflowExecutionError.unsafeInput(
+                "focus_policy must be either foreground or background"
+            )
+        }
+        return policy
+    }
+
+    private func workflowApplyingRequestedFocusPolicy(
+        _ workflow: WorkflowSpec,
+        request: RequestEnvelope
+    ) throws -> WorkflowSpec {
+        guard let policy = try requestedFocusPolicy(from: request) else { return workflow }
+        return workflow.withFocusPolicy(policy)
+    }
+
+    private func executeWorkflow(
+        _ workflow: WorkflowSpec,
+        ephemeralInputs: [String: String]
+    ) throws -> ExecutionReport {
+        try withExecutionLock {
+            try workflowExecutor.execute(workflow, ephemeralInputs: ephemeralInputs)
+        }
+    }
+
+    private func withExecutionLock<T>(_ operation: () throws -> T) rethrows -> T {
+        executionLock.lock()
+        defer { executionLock.unlock() }
+        return try operation()
+    }
+
     private func recordReceipt(
         for request: RequestEnvelope,
         response: ResponseEnvelope,
@@ -461,6 +589,19 @@ public final class MacCtlService {
             ?? response.result["approval"]?.objectValue?["workflow_id"]?.stringValue
             ?? response.error?.details["workflow_id"]?.stringValue
         let workflow = workflowID.flatMap { workflowRegistry.workflow(id: $0) }
+        let focusPolicy = response.result["focus_policy"]?.stringValue
+            .flatMap(FocusPolicy.init(rawValue:))
+            ?? response.result["focusPolicy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? response.result["approval"]?.objectValue?["focusPolicy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? response.result["approval"]?.objectValue?["focus_policy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? response.error?.details["focus_policy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? request.params["focus_policy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? workflow?.focusPolicy
         let permissions = permissionContext == "daemon"
             ? PermissionDiagnostics.report()
             : PermissionDiagnostics.unknownReport()
@@ -503,6 +644,7 @@ public final class MacCtlService {
             source: receiptSource,
             workflowID: workflowID,
             targetSurface: workflow?.surface,
+            focusPolicy: focusPolicy,
             risk: workflow.map { workflowRegistry.validate($0).risk },
             approvalState: approvalState,
             executionResult: response.status.rawValue,
@@ -575,12 +717,14 @@ public final class MacCtlService {
         code: MacCtlErrorCode,
         message: String,
         operationID: String? = nil,
+        evidence: [Evidence] = [],
         details: [String: JSONValue] = [:]
     ) -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
             operationID: operationID ?? UUID().uuidString,
             status: status,
+            evidence: evidence,
             error: MacCtlError(code: code.rawValue, message: message, details: details)
         )
     }
@@ -591,7 +735,11 @@ public final class MacCtlService {
         error: ApprovalStoreError
     ) -> ResponseEnvelope {
         let record = approvalStore.record(for: token)
-        let details = record.map { ["workflow_id": JSONValue.string($0.workflowID)] } ?? [:]
+        var details: [String: JSONValue] = [:]
+        if let record {
+            details["workflow_id"] = .string(record.workflowID)
+            details["focus_policy"] = .string(record.focusPolicy.rawValue)
+        }
         let code: MacCtlErrorCode
         switch error {
         case .notFound: code = .approvalNotFound
@@ -611,6 +759,8 @@ public final class MacCtlService {
     private func errorResponse(_ request: RequestEnvelope, error: Error) -> ResponseEnvelope {
         let status: OperationStatus
         let code: MacCtlErrorCode
+        var details: [String: JSONValue] = [:]
+        var evidence: [Evidence] = []
         switch error {
         case let error as InputControllerError:
             switch error {
@@ -626,6 +776,28 @@ public final class MacCtlService {
             case .permissionDenied:
                 status = .blocked
                 code = .permissionDenied
+            default:
+                status = .failed
+                code = .operationFailed
+            }
+        case let error as AppControllerError:
+            switch error {
+            case let .focusChanged(expected, actual):
+                status = .blocked
+                code = .focusChanged
+                details["focus_policy"] = .string(FocusPolicy.background.rawValue)
+                details["expected_foreground"] = .string(expected)
+                details["actual_foreground"] = .string(actual)
+                evidence = [Evidence(
+                    kind: "focus_guard",
+                    message: "Application open changed foreground focus; execution was blocked",
+                    source: "macctld",
+                    metadata: [
+                        "policy": .string(FocusPolicy.background.rawValue),
+                        "expected": .string(expected),
+                        "actual": .string(actual)
+                    ]
+                )]
             default:
                 status = .failed
                 code = .operationFailed
@@ -651,15 +823,49 @@ public final class MacCtlService {
             }
         case let error as WorkflowExecutionError:
             status = .blocked
-            if case .unsafeInput = error {
+            switch error {
+            case .invalidWorkflow:
+                code = .workflowInvalid
+            case .unsafeInput:
                 code = .unsafeInput
-            } else {
+            case .backgroundUnsupported:
+                code = .backgroundUnsupported
+                details["focus_policy"] = .string(FocusPolicy.background.rawValue)
+                evidence = [Evidence(
+                    kind: "focus_guard",
+                    message: "Background policy rejected an operation that could not be isolated from foreground focus",
+                    source: "macctld",
+                    metadata: ["policy": .string(FocusPolicy.background.rawValue)]
+                )]
+            case let .focusChanged(expected, actual):
+                code = .focusChanged
+                details["focus_policy"] = .string(FocusPolicy.background.rawValue)
+                details["expected_foreground"] = .string(expected)
+                details["actual_foreground"] = .string(actual)
+                evidence = [Evidence(
+                    kind: "focus_guard",
+                    message: "Background workflow changed foreground focus; execution was blocked",
+                    source: "macctld",
+                    metadata: [
+                        "policy": .string(FocusPolicy.background.rawValue),
+                        "expected": .string(expected),
+                        "actual": .string(actual)
+                    ]
+                )]
+            default:
                 code = .operationFailed
             }
         default:
             status = .failed
             code = .operationFailed
         }
-        return failure(request, status: status, code: code, message: error.localizedDescription)
+        return failure(
+            request,
+            status: status,
+            code: code,
+            message: error.localizedDescription,
+            evidence: evidence,
+            details: details
+        )
     }
 }
