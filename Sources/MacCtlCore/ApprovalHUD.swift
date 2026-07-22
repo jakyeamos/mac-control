@@ -32,6 +32,7 @@ public final class ApprovalHUD: NSObject {
     private var statusItem: NSStatusItem?
     private var currentApproval: ApprovalRecord?
     private var statusLabel: NSTextField?
+    private var expiryTimer: Timer?
     private let capsLockMonitor: CapsLockMonitor
 
     public init(capsLockMonitor: CapsLockMonitor = CapsLockMonitor()) {
@@ -63,6 +64,12 @@ public final class ApprovalHUD: NSObject {
             DispatchQueue.main.async { [weak self] in self?.present(approval) }
             return
         }
+        expiryTimer?.invalidate()
+        expiryTimer = nil
+        guard approval.expiresAt > Date() else {
+            dismissCurrentApproval()
+            return
+        }
         currentApproval = approval
         let window = makePanelIfNeeded()
         let content = makeContent(for: approval)
@@ -72,6 +79,7 @@ public final class ApprovalHUD: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         _ = window.makeFirstResponder(nil)
+        scheduleExpiry(for: approval)
     }
 
     public func bringToFront() {
@@ -102,8 +110,7 @@ public final class ApprovalHUD: NSObject {
         SafeLog().record(event: "approval_hud_action", metadata: ["action": "approve"])
         guard let response = approveHandler?(token) else { return }
         if response.status == .succeeded {
-            currentApproval = nil
-            panel?.orderOut(nil)
+            dismissCurrentApproval()
         } else {
             statusLabel?.stringValue = response.error?.message ?? "Approval failed; operation was not completed"
         }
@@ -118,11 +125,32 @@ public final class ApprovalHUD: NSObject {
         SafeLog().record(event: "approval_hud_action", metadata: ["action": "deny"])
         guard let response = denyHandler?(token) else { return }
         if response.status == .succeeded {
-            currentApproval = nil
-            panel?.orderOut(nil)
+            dismissCurrentApproval()
         } else {
             statusLabel?.stringValue = response.error?.message ?? "Deny failed"
         }
+    }
+
+    private func scheduleExpiry(for approval: ApprovalRecord) {
+        let interval = approval.expiresAt.timeIntervalSinceNow
+        expiryTimer = Timer.scheduledTimer(
+            withTimeInterval: max(interval, 0.01),
+            repeats: false
+        ) { [weak self] _ in
+            guard let self, self.currentApproval?.token == approval.token else { return }
+            if approval.expiresAt <= Date() {
+                self.dismissCurrentApproval()
+            } else {
+                self.scheduleExpiry(for: approval)
+            }
+        }
+    }
+
+    private func dismissCurrentApproval() {
+        expiryTimer?.invalidate()
+        expiryTimer = nil
+        currentApproval = nil
+        panel?.orderOut(nil)
     }
 
     private func makePanelIfNeeded() -> MacCtlPanel {
