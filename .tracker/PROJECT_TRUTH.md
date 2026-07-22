@@ -10,18 +10,14 @@ modified.
 
 ## nextStep
 
-Add \`/Users/jakyeamos/.local/share/macctl/macctld.app\` to the user-approved
-Accessibility and Post Events permissions, then rerun the live semantic-input,
-OCR, Caps Lock, approval-panel, and paired iPhone Mirroring smokes. Screen
-Recording and Input Monitoring are already recognized for the packaged daemon.
-Integrate existing automation only after this generic utility is permissioned
-and proven.
+Rerun the live semantic-input, OCR, Caps Lock, approval-panel, and paired
+iPhone Mirroring smokes now that all required daemon permissions are granted.
+Integrate existing automation only after this generic utility is proven.
 
 ## blockers
 
-- The packaged \`macctld.app\` still lacks Accessibility and Post Events; semantic
-  input and Accessibility-tree actions correctly return blocked results until
-  the user grants access.
+- No current TCC blocker observed; Automation remains user-approved on first
+  AppleScript use and iPhone Mirroring remains session-dependent.
 
 ## risks
 
@@ -44,7 +40,7 @@ and proven.
 | tests | passed | \`swift test\`: 12 tests, 0 failures |
 | pre-commit readiness | passed | \`pre-cr\`: Swift coverage wrapper, lcov, and anti-slop passed |
 | dead-code/safety scan | passed | \`rg\` scan; no TODO/FIXME/fatalError or raw OCR result field |
-| installed smoke | passed with permission gate | packaged daemon/status succeeded; Screen Recording and Input Monitoring granted; Accessibility and Post Events remain blocked |
+| installed smoke | passed | packaged daemon/status succeeded; Accessibility, Post Events, Input Monitoring, and Screen Recording granted |
 
 ## Current State
 
@@ -67,9 +63,9 @@ The initial implementation is committed as \`a68e2d4\`, and the packaged daemon
 slice is committed as \`002efc2\` on \`dev\`; neither has been pushed. The
 LaunchAgent is installed and loaded in the logged-in Aqua session and targets
 the packaged executable. The daemon reports arm64/macOS 26.5.2, advertises all
-three surfaces, and has a live owner-only socket. TCC remains user-controlled;
-Accessibility and Post Events are the current live blockers for semantic input
-and Accessibility-tree actions.
+three surfaces, and has a live owner-only socket. All four required daemon TCC
+checks are granted; the remaining validation is the live semantic and iPhone
+Mirroring smoke pass.
 
 ## Recent Progress
 
@@ -89,3 +85,5 @@ and Accessibility-tree actions.
 - Packaged \`macctld\` as a signed \`macctld.app\` with stable bundle identity,
   moved LaunchAgent execution to its bundled executable, removed the legacy
   bare daemon, and verified the installed bundle plus 12 passing tests.
+- Authenticated the new bundle in System Settings, added it to Accessibility,
+  and verified the packaged daemon reports all four required TCC checks granted.
