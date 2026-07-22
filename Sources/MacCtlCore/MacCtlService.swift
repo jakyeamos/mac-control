@@ -1,0 +1,424 @@
+import Foundation
+
+public final class MacCtlService {
+    private let appController: AppController
+    private let workflowRegistry: WorkflowRegistry
+    private let workflowExecutor: WorkflowExecutor
+    private let approvalStore: ApprovalStore
+    private let iphoneController: IPhoneMirroringController
+    private let launchAgentManager: LaunchAgentManager
+    private let logger: SafeLog
+    private let presentApproval: ((ApprovalRecord) -> Void)?
+
+    public init(
+        appController: AppController = AppController(),
+        workflowRegistry: WorkflowRegistry = WorkflowRegistry(),
+        approvalStore: ApprovalStore = ApprovalStore(),
+        presentApproval: ((ApprovalRecord) -> Void)? = nil,
+        logger: SafeLog = SafeLog()
+    ) {
+        self.appController = appController
+        self.workflowRegistry = workflowRegistry
+        self.approvalStore = approvalStore
+        self.presentApproval = presentApproval
+        self.logger = logger
+        let inputController = InputController()
+        let captureController = CaptureController(appController: appController)
+        let resolvedIPhoneController = IPhoneMirroringController(
+            appController: appController,
+            captureController: captureController,
+            inputController: inputController
+        )
+        self.iphoneController = resolvedIPhoneController
+        self.workflowExecutor = WorkflowExecutor(
+            appController: appController,
+            inputController: inputController,
+            captureController: captureController,
+            iphoneController: resolvedIPhoneController
+        )
+        self.launchAgentManager = LaunchAgentManager()
+    }
+
+    public func handle(_ request: RequestEnvelope) -> ResponseEnvelope {
+        guard request.schemaVersion == 1 else {
+            return failure(
+                request,
+                status: .failed,
+                code: .invalidRequest,
+                message: "Unsupported schema_version; expected 1"
+            )
+        }
+        do {
+            switch request.method {
+            case "doctor":
+                return try success(request, value: doctorReport())
+            case "capabilities":
+                return try success(request, value: capabilityReport())
+            case "status":
+                return try success(request, value: daemonStatus())
+            case "app.list":
+                return try success(request, value: appController.listApplications())
+            case "app.open":
+                let name = try requiredString(request, key: "name")
+                let app = try appController.open(name)
+                logger.record(event: "app_opened", metadata: ["app": app.name])
+                return try success(request, value: app)
+            case "workflow.list":
+                return try success(request, value: workflowRegistry.list())
+            case "workflow.validate":
+                let id = try requiredString(request, key: "workflow")
+                return try success(request, value: workflowRegistry.validate(id: id))
+            case "workflow.prepare":
+                return try prepareWorkflow(request)
+            case "workflow.run":
+                return try runWorkflow(request)
+            case "approval.list":
+                return try success(request, value: approvalStore.list())
+            case "approval.approve":
+                return try approve(request)
+            case "approval.deny":
+                return try deny(request)
+            case "logs":
+                return try success(request, value: ["lines": logger.tail()])
+            case "iphone.status":
+                return try success(request, value: iphoneController.state())
+            case "iphone.open-app":
+                let appName = try requiredString(request, key: "name")
+                let match = try iphoneController.openMirroredApp(appName)
+                return try success(
+                    request,
+                    result: [
+                        "app": .string(appName),
+                        "anchor_x": .number(Double(match.bounds.midX)),
+                        "anchor_y": .number(Double(match.bounds.midY))
+                    ],
+                    evidence: [Evidence(
+                        kind: "ocr_anchor",
+                        message: "Mirrored app located and clicked by OCR",
+                        source: "iPhone Mirroring"
+                    )]
+                )
+            default:
+                return failure(
+                    request,
+                    status: .failed,
+                    code: .unsupportedMethod,
+                    message: "Unsupported method: \(request.method)"
+                )
+            }
+        } catch {
+            return errorResponse(request, error: error)
+        }
+    }
+
+    public func localReadOnlyHandle(_ request: RequestEnvelope) -> ResponseEnvelope {
+        handle(request)
+    }
+
+    private func prepareWorkflow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let id = try requiredString(request, key: "workflow")
+        guard let workflow = workflowRegistry.workflow(id: id) else {
+            return failure(request, status: .failed, code: .workflowNotFound, message: "Workflow does not exist")
+        }
+        let validation = workflowRegistry.validate(workflow)
+        guard validation.valid else {
+            return failure(
+                request,
+                status: .failed,
+                code: .workflowInvalid,
+                message: "Workflow validation failed",
+                details: ["errors": .array(validation.errors.map(JSONValue.string))]
+            )
+        }
+        let prepared = approvalStore.prepare(
+            workflow: workflow,
+            ephemeralInputs: try ephemeralInputs(from: request),
+            operationID: UUID().uuidString
+        )
+        presentApproval?(prepared.record)
+        logger.record(event: "approval_prepared", metadata: [
+            "workflow": workflow.id,
+            "risk": validation.risk.rawValue,
+            "operation_id": prepared.record.operationID
+        ])
+        return try success(
+            request,
+            status: .prepared,
+            result: [
+                "approval": try JSONValue.fromEncodable(prepared.record),
+                "plan_digest": .string(prepared.planDigest),
+                "risk": .string(validation.risk.rawValue),
+                "expires_at": try JSONValue.fromEncodable(prepared.record.expiresAt)
+            ],
+            evidence: [Evidence(
+                kind: "approval",
+                message: "Exact workflow plan prepared; approval is required before execution",
+                metadata: ["risk": .string(validation.risk.rawValue)]
+            )]
+        )
+    }
+
+    private func runWorkflow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let id = try requiredString(request, key: "workflow")
+        guard let workflow = workflowRegistry.workflow(id: id) else {
+            return failure(request, status: .failed, code: .workflowNotFound, message: "Workflow does not exist")
+        }
+        let validation = workflowRegistry.validate(workflow)
+        guard validation.valid else {
+            return failure(
+                request,
+                status: .failed,
+                code: .workflowInvalid,
+                message: "Workflow validation failed",
+                details: ["errors": .array(validation.errors.map(JSONValue.string))]
+            )
+        }
+        if validation.risk == .sensitive {
+            guard let token = request.params["approval_token"]?.stringValue else {
+                return failure(
+                    request,
+                    status: .blocked,
+                    code: .approvalRequired,
+                    message: "Sensitive workflow requires workflow.prepare followed by approval.approve"
+                )
+            }
+            let prepared = try approvalStore.approve(token: token)
+            let suppliedInputs = try ephemeralInputs(from: request)
+            guard suppliedInputs.isEmpty || suppliedInputs == prepared.ephemeralInputs else {
+                throw WorkflowExecutionError.unsafeInput("ephemeral inputs did not match the prepared plan")
+            }
+            return try executePrepared(request, prepared: prepared)
+        }
+        let report = try workflowExecutor.execute(
+            workflow,
+            ephemeralInputs: try ephemeralInputs(from: request)
+        )
+        logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
+        return try success(
+            request,
+            value: report,
+            evidence: report.evidence
+        )
+    }
+
+    private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let token = try requiredString(request, key: "token")
+        let prepared = try approvalStore.approve(token: token)
+        return try executePrepared(request, prepared: prepared)
+    }
+
+    private func executePrepared(_ request: RequestEnvelope, prepared: PreparedApproval) throws -> ResponseEnvelope {
+        let digest = ApprovalStore.digest(
+            prepared.workflow,
+            ephemeralInputs: prepared.ephemeralInputs
+        )
+        guard digest == prepared.planDigest else {
+            return failure(
+                request,
+                status: .blocked,
+                code: .approvalRequired,
+                message: "Prepared plan digest did not match; refusing execution"
+            )
+        }
+        let report = try workflowExecutor.execute(
+            prepared.workflow,
+            ephemeralInputs: prepared.ephemeralInputs
+        )
+        let source = request.params["source"]?.stringValue ?? "cli"
+        logger.record(event: "approved_workflow_succeeded", metadata: [
+            "workflow": prepared.workflow.id,
+            "operation_id": prepared.record.operationID,
+            "source": source
+        ])
+        return try success(request, value: report, evidence: report.evidence)
+    }
+
+    private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let token = try requiredString(request, key: "token")
+        let record = try approvalStore.deny(token: token)
+        logger.record(event: "approval_denied", metadata: [
+            "workflow": record.workflowID,
+            "source": request.params["source"]?.stringValue ?? "cli"
+        ])
+        return try success(
+            request,
+            result: ["denied": .bool(true), "workflow": .string(record.workflowID)],
+            evidence: [Evidence(kind: "approval", message: "Approval token denied")]
+        )
+    }
+
+    private func doctorReport() -> DoctorReport {
+        #if arch(arm64)
+        let architecture = "arm64"
+        #elseif arch(x86_64)
+        let architecture = "x86_64"
+        #else
+        let architecture = "unknown"
+        #endif
+        let warnings = PermissionDiagnostics.report()
+            .filter { $0.state == "missing" }
+            .map { "\($0.name) permission is missing" }
+        return DoctorReport(
+            processID: ProcessInfo.processInfo.processIdentifier,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            socketPath: MacCtlPaths.socketURL.path,
+            socketOwnerOnly: !FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
+                || MacCtlPaths.ownerOnlySocketPath(),
+            permissions: PermissionDiagnostics.report(),
+            availableFrameworks: [
+                "AppKit", "ApplicationServices", "CoreGraphics", "ScreenCaptureKit", "Vision", "Foundation"
+            ],
+            warnings: warnings
+        )
+    }
+
+    private func capabilityReport() -> CapabilityReport {
+        CapabilityReport(
+            capabilities: [
+                "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key",
+                "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
+                "approval.approve", "approval.deny", "iphoneMirroring"
+            ],
+            optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
+            permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
+            safety: [
+                "sensitive workflows require a short-lived single-use approval token",
+                "raw coordinates require an explicit coordinate_mode=raw marker",
+                "screenshots and OCR frames are discarded after an operation",
+                "no TCP or network listener is created"
+            ]
+        )
+    }
+
+    private func daemonStatus() -> DaemonStatus {
+        DaemonStatus(
+            daemonName: "macctld",
+            processID: ProcessInfo.processInfo.processIdentifier,
+            socketPath: MacCtlPaths.socketURL.path,
+            socketExists: FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path),
+            approvalCount: approvalStore.list().count,
+            supportedSurfaces: SurfaceKind.allCases
+        )
+    }
+
+    private func requiredString(_ request: RequestEnvelope, key: String) throws -> String {
+        guard let value = request.params[key]?.stringValue,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkflowExecutionError.missingParameter(key)
+        }
+        return value
+    }
+
+    private func ephemeralInputs(from request: RequestEnvelope) throws -> [String: String] {
+        guard let raw = request.params["ephemeral_inputs"] else { return [:] }
+        guard let object = raw.objectValue else {
+            throw WorkflowExecutionError.unsafeInput("ephemeral_inputs must be an object of strings")
+        }
+        var inputs: [String: String] = [:]
+        for (key, value) in object {
+            guard !key.isEmpty, let string = value.stringValue else {
+                throw WorkflowExecutionError.unsafeInput("ephemeral_inputs must contain only string values")
+            }
+            inputs[key] = string
+        }
+        return inputs
+    }
+
+    private func success<T: Encodable>(
+        _ request: RequestEnvelope,
+        status: OperationStatus = .succeeded,
+        value: T,
+        evidence: [Evidence] = []
+    ) throws -> ResponseEnvelope {
+        ResponseEnvelope(
+            requestID: request.requestID,
+            status: status,
+            result: try JSONValue.fromEncodable(value),
+            evidence: evidence
+        )
+    }
+
+    private func success(
+        _ request: RequestEnvelope,
+        status: OperationStatus = .succeeded,
+        result: [String: JSONValue],
+        evidence: [Evidence] = []
+    ) throws -> ResponseEnvelope {
+        ResponseEnvelope(
+            requestID: request.requestID,
+            status: status,
+            result: .object(result),
+            evidence: evidence
+        )
+    }
+
+    private func failure(
+        _ request: RequestEnvelope,
+        status: OperationStatus,
+        code: MacCtlErrorCode,
+        message: String,
+        details: [String: JSONValue] = [:]
+    ) -> ResponseEnvelope {
+        ResponseEnvelope(
+            requestID: request.requestID,
+            status: status,
+            error: MacCtlError(code: code.rawValue, message: message, details: details)
+        )
+    }
+
+    private func errorResponse(_ request: RequestEnvelope, error: Error) -> ResponseEnvelope {
+        let status: OperationStatus
+        let code: MacCtlErrorCode
+        switch error {
+        case let error as InputControllerError:
+            switch error {
+            case .permissionDenied:
+                status = .blocked
+                code = .permissionDenied
+            default:
+                status = .failed
+                code = .operationFailed
+            }
+        case let error as AccessibilityControllerError:
+            switch error {
+            case .permissionDenied:
+                status = .blocked
+                code = .permissionDenied
+            default:
+                status = .failed
+                code = .operationFailed
+            }
+        case let error as CaptureControllerError:
+            switch error {
+            case .permissionDenied:
+                status = .blocked
+                code = .permissionDenied
+            default:
+                status = .failed
+                code = .operationFailed
+            }
+        case is IPhoneMirroringError:
+            status = .blocked
+            code = .operationFailed
+        case let error as ApprovalStoreError:
+            status = .blocked
+            switch error {
+            case .notFound: code = .approvalNotFound
+            case .expired: code = .approvalExpired
+            case .alreadyUsed: code = .approvalAlreadyUsed
+            }
+        case let error as WorkflowExecutionError:
+            status = .blocked
+            if case .unsafeInput = error {
+                code = .unsafeInput
+            } else {
+                code = .operationFailed
+            }
+        default:
+            status = .failed
+            code = .operationFailed
+        }
+        return failure(request, status: status, code: code, message: error.localizedDescription)
+    }
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "testCommand": "./scripts/test-with-coverage.sh",
+  "coveragePaths": [
+    "coverage/lcov.info"
+  ],
+  "coverageFormat": "auto",
+  "threshold": 0,
+  "checks": {
+    "coverage": false,
+    "security": true,
+    "checklist": true
+  },
+  "excludePatterns": [
+    "**/.build/**",
+    "**/.swiftpm/**",
+    "**/.aios/**",
+    "**/Tests/**"
+  ]
+}
