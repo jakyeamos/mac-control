@@ -10,8 +10,8 @@ AF_UNIX socket with durable/redacted receipts. Accessibility, Input Monitoring,
 Post Events, and Screen Recording were re-registered once for that identity and
 remained granted after a fresh rebuild, reinstall, and launchd restart. The
 receipt lifecycle now preserves prepare, approval, denial, and expiry evidence
-as separate records; the current release window still needs fresh prepared
-evidence for `approval.smoke`.
+as separate records. Fresh `approval.smoke` prepared and HUD-denial evidence
+now passes the approval safety gate.
 The approval HUD now schedules token-scoped expiry and removes the panel when a
 pending approval expires, implemented in commit `de7d5f4`.
 Focus-preserving background workflows are implemented in commit `5a153f3`:
@@ -27,22 +27,20 @@ local macOS interaction.
 ## nextStep
 
 Lock the physical iPhone so the active consumer Mirroring session can connect,
-restore the missing prepared evidence for `approval.smoke`, then rerun the
-user-gated `iphone.open-tinder` foreground-only workflow and
-`macctl release check --json`. The background workflow runtime evidence is now
-fresh; rerun the TMCP local-product re-score after the remaining release gates
-are refreshed.
+then rerun the user-gated `iphone.open-tinder` foreground-only workflow and
+`macctl release check --json`. The background and approval workflow runtime
+evidence is fresh; rerun the TMCP local-product re-score after the remaining
+release gate is refreshed.
 
 ## blockers
 
-- `macctl release check --json` is blocked with 2 checks: fresh
+- `macctl release check --json` is blocked with 1 check: fresh
   `iphone.open-tinder` evidence is missing because iPhone Mirroring reports
-  that the iPhone is in use and must be locked to connect; `approval.smoke` is
-  missing prepared evidence in the current receipt window.
+  that the iPhone is in use and must be locked to connect.
 - Finder, TextEdit, System Settings, Google Chrome, and Notes workflows pass
   with fresh evidence. Approval HUD, denial, expiry, and fail-closed behavior
-  remain covered by implementation/tests and prior receipts; the current
-  release window still reports `approval.smoke` missing prepared evidence.
+  remain covered by implementation/tests and fresh receipts; `approval.safety`
+  now passes in the current release window.
 
 ## risks
 
@@ -71,14 +69,14 @@ are refreshed.
 | tests | passed | `swift test`: 26 tests, 0 failures |
 | pre-commit readiness | passed | commit `5a153f3` Pre-CR gate passed |
 | launchd/socket/transport | passed | Apple Development identity active; socket mode 0600; no TCP listener |
-| receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 191 files, invalid count 0, pending prune 0 |
+| receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 209 files, invalid count 0, pending prune 0 |
 | daemon permissions | passed | daemon-authoritative doctor reports Accessibility/Input Monitoring/Post Events/Screen Recording granted after reinstall |
 | Mac live smokes | passed | Finder/TextEdit/System Settings/Google Chrome/Notes passed |
 | iPhone Mirroring | blocked | Mirroring window detected but connection is paused because the iPhone is in use; lock it and rerun the foreground-only Tinder smoke |
 | approval/HUD/Caps Lock | passed | `approval.smoke` prepare, HUD approve/deny, expiry, and direct fail-closed evidence are fresh; Caps Lock timing/state-preservation tests pass |
 | background workflow contract | passed | Live installed-daemon Calculator launch/wait preserved `com.openai.codex` foreground focus before and after; receipt records background policy, daemon context, signed identity, and target PID 8554 |
-| Tier-1 release gate | blocked | `blockerCount=2`, `passed=false`, generated 2026-07-22T22:41:39Z; `live.iphone-mirroring` and missing `approval.smoke` prepared evidence remain blocked |
-| TMCP local-product re-score | pending | rerun after the remaining release gates are refreshed; prior blocked receipt remains `tmcp-review-plan-b25509ba` |
+| Tier-1 release gate | blocked | `blockerCount=1`, `passed=false`, generated 2026-07-22T22:48:40Z; only `live.iphone-mirroring` remains blocked |
+| TMCP local-product re-score | pending | rerun after the iPhone Mirroring gate is refreshed; prior blocked receipt remains `tmcp-review-plan-b25509ba` |
 | legal calculation safety | N/A | macctl has no legal or calculation subsystem |
 
 ## Current State
@@ -110,14 +108,13 @@ and healthy owner-only receipt storage. The live background workflow receipt
 records Calculator PID 8554, `background` focus policy, and the unchanged
 `com.openai.codex` foreground app before and after execution; the temporary
 workflow was removed and Calculator was closed after the smoke. No changes were
-pushed. Release readiness remains blocked by the iPhone and approval-evidence
-conditions recorded above. Final TMCP artifacts are in
+pushed. Release readiness remains blocked only by the iPhone condition recorded
+above. Final TMCP artifacts are in
 `/private/tmp/macctl-tmcp-tier1-final-local/`; the advisory TMCP receipt is
 `/Users/jakyeamos/.tmcp/receipts/2026-07/tmcp-review-plan-b25509ba-dcc090fbb1386edb0eddec27dd93f662-1c251938a5-f145b4cdee644a84b032bfb99f94ffc8.json`.
 
 ## Recent Progress
 
-- Made doctor/status permission and runtime reporting daemon-authoritative and fail closed when unavailable.
 - Added schema-versioned atomic redacted receipts, backward-compatible decoding, retention, listing, diagnostics, and operation/request-keyed lifecycle records.
 - Added the machine-readable Tier-1 release gate for identity, transport, TCC, receipts, live smokes, iPhone Mirroring, and approval safety.
 - Added local-product policy documentation with explicit legal-calculation N/A mapping.
@@ -132,3 +129,4 @@ conditions recorded above. Final TMCP artifacts are in
 - Added automatic ApprovalHUD dismissal at approval-token expiry and committed it as `de7d5f4`; release build, coverage tests, and Pre-CR passed.
 - Added focus-preserving background workflows, fail-closed global-input validation, policy-bound approvals/receipts, CLI flags, and token-admission regression coverage in `5a153f3`; release build, 26 tests, and Pre-CR passed.
 - Installed and restarted the `5a153f3` packaged daemon; daemon-authoritative checks passed, and the live Calculator background smoke preserved `com.openai.codex` foreground focus before and after execution.
+- Refreshed `approval.smoke` prepared evidence and completed HUD denial; `approval.safety` now passes and only the iPhone Mirroring gate remains blocked.
