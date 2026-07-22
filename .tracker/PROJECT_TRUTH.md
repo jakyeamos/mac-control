@@ -3,23 +3,25 @@
 ## summary
 
 Standalone native Swift command-first Mac control plane implemented on \`dev\`.
-\`macctl\` is the CLI, \`macctld\` is the per-user AppKit daemon, and the runtime
-uses an owner-only Unix socket with fail-closed GUI, approval, capture, and
-iPhone Mirroring boundaries. AIOS and career-ops were not modified.
+\`macctl\` is the CLI, \`macctld\` is the packaged per-user AppKit daemon, and
+the runtime uses an owner-only Unix socket with fail-closed GUI, approval,
+capture, and iPhone Mirroring boundaries. AIOS and career-ops were not
+modified.
 
 ## nextStep
 
-Grant the installed \`/Users/jakyeamos/.local/bin/macctld\` the user-approved
-Accessibility, Post Events, Screen Recording, and Input Monitoring permissions,
-then rerun the live semantic-input, OCR, Caps Lock, approval-panel, and paired
-iPhone Mirroring smokes. Integrate existing automation only after this generic
-utility is permissioned and proven.
+Add \`/Users/jakyeamos/.local/share/macctl/macctld.app\` to the user-approved
+Accessibility and Post Events permissions, then rerun the live semantic-input,
+OCR, Caps Lock, approval-panel, and paired iPhone Mirroring smokes. Screen
+Recording and Input Monitoring are already recognized for the packaged daemon.
+Integrate existing automation only after this generic utility is permissioned
+and proven.
 
 ## blockers
 
-- Installed \`macctld\` lacks the four TCC permissions needed for semantic input,
-  OCR/capture, and global Caps Lock monitoring; those operations correctly
-  return blocked results until the user grants access.
+- The packaged \`macctld.app\` still lacks Accessibility and Post Events; semantic
+  input and Accessibility-tree actions correctly return blocked results until
+  the user grants access.
 
 ## risks
 
@@ -39,17 +41,19 @@ utility is permissioned and proven.
 | --- | --- | --- |
 | formatter/lint | not configured | Swift package has no formatter/linter dependency |
 | typecheck/build | passed | \`swift build\` completed without warnings |
-| tests | passed | \`swift test\`: 11 tests, 0 failures |
+| tests | passed | \`swift test\`: 12 tests, 0 failures |
 | pre-commit readiness | passed | \`pre-cr\`: Swift coverage wrapper, lcov, and anti-slop passed |
 | dead-code/safety scan | passed | \`rg\` scan; no TODO/FIXME/fatalError or raw OCR result field |
-| installed smoke | passed with permission gate | doctor/status/Finder succeeded; Tinder blocked at Screen Recording |
+| installed smoke | passed with permission gate | packaged daemon/status succeeded; Screen Recording and Input Monitoring granted; Accessibility and Post Events remain blocked |
 
 ## Current State
 
 - Source root: /Users/jakyeamos/projects/mac-control
 - Branch: \`dev\`
 - Runtime: Swift Package Manager, macOS native frameworks first
-- Binaries: \`/Users/jakyeamos/.local/bin/macctl\` and \`macctld\`
+- CLI: \`/Users/jakyeamos/.local/bin/macctl\`
+- Daemon bundle: \`/Users/jakyeamos/.local/share/macctl/macctld.app\`
+- Daemon executable: \`/Users/jakyeamos/.local/share/macctl/macctld.app/Contents/MacOS/macctld\`
 - LaunchAgent: \`~/Library/LaunchAgents/com.jakyeamos.macctl.daemon.plist\`
 - Socket: \`~/Library/Application Support/macctl/macctld.sock\` with mode 0600
 - Log: \`~/Library/Logs/macctl/macctld.log\` with mode 0600
@@ -59,11 +63,13 @@ utility is permissioned and proven.
 
 ## Current Position
 
-The initial implementation is committed as \`a68e2d4\` on \`dev\` and has not
-been pushed. The LaunchAgent is installed and loaded in the logged-in Aqua session. The
-installed daemon reports arm64/macOS 26.5.2, advertises all three surfaces,
-and passes the reversible Finder workflow. TCC remains user-controlled and is
-the only live blocker for input, capture/OCR, Caps Lock, and the Tinder smoke.
+The initial implementation is committed as \`a68e2d4\`, and the packaged daemon
+slice is committed as \`002efc2\` on \`dev\`; neither has been pushed. The
+LaunchAgent is installed and loaded in the logged-in Aqua session and targets
+the packaged executable. The daemon reports arm64/macOS 26.5.2, advertises all
+three surfaces, and has a live owner-only socket. TCC remains user-controlled;
+Accessibility and Post Events are the current live blockers for semantic input
+and Accessibility-tree actions.
 
 ## Recent Progress
 
@@ -77,6 +83,9 @@ the only live blocker for input, capture/OCR, Caps Lock, and the Tinder smoke.
   front-door activation.
 - Added Finder/TextEdit/System Settings/Safari/Notes recipes and the
   user-gated iPhone Mirroring Tinder foreground/visibility recipe.
-- Verified \`swift build\`, \`swift test\` (11/11), LaunchAgent/socket permissions,
+- Verified \`swift build\`, \`swift test\` (12/12), LaunchAgent/socket permissions,
   daemon status, doctor diagnostics, Finder success, and Tinder fail-closed
   behavior; restored Finder afterward.
+- Packaged \`macctld\` as a signed \`macctld.app\` with stable bundle identity,
+  moved LaunchAgent execution to its bundled executable, removed the legacy
+  bare daemon, and verified the installed bundle plus 12 passing tests.
