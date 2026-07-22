@@ -10,28 +10,41 @@ AF_UNIX socket with durable/redacted receipts. Accessibility, Input Monitoring,
 Post Events, and Screen Recording were re-registered once for that identity and
 remained granted after a fresh rebuild, reinstall, and launchd restart. The
 receipt lifecycle now preserves prepare, approval, denial, and expiry evidence
-as separate records, and the approval safety gate passes with fresh evidence.
-The verified gate remains blocked only by the physical iPhone Mirroring/Tinder
-smoke. AIOS and career-ops were not modified.
+as separate redacted operation records. The latest gate status is recorded
+below and must be treated as authoritative for release readiness.
+The isolated `macctl/mirroring-focus-fix` slice hardens window focus, Spotlight
+field targeting, off-screen recovery, and physical-keycode typing; its live
+Tinder smoke remains unverified because another active Codex task is driving
+the shared Mirroring surface. The latest release check also could not reach the
+daemon-authoritative doctor/status endpoints, so the current gate is not
+admissible even though launchd still reports the packaged daemon running. AIOS
+and career-ops were not modified.
 
 ## nextStep
 
-Lock the physical iPhone so the active consumer Mirroring session can connect,
-then run the user-gated `iphone.open-tinder` foreground-only workflow. Rerun
-`macctl release check --json` and the TMCP local-product re-score after the
-fresh Tinder receipt exists. Normal rebuilds and reinstalls can now reuse the
-persisted signing identity without another TCC grant, provided the certificate,
-bundle ID, and installation path stay stable.
+Wait until the concurrent Mac UI task has released the Mirroring surface and
+the daemon socket is responsive. Integrate this branch, reverify daemon-only
+doctor/status permissions, refresh approval safety evidence, then run the
+user-gated `iphone.open-tinder` foreground-only workflow. Rerun
+`macctl release check --json` and the TMCP local-product re-score only after
+those checks pass. Normal rebuilds and reinstalls can reuse the persisted
+signing identity without another TCC grant while the certificate, bundle ID,
+and installation path stay stable.
 
 ## blockers
 
-- `macctl release check --json` is blocked with 1 check: fresh
-  `iphone.open-tinder` evidence is missing because iPhone Mirroring reports
-  that the iPhone is in use and must be locked to connect.
+- The latest `macctl release check --json` at `2026-07-22T19:26:40Z` reports
+  `blockerCount=5`: daemon socket response, daemon identity, daemon
+  permissions, fresh `iphone.open-tinder` evidence, and the `prepared` approval
+  receipt are blocked or missing. `launchctl print` still reports the packaged
+  daemon executable running as PID 9750, but that does not substitute for a
+  successful daemon-authoritative response.
+- Current receipt inspection contains HUD approval, denial, expiry, and
+  fail-closed records, but no retained `workflow.prepare` record matching the
+  approval gate. Do not manufacture one while another task controls the UI.
 - Finder, TextEdit, System Settings, Google Chrome, and Notes workflows pass
-  with fresh evidence. Approval HUD, denial, expiry, and fail-closed evidence
-  now pass the release gate; Caps Lock timing/state-preservation remains covered
-  by the unit test contract.
+  with fresh evidence. Caps Lock timing/state-preservation remains covered by
+  the unit test contract.
 
 ## risks
 
@@ -39,7 +52,8 @@ bundle ID, and installation path stay stable.
   certificate, bundle identifier, or installation path changes; unchanged
   stable-signed rebuilds were verified to retain the grants.
 - iPhone Mirroring is session- and window-discovery-dependent; no Tinder action
-  beyond foreground/visibility verification is permitted.
+  beyond foreground/visibility verification is permitted. Live evidence is
+  not attributable while another task controls the same mirrored window.
 - Scriptable-app and custom-rendered-app live evidence must not be
   represented by synthetic receipts.
 
@@ -52,24 +66,24 @@ bundle ID, and installation path stay stable.
 | check | status | evidence |
 | --- | --- | --- |
 | formatter/lint | not configured | Swift package has no formatter/linter dependency |
-| typecheck/build | passed | `swift build -c release` completed successfully |
-| tests | passed | `swift test`: 22 tests, 0 failures |
-| pre-commit readiness | passed | commit `81924c8` Pre-CR gate passed |
-| launchd/socket/transport | passed | Apple Development identity active; socket mode 0600; no TCP listener |
-| receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 143 files, invalid count 0, pending prune 0 |
-| daemon permissions | passed | daemon-authoritative doctor reports Accessibility/Input Monitoring/Post Events/Screen Recording granted after reinstall |
+| typecheck/build | passed | isolated `swift build -c release` completed successfully |
+| tests | passed | isolated `swift test`: 23 tests, 0 failures |
+| pre-commit readiness | passed | commit `bff0f60` Pre-CR gate passed |
+| launchd/socket/transport | blocked | launchd identity and socket mode 0600 pass, but the current release check could not obtain a daemon response; no TCP listener |
+| receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 168 files, invalid count 0, pending prune 0 |
+| daemon permissions | blocked | daemon-authoritative doctor/status could not be reached; permission context is unknown for the current gate |
 | Mac live smokes | passed | Finder/TextEdit/System Settings/Google Chrome/Notes passed |
-| iPhone Mirroring | blocked | Mirroring window detected but connection is paused because the iPhone is in use; lock it and rerun the foreground-only Tinder smoke |
-| approval/HUD/Caps Lock | passed | `approval.smoke` prepare, HUD approve/deny, expiry, and direct fail-closed evidence are fresh; Caps Lock timing/state-preservation tests pass |
-| Tier-1 release gate | blocked | `blockerCount=1`, `passed=false`, generated 2026-07-22T17:08:23Z; only `live.iphone-mirroring` is blocked |
-| TMCP local-product re-score | pending | rerun after the two remaining live evidence blockers are cleared; prior blocked receipt remains `tmcp-review-plan-b25509ba` |
+| iPhone Mirroring | blocked | Focus/field/keycode fix is built and installed, but live evidence is not attributable while another active task changes the shared Mirroring query; no Tinder action was attempted |
+| approval/HUD/Caps Lock | blocked | HUD approve/deny, expiry, and direct fail-closed records exist, but the current gate is missing fresh `workflow.prepare` evidence; Caps Lock timing/state-preservation tests pass |
+| Tier-1 release gate | blocked | `blockerCount=5`, `passed=false`, generated 2026-07-22T19:26:40Z; daemon response/permissions, Tinder, and approval-prepared evidence are unresolved |
+| TMCP local-product re-score | pending | rerun after the current daemon, approval, and iPhone evidence blockers are cleared; prior blocked receipt remains `tmcp-review-plan-b25509ba` |
 | legal calculation safety | N/A | macctl has no legal or calculation subsystem |
 
 ## Current State
 
 - Source root: /Users/jakyeamos/projects/mac-control
-- Branch: `dev`
-- Latest implementation commit: `81924c8`
+- Branch: `macctl/mirroring-focus-fix` (isolated worktree; integration target `dev`)
+- Latest implementation commit: `bff0f60`
 - Runtime: Swift Package Manager, macOS native frameworks first
 - CLI: `/Users/jakyeamos/.local/bin/macctl`
 - Daemon bundle: `/Users/jakyeamos/.local/share/macctl/macctld.app`
@@ -87,13 +101,13 @@ bundle ID, and installation path stay stable.
 
 ## Current Position
 
-The packaged daemon is installed and loaded in the logged-in Aqua session. The
-last verified launchd status matched the packaged executable and bundle identity
-with PID 10958; the daemon answered through the owner-only socket and retained
-all four required TCC grants after reinstall. Receipt storage is healthy and the
-approval safety evidence is complete. No changes were pushed. Release readiness
-remains blocked by the live iPhone condition recorded above, not by stale
-metadata. Final TMCP artifacts are in
+The packaged daemon is installed and launchd reports the packaged executable
+and bundle identity with PID 9750. The latest release check could not obtain a
+daemon-authoritative response, so current permission state is unknown despite
+the earlier stable-signing/TCC verification. Receipt storage is healthy. No
+changes were pushed or merged. Release readiness remains blocked by the
+daemon-response, approval-evidence, and unattributable live iPhone conditions
+recorded above. Final TMCP artifacts are in
 `/private/tmp/macctl-tmcp-tier1-final-local/`; the advisory TMCP receipt is
 `/Users/jakyeamos/.tmcp/receipts/2026-07/tmcp-review-plan-b25509ba-dcc090fbb1386edb0eddec27dd93f662-1c251938a5-f145b4cdee644a84b032bfb99f94ffc8.json`.
 
@@ -107,8 +121,9 @@ metadata. Final TMCP artifacts are in
 - Rebuilt and installed the packaged binaries; verified launchd identity, socket ownership, and receipt compliance.
 - Recorded fresh successful Finder, TextEdit, System Settings, Google Chrome, and Notes receipts.
 - Added the no-input `approval.smoke` workflow and recorded fresh prepared, HUD-approved, HUD-denied, expired, and direct fail-closed evidence.
-- Added precise iPhone Mirroring recovery diagnostics; current state is safely blocked until the physical iPhone is locked.
+- Added precise iPhone Mirroring recovery diagnostics; current state is safely blocked until a clean Mirroring session is available and no other task controls the shared UI.
 - Replaced ad-hoc signing with a persisted Apple Development identity; re-registered the four daemon permissions once and verified they survived a fresh build/install/restart cycle.
-- Ran `swift test` with 22/22 passing and committed the implementation as `81924c8`.
-- Refreshed the Tier-1 gate: `blockerCount=1`; approval evidence now passes and only iPhone Mirroring Tinder evidence remains.
+- Added isolated Mirroring focus, visible-window recovery, Spotlight field targeting, direct result clicking, and physical-keycode ASCII typing; committed as `bff0f60`.
+- Ran isolated `swift test` with 23/23 passing and `swift build -c release`; installed and restarted the packaged daemon for live verification.
+- Refreshed the Tier-1 gate: latest check reports `blockerCount=5` because daemon-only doctor/status did not answer, Tinder evidence is absent, and the retained approval records lack a matching prepared receipt.
 - Ran the final TMCP `expert_rubric_remediation_v1` review against the local-product/public-sector rubric; the blocked score and explicit legal-calculation N/A mapping are recorded in `/private/tmp/macctl-tmcp-tier1-final-local/`.
