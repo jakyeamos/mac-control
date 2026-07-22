@@ -17,8 +17,9 @@ Re-authorize the exact packaged daemon at
 then rerun `doctor`, input/capture/OCR, approval HUD, and Caps Lock smokes.
 Provide Safari or an approved replacement environment for `safari.open`, start
 an active consumer iPhone Mirroring session, run the user-gated Tinder
-foreground-only workflow, and rerun the release gate and TMCP local-product
-re-score.
+foreground-only workflow, and rerun the release gate and the TMCP
+local-product re-score. The final TMCP run is recorded as blocked until those
+live conditions change.
 
 ## blockers
 
@@ -58,7 +59,8 @@ re-score.
 | Mac live smokes | blocked | Finder/TextEdit/System Settings/Notes passed; Safari absent |
 | iPhone Mirroring | blocked | no active session/window; Tinder smoke not run |
 | approval/HUD/Caps Lock | blocked | live prepare/approve/deny/fail-closed evidence not present |
-| Tier-1 release gate | blocked | `blockerCount=4`, `passed=false`, generated 2026-07-22T04:38:08Z |
+| Tier-1 release gate | blocked | `blockerCount=4`, `passed=false`, generated 2026-07-22T04:49:09Z |
+| TMCP local-product re-score | blocked | `public_sector_readiness`: governance 3, security 2, auditability 3, operational 1, accessibility 2; legal calculation safety N/A; receipt `tmcp-review-plan-b25509ba` |
 | legal calculation safety | N/A | macctl has no legal or calculation subsystem |
 
 ## Current State
@@ -85,7 +87,9 @@ The packaged daemon is installed and loaded in the logged-in Aqua session. The
 last verified launchd status matched the packaged executable and bundle identity
 with PID 38476; the daemon answered through the owner-only socket. No changes
 were pushed. Release readiness remains blocked by the live conditions recorded
-above, not by stale metadata.
+above, not by stale metadata. Final TMCP artifacts are in
+`/private/tmp/macctl-tmcp-tier1-final-local/`; the advisory TMCP receipt is
+`/Users/jakyeamos/.tmcp/receipts/2026-07/tmcp-review-plan-b25509ba-dcc090fbb1386edb0eddec27dd93f662-1c251938a5-f145b4cdee644a84b032bfb99f94ffc8.json`.
 
 ## Recent Progress
 
@@ -98,3 +102,4 @@ above, not by stale metadata.
 - Recorded fresh successful Finder, TextEdit, System Settings, and Notes receipts.
 - Recorded Safari unavailable (`Application not found: Safari`) and iPhone Mirroring inactive (`running=false`, `windowDetected=false`) without fabricating evidence.
 - Ran `swift test` with 18/18 passing and committed the implementation as `ef2a1b6`.
+- Ran the final TMCP `expert_rubric_remediation_v1` review against the local-product/public-sector rubric; the blocked score and explicit legal-calculation N/A mapping are recorded in `/private/tmp/macctl-tmcp-tier1-final-local/`.
