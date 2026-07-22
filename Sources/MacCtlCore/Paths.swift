@@ -25,6 +25,10 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("workflows", isDirectory: true)
     }
 
+    public static var receiptsDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("receipts", isDirectory: true)
+    }
+
     public static var launchAgentURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -55,7 +59,7 @@ public enum MacCtlPaths {
 
     @discardableResult
     public static func ensureDirectories() throws -> [URL] {
-        let directories = [applicationSupportDirectory, logDirectory, workflowDirectory]
+        let directories = [applicationSupportDirectory, logDirectory, workflowDirectory, receiptsDirectory]
         for directory in directories {
             try FileManager.default.createDirectory(
                 at: directory,

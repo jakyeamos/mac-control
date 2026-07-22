@@ -51,8 +51,8 @@ public enum JSONValue: Codable, Equatable {
     }
 
     public static func fromEncodable<T: Encodable>(_ value: T) throws -> JSONValue {
-        let data = try JSONEncoder().encode(value)
-        return try JSONDecoder().decode(JSONValue.self, from: data)
+        let data = try JSONCodec.encode(value)
+        return try JSONCodec.decode(JSONValue.self, from: data)
     }
 
     public var stringValue: String? {
@@ -396,6 +396,43 @@ public struct PermissionStatus: Codable, Equatable {
     }
 }
 
+public struct RuntimeIdentity: Codable, Equatable {
+    public let processID: Int32
+    public let executablePath: String?
+    public let bundlePath: String?
+    public let bundleIdentifier: String?
+    public let bundleVersion: String?
+
+    public init(
+        processID: Int32,
+        executablePath: String?,
+        bundlePath: String?,
+        bundleIdentifier: String?,
+        bundleVersion: String?
+    ) {
+        self.processID = processID
+        self.executablePath = executablePath
+        self.bundlePath = bundlePath
+        self.bundleIdentifier = bundleIdentifier
+        self.bundleVersion = bundleVersion
+    }
+
+    public static func current() -> RuntimeIdentity {
+        let bundle = Bundle.main
+        let executablePath = bundle.executableURL?.path ?? ProcessInfo.processInfo.arguments.first
+        let bundlePath = bundle.bundleURL.path.isEmpty ? nil : bundle.bundleURL.path
+        let bundleIdentifier = bundle.bundleIdentifier
+        let bundleVersion = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return RuntimeIdentity(
+            processID: ProcessInfo.processInfo.processIdentifier,
+            executablePath: executablePath,
+            bundlePath: bundlePath,
+            bundleIdentifier: bundleIdentifier,
+            bundleVersion: bundleVersion
+        )
+    }
+}
+
 public struct DoctorReport: Codable, Equatable {
     public let processID: Int32
     public let osVersion: String
@@ -405,6 +442,9 @@ public struct DoctorReport: Codable, Equatable {
     public let permissions: [PermissionStatus]
     public let availableFrameworks: [String]
     public let warnings: [String]
+    public let permissionContext: String
+    public let runtimeIdentity: RuntimeIdentity
+    public let launchAgent: LaunchAgentStatus?
 
     public init(
         processID: Int32,
@@ -414,7 +454,10 @@ public struct DoctorReport: Codable, Equatable {
         socketOwnerOnly: Bool,
         permissions: [PermissionStatus],
         availableFrameworks: [String],
-        warnings: [String]
+        warnings: [String],
+        permissionContext: String = "daemon",
+        runtimeIdentity: RuntimeIdentity = .current(),
+        launchAgent: LaunchAgentStatus? = nil
     ) {
         self.processID = processID
         self.osVersion = osVersion
@@ -424,6 +467,9 @@ public struct DoctorReport: Codable, Equatable {
         self.permissions = permissions
         self.availableFrameworks = availableFrameworks
         self.warnings = warnings
+        self.permissionContext = permissionContext
+        self.runtimeIdentity = runtimeIdentity
+        self.launchAgent = launchAgent
     }
 }
 
@@ -448,26 +494,41 @@ public struct CapabilityReport: Codable, Equatable {
 
 public struct DaemonStatus: Codable, Equatable {
     public let daemonName: String
+    public let runtimeContext: String
     public let processID: Int32
     public let socketPath: String
     public let socketExists: Bool
     public let approvalCount: Int
     public let supportedSurfaces: [SurfaceKind]
+    public let runtimeIdentity: RuntimeIdentity
+    public let launchAgent: LaunchAgentStatus
+    public let socketOwnerOnly: Bool
+    public let receiptStore: ReceiptStoreStatus
 
     public init(
         daemonName: String,
+        runtimeContext: String = "daemon",
         processID: Int32,
         socketPath: String,
         socketExists: Bool,
         approvalCount: Int,
-        supportedSurfaces: [SurfaceKind]
+        supportedSurfaces: [SurfaceKind],
+        runtimeIdentity: RuntimeIdentity = .current(),
+        launchAgent: LaunchAgentStatus = LaunchAgentStatus.unavailable(),
+        socketOwnerOnly: Bool = false,
+        receiptStore: ReceiptStoreStatus = .unavailable()
     ) {
         self.daemonName = daemonName
+        self.runtimeContext = runtimeContext
         self.processID = processID
         self.socketPath = socketPath
         self.socketExists = socketExists
         self.approvalCount = approvalCount
         self.supportedSurfaces = supportedSurfaces
+        self.runtimeIdentity = runtimeIdentity
+        self.launchAgent = launchAgent
+        self.socketOwnerOnly = socketOwnerOnly
+        self.receiptStore = receiptStore
     }
 }
 
@@ -529,6 +590,8 @@ public enum MacCtlErrorCode: String {
     case operationFailed = "operation_failed"
     case invalidSelector = "invalid_selector"
     case unsafeInput = "unsafe_input"
+    case launchAgentUnhealthy = "launch_agent_unhealthy"
+    case receiptUnavailable = "receipt_unavailable"
 }
 
 struct ApprovalDigestPayload: Codable {

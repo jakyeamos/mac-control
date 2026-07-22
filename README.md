@@ -23,8 +23,10 @@ swift run macctl capabilities --json
 swift run macctl app list --json
 ```
 
-`doctor`, `capabilities`, and `status` can report locally when the daemon is
-not running. GUI actions are executed by `macctld` after it is started.
+`capabilities` and the read-only workflow/app listings can report locally when
+the daemon is not running. `doctor` and `status` are daemon-authoritative:
+when the socket is unavailable they return a blocked response with an explicit
+unknown permission/runtime context.
 
 The installed command path is:
 
@@ -42,10 +44,11 @@ rebuilding and reinstalling.
 ## Daemon lifecycle
 
 ```sh
-swift run macctl daemon install
+swift run macctl install
+~/.local/bin/macctl daemon install
 swift run macctl daemon status
-swift run macctl daemon restart
-swift run macctl daemon remove
+~/.local/bin/macctl daemon restart
+~/.local/bin/macctl daemon remove
 ```
 
 Installation writes the user LaunchAgent at
@@ -65,7 +68,23 @@ Useful read-only commands include:
 ~/.local/bin/macctl app list --json
 ~/.local/bin/macctl workflow list --json
 ~/.local/bin/macctl iphone status --json
+~/.local/bin/macctl receipts status --json
+~/.local/bin/macctl receipts list --json
+~/.local/bin/macctl release check --json
 ```
+
+`macctl release check --json` is the Tier-1 machine-readable gate. It checks
+the packaged launchd identity, live daemon permissions, owner-only transport,
+receipt storage/retention, fresh Mac GUI smoke receipts, fresh iPhone
+Mirroring Tinder evidence, and approval/fail-closed evidence. It does not run
+workflows as a side effect; missing live evidence is reported as `blocked`.
+
+Receipts are schema-versioned JSON records in
+`~/Library/Application Support/macctl/receipts/`. The daemon retains the
+newest 1,000 records, writes the directory with mode `0700` and files with
+mode `0600`, and stores execution/verification results plus redacted evidence
+metadata. Credentials, ephemeral text, OCR text, screenshots, image bytes,
+message bodies, and sensitive selector values are not persisted.
 
 ## Safety boundary
 

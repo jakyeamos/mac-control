@@ -8,6 +8,8 @@ public final class MacCtlService {
     private let iphoneController: IPhoneMirroringController
     private let launchAgentManager: LaunchAgentManager
     private let logger: SafeLog
+    private let receiptStore: OperationReceiptStore
+    private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
 
     public init(
@@ -15,13 +17,17 @@ public final class MacCtlService {
         workflowRegistry: WorkflowRegistry = WorkflowRegistry(),
         approvalStore: ApprovalStore = ApprovalStore(),
         presentApproval: ((ApprovalRecord) -> Void)? = nil,
-        logger: SafeLog = SafeLog()
+        logger: SafeLog = SafeLog(),
+        receiptStore: OperationReceiptStore = OperationReceiptStore(),
+        permissionContext: String = "daemon"
     ) {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
         self.approvalStore = approvalStore
         self.presentApproval = presentApproval
         self.logger = logger
+        self.receiptStore = receiptStore
+        self.permissionContext = permissionContext
         let inputController = InputController()
         let captureController = CaptureController(appController: appController)
         let resolvedIPhoneController = IPhoneMirroringController(
@@ -40,16 +46,28 @@ public final class MacCtlService {
     }
 
     public func handle(_ request: RequestEnvelope) -> ResponseEnvelope {
-        guard request.schemaVersion == 1 else {
-            return failure(
+        let startedAt = Date()
+        let response: ResponseEnvelope
+        if request.schemaVersion != 1 {
+            response = failure(
                 request,
                 status: .failed,
                 code: .invalidRequest,
                 message: "Unsupported schema_version; expected 1"
             )
+        } else {
+            do {
+                response = try execute(request)
+            } catch {
+                response = errorResponse(request, error: error)
+            }
         }
-        do {
-            switch request.method {
+        recordReceipt(for: request, response: response, startedAt: startedAt)
+        return response
+    }
+
+    private func execute(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        switch request.method {
             case "doctor":
                 return try success(request, value: doctorReport())
             case "capabilities":
@@ -78,6 +96,10 @@ public final class MacCtlService {
                 return try approve(request)
             case "approval.deny":
                 return try deny(request)
+            case "receipts.list":
+                return try success(request, value: receiptStore.list())
+            case "receipts.status":
+                return try success(request, value: receiptStore.status())
             case "logs":
                 return try success(request, value: ["lines": logger.tail()])
             case "iphone.status":
@@ -105,9 +127,6 @@ public final class MacCtlService {
                     code: .unsupportedMethod,
                     message: "Unsupported method: \(request.method)"
                 )
-            }
-        } catch {
-            return errorResponse(request, error: error)
         }
     }
 
@@ -144,6 +163,7 @@ public final class MacCtlService {
         return try success(
             request,
             status: .prepared,
+            operationID: prepared.record.operationID,
             result: [
                 "approval": try JSONValue.fromEncodable(prepared.record),
                 "plan_digest": .string(prepared.planDigest),
@@ -173,6 +193,7 @@ public final class MacCtlService {
                 details: ["errors": .array(validation.errors.map(JSONValue.string))]
             )
         }
+        let suppliedInputs = try ephemeralInputs(from: request)
         if validation.risk == .sensitive {
             guard let token = request.params["approval_token"]?.stringValue else {
                 return failure(
@@ -183,7 +204,6 @@ public final class MacCtlService {
                 )
             }
             let prepared = try approvalStore.approve(token: token)
-            let suppliedInputs = try ephemeralInputs(from: request)
             guard suppliedInputs.isEmpty || suppliedInputs == prepared.ephemeralInputs else {
                 throw WorkflowExecutionError.unsafeInput("ephemeral inputs did not match the prepared plan")
             }
@@ -191,12 +211,15 @@ public final class MacCtlService {
         }
         let report = try workflowExecutor.execute(
             workflow,
-            ephemeralInputs: try ephemeralInputs(from: request)
+            ephemeralInputs: suppliedInputs
         )
         logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
+        var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
+        result["workflow_id"] = .string(workflow.id)
+        result["plan_digest"] = .string(ApprovalStore.digest(workflow, ephemeralInputs: suppliedInputs))
         return try success(
             request,
-            value: report,
+            result: result,
             evidence: report.evidence
         )
     }
@@ -230,7 +253,15 @@ public final class MacCtlService {
             "operation_id": prepared.record.operationID,
             "source": source
         ])
-        return try success(request, value: report, evidence: report.evidence)
+        var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
+        result["workflow_id"] = .string(prepared.workflow.id)
+        result["plan_digest"] = .string(prepared.planDigest)
+        return try success(
+            request,
+            operationID: prepared.record.operationID,
+            result: result,
+            evidence: report.evidence
+        )
     }
 
     private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -242,6 +273,7 @@ public final class MacCtlService {
         ])
         return try success(
             request,
+            operationID: record.operationID,
             result: ["denied": .bool(true), "workflow": .string(record.workflowID)],
             evidence: [Evidence(kind: "approval", message: "Approval token denied")]
         )
@@ -255,8 +287,9 @@ public final class MacCtlService {
         #else
         let architecture = "unknown"
         #endif
-        let warnings = PermissionDiagnostics.report()
-            .filter { $0.state == "missing" }
+        let permissions = PermissionDiagnostics.report()
+        let warnings = permissions
+            .filter { $0.state == "missing" || $0.state == "unknown" }
             .map { "\($0.name) permission is missing" }
         return DoctorReport(
             processID: ProcessInfo.processInfo.processIdentifier,
@@ -265,11 +298,14 @@ public final class MacCtlService {
             socketPath: MacCtlPaths.socketURL.path,
             socketOwnerOnly: !FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
                 || MacCtlPaths.ownerOnlySocketPath(),
-            permissions: PermissionDiagnostics.report(),
+            permissions: permissions,
             availableFrameworks: [
                 "AppKit", "ApplicationServices", "CoreGraphics", "ScreenCaptureKit", "Vision", "Foundation"
             ],
-            warnings: warnings
+            warnings: warnings,
+            permissionContext: permissionContext,
+            runtimeIdentity: .current(),
+            launchAgent: launchAgentManager.status()
         )
     }
 
@@ -294,11 +330,86 @@ public final class MacCtlService {
     private func daemonStatus() -> DaemonStatus {
         DaemonStatus(
             daemonName: "macctld",
+            runtimeContext: permissionContext,
             processID: ProcessInfo.processInfo.processIdentifier,
             socketPath: MacCtlPaths.socketURL.path,
             socketExists: FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path),
             approvalCount: approvalStore.list().count,
-            supportedSurfaces: SurfaceKind.allCases
+            supportedSurfaces: SurfaceKind.allCases,
+            runtimeIdentity: .current(),
+            launchAgent: launchAgentManager.status(),
+            socketOwnerOnly: !FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
+                || MacCtlPaths.ownerOnlySocketPath(),
+            receiptStore: receiptStore.status()
+        )
+    }
+
+    public func unavailableDoctorResponse(
+        request: RequestEnvelope,
+        socketError: String
+    ) -> ResponseEnvelope {
+        let report = DoctorReport(
+            processID: ProcessInfo.processInfo.processIdentifier,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architectureName(),
+            socketPath: MacCtlPaths.socketURL.path,
+            socketOwnerOnly: !FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
+                || MacCtlPaths.ownerOnlySocketPath(),
+            permissions: PermissionDiagnostics.unknownReport(),
+            availableFrameworks: [
+                "AppKit", "ApplicationServices", "CoreGraphics", "ScreenCaptureKit", "Vision", "Foundation"
+            ],
+            warnings: ["Daemon-authoritative permission context is unavailable"],
+            permissionContext: "unknown",
+            runtimeIdentity: .current(),
+            launchAgent: launchAgentManager.status()
+        )
+        return ResponseEnvelope(
+            requestID: request.requestID,
+            status: .blocked,
+            result: (try? JSONValue.fromEncodable(report)) ?? .object([:]),
+            evidence: [Evidence(
+                kind: "daemon_unavailable",
+                message: "Permission checks were not evaluated in the CLI process",
+                source: "macctld"
+            )],
+            error: MacCtlError(
+                code: MacCtlErrorCode.daemonUnavailable.rawValue,
+                message: "macctld is unavailable at \(MacCtlPaths.socketURL.path): \(socketError)"
+            )
+        )
+    }
+
+    public func unavailableStatusResponse(
+        request: RequestEnvelope,
+        socketError: String
+    ) -> ResponseEnvelope {
+        let status = DaemonStatus(
+            daemonName: "macctld",
+            runtimeContext: "unknown",
+            processID: 0,
+            socketPath: MacCtlPaths.socketURL.path,
+            socketExists: FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path),
+            approvalCount: 0,
+            supportedSurfaces: SurfaceKind.allCases,
+            runtimeIdentity: .current(),
+            launchAgent: launchAgentManager.status(),
+            socketOwnerOnly: MacCtlPaths.ownerOnlySocketPath(),
+            receiptStore: .unavailable()
+        )
+        return ResponseEnvelope(
+            requestID: request.requestID,
+            status: .blocked,
+            result: (try? JSONValue.fromEncodable(status)) ?? .object([:]),
+            evidence: [Evidence(
+                kind: "daemon_unavailable",
+                message: "Status reflects launchd state; daemon runtime was not reached",
+                source: "launchd"
+            )],
+            error: MacCtlError(
+                code: MacCtlErrorCode.daemonUnavailable.rawValue,
+                message: "macctld is unavailable at \(MacCtlPaths.socketURL.path): \(socketError)"
+            )
         )
     }
 
@@ -325,14 +436,99 @@ public final class MacCtlService {
         return inputs
     }
 
+    private func recordReceipt(
+        for request: RequestEnvelope,
+        response: ResponseEnvelope,
+        startedAt: Date
+    ) {
+        let workflowID = request.params["workflow"]?.stringValue
+            ?? response.result["workflow_id"]?.stringValue
+            ?? response.result["workflow"]?.stringValue
+        let workflow = workflowID.flatMap { workflowRegistry.workflow(id: $0) }
+        let permissions = permissionContext == "daemon"
+            ? PermissionDiagnostics.report()
+            : PermissionDiagnostics.unknownReport()
+        let approvalState: String
+        if let workflow {
+            let risk = workflowRegistry.validate(workflow).risk
+            if risk != .sensitive {
+                approvalState = "not_required"
+            } else {
+                switch request.method {
+                case "workflow.prepare":
+                    approvalState = response.status == .prepared ? "prepared" : "required"
+                case "approval.approve":
+                    approvalState = response.status == .succeeded ? "approved" : "required"
+                case "approval.deny":
+                    approvalState = response.status == .succeeded ? "denied" : "required"
+                case "workflow.run":
+                    approvalState = response.status == .succeeded ? "approved" : "required"
+                default:
+                    approvalState = response.status == .succeeded ? "approved" : "required"
+                }
+            }
+        } else {
+            approvalState = "not_required"
+        }
+        let verificationResult: String
+        if response.evidence.contains(where: { $0.kind == "assertion" }) {
+            verificationResult = "passed"
+        } else if response.status == .blocked || response.status == .failed {
+            verificationResult = "blocked"
+        } else {
+            verificationResult = "not_required"
+        }
+        let receipt = OperationReceipt(
+            operationID: response.operationID,
+            requestID: response.requestID,
+            method: request.method,
+            source: request.params["source"]?.stringValue,
+            workflowID: workflowID,
+            targetSurface: workflow?.surface,
+            risk: workflow.map { workflowRegistry.validate($0).risk },
+            approvalState: approvalState,
+            executionResult: response.status.rawValue,
+            verificationResult: verificationResult,
+            planDigest: response.result["plan_digest"]?.stringValue,
+            runtimeIdentity: .current(),
+            permissionContext: permissionContext,
+            permissions: permissions,
+            status: response.status,
+            errorCode: response.error?.code,
+            evidence: response.evidence.map { ReceiptEvidence(kind: $0.kind, source: $0.source) },
+            startedAt: startedAt,
+            completedAt: Date()
+        )
+        do {
+            try receiptStore.record(receipt)
+        } catch {
+            logger.record(event: "receipt_write_failed", metadata: [
+                "operation_id": response.operationID,
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
+    private func architectureName() -> String {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return "unknown"
+        #endif
+    }
+
     private func success<T: Encodable>(
         _ request: RequestEnvelope,
         status: OperationStatus = .succeeded,
+        operationID: String? = nil,
         value: T,
         evidence: [Evidence] = []
     ) throws -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
+            operationID: operationID ?? UUID().uuidString,
             status: status,
             result: try JSONValue.fromEncodable(value),
             evidence: evidence
@@ -342,11 +538,13 @@ public final class MacCtlService {
     private func success(
         _ request: RequestEnvelope,
         status: OperationStatus = .succeeded,
+        operationID: String? = nil,
         result: [String: JSONValue],
         evidence: [Evidence] = []
     ) throws -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
+            operationID: operationID ?? UUID().uuidString,
             status: status,
             result: .object(result),
             evidence: evidence

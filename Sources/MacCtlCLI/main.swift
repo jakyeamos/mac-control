@@ -4,7 +4,7 @@ import MacCtlCore
 struct CLI {
     private let arguments: [String]
     private let jsonOutput: Bool
-    private let localService = MacCtlService()
+    private let localService = MacCtlService(permissionContext: "client")
 
     init(arguments: [String]) {
         self.arguments = arguments
@@ -20,7 +20,9 @@ struct CLI {
         let commandArguments = Array(filtered.dropFirst())
         do {
             switch command {
-            case "doctor", "capabilities", "status":
+            case "doctor", "status":
+                return render(sendOrLocal(method: command, params: [:], localFallback: false))
+            case "capabilities":
                 return render(sendOrLocal(method: command, params: [:], localFallback: true))
             case "app":
                 return try runApp(commandArguments)
@@ -28,6 +30,10 @@ struct CLI {
                 return try runWorkflow(commandArguments)
             case "approval":
                 return try runApproval(commandArguments)
+            case "receipts":
+                return try runReceipts(commandArguments)
+            case "release":
+                return try runRelease(commandArguments)
             case "logs":
                 return render(sendOrLocal(method: "logs", params: [:], localFallback: true))
             case "iphone":
@@ -130,6 +136,38 @@ struct CLI {
         }
     }
 
+    private func runReceipts(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl receipts list|status")
+        }
+        switch subcommand {
+        case "list":
+            return render(sendOrLocal(method: "receipts.list", params: [:], localFallback: true))
+        case "status":
+            return render(sendOrLocal(method: "receipts.status", params: [:], localFallback: true))
+        default:
+            throw CLIError.usage("Usage: macctl receipts list|status")
+        }
+    }
+
+    private func runRelease(_ args: [String]) throws -> Int32 {
+        guard args.first == "check" else {
+            throw CLIError.usage("Usage: macctl release check")
+        }
+        let report = ReleaseGate().evaluate()
+        if jsonOutput {
+            if let data = try? JSONCodec.encode(report), let text = String(data: data, encoding: .utf8) {
+                print(text)
+            }
+        } else {
+            print(report.passed ? "release: passed" : "release: blocked")
+            for check in report.checks {
+                print("\(check.state.rawValue): \(check.id) — \(check.message)")
+            }
+        }
+        return report.passed ? 0 : 1
+    }
+
     private func runIPhone(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
             throw CLIError.usage("Usage: macctl iphone status|open-app <name>")
@@ -155,8 +193,7 @@ struct CLI {
         switch subcommand {
         case "install":
             let daemonPath = LaunchAgentManager.installedDaemonExecutablePath()
-                ?? LaunchAgentManager.siblingDaemonPath(for: CommandLine.arguments[0])
-                ?? MacCtlPaths.legacyDaemonExecutableURL.path
+                ?? MacCtlPaths.daemonAppExecutableURL.path
             guard FileManager.default.isExecutableFile(atPath: daemonPath) else {
                 throw LaunchAgentError.daemonExecutableMissing
             }
@@ -188,6 +225,12 @@ struct CLI {
         } catch {
             if localFallback {
                 return localService.localReadOnlyHandle(request)
+            }
+            if method == "doctor" {
+                return localService.unavailableDoctorResponse(request: request, socketError: error.localizedDescription)
+            }
+            if method == "status" {
+                return localService.unavailableStatusResponse(request: request, socketError: error.localizedDescription)
             }
             return ResponseEnvelope(
                 requestID: request.requestID,
@@ -236,6 +279,8 @@ struct CLI {
         macctl app open <name-or-bundle-id>
         macctl workflow list|validate|prepare|run <workflow> [--ephemeral-stdin]
         macctl approval list|approve|deny <token>
+        macctl receipts list|status
+        macctl release check [--json]
         macctl iphone status|open-app <name>
         macctl daemon install|remove|restart|status
         macctl logs [--json]

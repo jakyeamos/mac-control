@@ -68,6 +68,7 @@ public enum MacCtlDaemonBundle {
 
 public enum LaunchAgentError: Error, LocalizedError {
     case daemonExecutableMissing
+    case invalidDaemonIdentity(String)
     case launchctlFailed(String)
     case installFailed(String)
     case signingFailed(String)
@@ -76,6 +77,8 @@ public enum LaunchAgentError: Error, LocalizedError {
         switch self {
         case .daemonExecutableMissing:
             return "The macctld executable could not be located beside macctl or in the installed daemon bundle"
+        case .invalidDaemonIdentity(let path):
+            return "The daemon must run from the packaged macctld.app identity: \(path)"
         case .launchctlFailed(let message):
             return "launchctl failed: \(message)"
         case .installFailed(let message):
@@ -88,13 +91,74 @@ public enum LaunchAgentError: Error, LocalizedError {
 
 public struct LaunchAgentStatus: Codable, Equatable {
     public let plistPath: String
+    public let expectedExecutablePath: String
+    public let configuredExecutablePath: String?
+    public let activeExecutablePath: String?
     public let installed: Bool
+    public let launchdLoaded: Bool
     public let loaded: Bool
+    public let healthy: Bool
+    public let processID: Int32?
+    public let jobState: String?
+    public let lastExitCode: Int32?
+    public let spawnError: String?
+    public let identityMatches: Bool
 
-    public init(plistPath: String, installed: Bool, loaded: Bool) {
+    public init(
+        plistPath: String,
+        expectedExecutablePath: String = MacCtlPaths.daemonAppExecutableURL.path,
+        configuredExecutablePath: String? = nil,
+        activeExecutablePath: String? = nil,
+        installed: Bool,
+        launchdLoaded: Bool = false,
+        loaded: Bool = false,
+        healthy: Bool = false,
+        processID: Int32? = nil,
+        jobState: String? = nil,
+        lastExitCode: Int32? = nil,
+        spawnError: String? = nil,
+        identityMatches: Bool = false
+    ) {
         self.plistPath = plistPath
+        self.expectedExecutablePath = expectedExecutablePath
+        self.configuredExecutablePath = configuredExecutablePath
+        self.activeExecutablePath = activeExecutablePath
         self.installed = installed
+        self.launchdLoaded = launchdLoaded
         self.loaded = loaded
+        self.healthy = healthy
+        self.processID = processID
+        self.jobState = jobState
+        self.lastExitCode = lastExitCode
+        self.spawnError = spawnError
+        self.identityMatches = identityMatches
+    }
+
+    public static func unavailable() -> LaunchAgentStatus {
+        LaunchAgentStatus(
+            plistPath: MacCtlPaths.launchAgentURL.path,
+            installed: FileManager.default.fileExists(atPath: MacCtlPaths.launchAgentURL.path)
+        )
+    }
+
+    public var summary: String {
+        var parts = ["launchd_loaded=\(launchdLoaded)", "healthy=\(healthy)"]
+        if let configuredExecutablePath {
+            parts.append("configured=\(configuredExecutablePath)")
+        }
+        if let activeExecutablePath {
+            parts.append("active=\(activeExecutablePath)")
+        }
+        if let jobState {
+            parts.append("state=\(jobState)")
+        }
+        if let lastExitCode {
+            parts.append("last_exit_code=\(lastExitCode)")
+        }
+        if let spawnError {
+            parts.append("spawn_error=\(spawnError)")
+        }
+        return parts.joined(separator: ", ")
     }
 }
 
@@ -106,6 +170,11 @@ public final class LaunchAgentManager {
     public func install(daemonExecutable: String) throws -> LaunchAgentStatus {
         guard fileManager.isExecutableFile(atPath: daemonExecutable) else {
             throw LaunchAgentError.daemonExecutableMissing
+        }
+        let expectedPath = URL(fileURLWithPath: MacCtlPaths.daemonAppExecutableURL.path).standardizedFileURL.path
+        let suppliedPath = URL(fileURLWithPath: daemonExecutable).standardizedFileURL.path
+        guard suppliedPath == expectedPath else {
+            throw LaunchAgentError.invalidDaemonIdentity(suppliedPath)
         }
         try MacCtlPaths.ensureDirectories()
         try fileManager.createDirectory(
@@ -137,30 +206,14 @@ public final class LaunchAgentManager {
         } catch {
             throw LaunchAgentError.installFailed(error.localizedDescription)
         }
-        let domain = "gui/\(getuid())"
-        _ = try? ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["bootout", domain, MacCtlPaths.launchAgentLabel]
-        )
-        let result = try ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["bootstrap", domain, MacCtlPaths.launchAgentURL.path]
-        )
-        if result.status != 0 {
-            let currentStatus = status()
-            guard currentStatus.loaded else {
-                throw LaunchAgentError.launchctlFailed(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-            return currentStatus
-        }
-        return status()
+        return try reconcile()
     }
 
     public func remove() throws -> LaunchAgentStatus {
         let domain = "gui/\(getuid())"
         _ = try? ProcessRunner.run(
             executable: "/bin/launchctl",
-            arguments: ["bootout", domain, MacCtlPaths.launchAgentLabel]
+            arguments: ["bootout", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
         )
         if fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path) {
             try fileManager.removeItem(at: MacCtlPaths.launchAgentURL)
@@ -169,28 +222,52 @@ public final class LaunchAgentManager {
     }
 
     public func restart() throws -> LaunchAgentStatus {
+        guard fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path) else {
+            throw LaunchAgentError.launchctlFailed("LaunchAgent plist is not installed")
+        }
+        return try reconcile()
+    }
+
+    public func status() -> LaunchAgentStatus {
+        let configuredExecutablePath = configuredExecutablePath()
+        let launchctlResult = try? ProcessRunner.run(
+            executable: "/bin/launchctl",
+            arguments: ["print", "gui/\(getuid())/\(MacCtlPaths.launchAgentLabel)"]
+        )
+        return LaunchAgentStatus.fromLaunchctlOutput(
+            plistPath: MacCtlPaths.launchAgentURL.path,
+            installed: fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path),
+            configuredExecutablePath: configuredExecutablePath,
+            expectedExecutablePath: MacCtlPaths.daemonAppExecutableURL.path,
+            launchctlStatus: launchctlResult?.status ?? -1,
+            output: launchctlResult?.stdout ?? "",
+            stderr: launchctlResult?.stderr ?? ""
+        )
+    }
+
+    private func reconcile() throws -> LaunchAgentStatus {
         let domain = "gui/\(getuid())"
+        _ = try? ProcessRunner.run(
+            executable: "/bin/launchctl",
+            arguments: ["bootout", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
+        )
         let result = try ProcessRunner.run(
             executable: "/bin/launchctl",
-            arguments: ["kickstart", "-k", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
+            arguments: ["bootstrap", domain, MacCtlPaths.launchAgentURL.path]
         )
         guard result.status == 0 else {
             throw LaunchAgentError.launchctlFailed(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return status()
-    }
-
-    public func status() -> LaunchAgentStatus {
-        let domain = "gui/\(getuid())"
-        let loaded = (try? ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["print", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
-        ).status == 0) ?? false
-        return LaunchAgentStatus(
-            plistPath: MacCtlPaths.launchAgentURL.path,
-            installed: fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path),
-            loaded: loaded
-        )
+        var current = status()
+        let deadline = Date().addingTimeInterval(3)
+        while !current.loaded && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            current = status()
+        }
+        guard current.loaded else {
+            throw LaunchAgentError.launchctlFailed(current.summary)
+        }
+        return current
     }
 
     public func installUserBinaries(from commandPath: String) throws -> [String] {
@@ -300,5 +377,82 @@ public final class LaunchAgentManager {
         }
         try fileManager.moveItem(at: stagingURL, to: MacCtlPaths.daemonAppURL)
         return MacCtlPaths.daemonAppURL
+    }
+
+    private func configuredExecutablePath() -> String? {
+        guard let data = try? Data(contentsOf: MacCtlPaths.launchAgentURL),
+              let propertyList = try? PropertyListSerialization.propertyList(
+                  from: data,
+                  options: [],
+                  format: nil
+              ),
+              let dictionary = propertyList as? [String: Any],
+              let arguments = dictionary["ProgramArguments"] as? [String] else {
+            return nil
+        }
+        return arguments.first
+    }
+}
+
+extension LaunchAgentStatus {
+    public static func fromLaunchctlOutput(
+        plistPath: String,
+        installed: Bool,
+        configuredExecutablePath: String?,
+        expectedExecutablePath: String,
+        launchctlStatus: Int32,
+        output: String,
+        stderr: String = ""
+    ) -> LaunchAgentStatus {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let activeExecutablePath = value(for: "program", in: lines)
+        let jobState = value(for: "state", in: lines)
+        let processID = value(for: "pid", in: lines).flatMap(Int32.init)
+        let lastExitRaw = value(for: "last exit code", in: lines)
+        let lastExitCode = lastExitRaw.flatMap { raw in
+            let code = raw.split(separator: ":", maxSplits: 1).first.map(String.init) ?? raw
+            return Int32(code.trimmingCharacters(in: .whitespaces))
+        }
+        let normalizedExpected = URL(fileURLWithPath: expectedExecutablePath).standardizedFileURL.path
+        let normalizedConfigured = configuredExecutablePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let normalizedActive = activeExecutablePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let identityMatches = normalizedConfigured == normalizedExpected && normalizedActive == normalizedExpected
+        let lowerState = jobState?.lowercased() ?? ""
+        let spawnError: String?
+        if lowerState.contains("spawn failed") {
+            spawnError = jobState
+        } else if launchctlStatus != 0 && !stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            spawnError = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            spawnError = nil
+        }
+        let launchdLoaded = launchctlStatus == 0
+        let healthy = launchdLoaded
+            && identityMatches
+            && spawnError == nil
+            && (lastExitCode == nil || lastExitCode == 0)
+            && (processID != nil || lowerState == "running")
+        return LaunchAgentStatus(
+            plistPath: plistPath,
+            expectedExecutablePath: expectedExecutablePath,
+            configuredExecutablePath: configuredExecutablePath,
+            activeExecutablePath: activeExecutablePath,
+            installed: installed,
+            launchdLoaded: launchdLoaded,
+            loaded: healthy,
+            healthy: healthy,
+            processID: processID,
+            jobState: jobState,
+            lastExitCode: lastExitCode,
+            spawnError: spawnError,
+            identityMatches: identityMatches
+        )
+    }
+
+    private static func value(for key: String, in lines: [String]) -> String? {
+        let prefix = "\(key) = "
+        return lines.first(where: { $0.hasPrefix(prefix) })?.dropFirst(prefix.count).description
     }
 }

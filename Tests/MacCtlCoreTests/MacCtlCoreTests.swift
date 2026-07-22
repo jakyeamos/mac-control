@@ -26,6 +26,13 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(responseObject["status"] as? String, "succeeded")
     }
 
+    func testNestedJSONValuesUseTheWireDateEncodingStrategy() throws {
+        let value = try JSONValue.fromEncodable(
+            ["created_at": Date(timeIntervalSince1970: 1_700_000_000)]
+        )
+        XCTAssertEqual(value["created_at"]?.stringValue, "2023-11-14T22:13:20Z")
+    }
+
     func testSelectorPrecedencePrefersAccessibilityThenVisualThenCoordinates() {
         XCTAssertEqual(Selector(title: "Save", normalizedX: 0.5, normalizedY: 0.5).tier, .accessibility)
         XCTAssertEqual(Selector(containsText: "Save", normalizedX: 0.5, normalizedY: 0.5).tier, .visual)
@@ -294,5 +301,334 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(MacCtlDaemonBundle.infoPlist["LSUIElement"] as? Bool, true)
         XCTAssertTrue(MacCtlPaths.daemonAppURL.path.hasSuffix("/.local/share/macctl/macctld.app"))
         XCTAssertTrue(MacCtlPaths.daemonAppExecutableURL.path.hasSuffix("/.local/share/macctl/macctld.app/Contents/MacOS/macctld"))
+    }
+
+    func testLaunchAgentStatusRejectsStaleIdentityAndSpawnFailure() {
+        let expected = "/Users/test/.local/share/macctl/macctld.app/Contents/MacOS/macctld"
+        let healthyOutput = """
+        gui/501/com.jakyeamos.macctl.daemon = {
+            program = \(expected)
+            pid = 4123
+            state = running
+            last exit code = 0
+        }
+        """
+        let healthy = LaunchAgentStatus.fromLaunchctlOutput(
+            plistPath: "/tmp/macctl.plist",
+            installed: true,
+            configuredExecutablePath: expected,
+            expectedExecutablePath: expected,
+            launchctlStatus: 0,
+            output: healthyOutput
+        )
+        XCTAssertTrue(healthy.launchdLoaded)
+        XCTAssertTrue(healthy.loaded)
+        XCTAssertTrue(healthy.identityMatches)
+        XCTAssertEqual(healthy.processID, 4123)
+
+        let staleOutput = """
+        gui/501/com.jakyeamos.macctl.daemon = {
+            program = /Users/test/.local/bin/macctld
+            state = spawn failed
+            last exit code = 78: EX_CONFIG
+        }
+        """
+        let stale = LaunchAgentStatus.fromLaunchctlOutput(
+            plistPath: "/tmp/macctl.plist",
+            installed: true,
+            configuredExecutablePath: "/Users/test/.local/bin/macctld",
+            expectedExecutablePath: expected,
+            launchctlStatus: 0,
+            output: staleOutput
+        )
+        XCTAssertTrue(stale.launchdLoaded)
+        XCTAssertFalse(stale.loaded)
+        XCTAssertFalse(stale.identityMatches)
+        XCTAssertEqual(stale.lastExitCode, 78)
+        XCTAssertEqual(stale.spawnError, "spawn failed")
+
+        let nonzeroExit = LaunchAgentStatus.fromLaunchctlOutput(
+            plistPath: "/tmp/macctl.plist",
+            installed: true,
+            configuredExecutablePath: expected,
+            expectedExecutablePath: expected,
+            launchctlStatus: 0,
+            output: """
+            gui/501/com.jakyeamos.macctl.daemon = {
+                program = \(expected)
+                pid = 4123
+                state = running
+                last exit code = 78: EX_CONFIG
+            }
+            """
+        )
+        XCTAssertFalse(nonzeroExit.loaded)
+        XCTAssertFalse(nonzeroExit.healthy)
+    }
+
+    func testOperationReceiptsAreBoundedOwnerOnlyAndDoNotPersistEvidenceText() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-receipts-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = OperationReceiptStore(directory: directory, maximumRecords: 2)
+        let identity = RuntimeIdentity(
+            processID: 123,
+            executablePath: "/tmp/macctld",
+            bundlePath: "/tmp/macctld.app",
+            bundleIdentifier: MacCtlDaemonBundle.bundleIdentifier,
+            bundleVersion: "1"
+        )
+        for index in 0..<3 {
+            try store.record(OperationReceipt(
+                operationID: "operation-\(index)",
+                requestID: "request-\(index)",
+                method: "workflow.run",
+                workflowID: "textedit.open",
+                targetSurface: .macApp,
+                risk: .safe,
+                executionResult: "succeeded",
+                verificationResult: "passed",
+                planDigest: "digest-\(index)",
+                runtimeIdentity: identity,
+                permissionContext: "daemon",
+                permissions: [],
+                status: .succeeded,
+                errorCode: nil,
+                evidence: [ReceiptEvidence(kind: "ocr", source: "screen")],
+                startedAt: Date(timeIntervalSince1970: Double(index)),
+                completedAt: Date(timeIntervalSince1970: Double(index + 1))
+            ))
+        }
+        let receipts = try store.list(limit: 10)
+        XCTAssertEqual(receipts.count, 2)
+        XCTAssertEqual(receipts.first?.executionResult, "succeeded")
+        XCTAssertEqual(receipts.first?.verificationResult, "passed")
+        XCTAssertEqual(store.status().pendingPrune, 0)
+
+        let directoryPermissions = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((directoryPermissions?.intValue ?? 0) & 0o777, 0o700)
+        let receiptURL = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                .first(where: { $0.pathExtension == "json" })
+        )
+        let receiptPermissions = try FileManager.default.attributesOfItem(atPath: receiptURL.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((receiptPermissions?.intValue ?? 0) & 0o777, 0o600)
+        let receiptText = try String(contentsOf: receiptURL)
+        XCTAssertFalse(receiptText.contains("secret"))
+        XCTAssertTrue(receiptText.contains("ocr"))
+    }
+
+    func testOperationReceiptDecoderAcceptsOlderReceipts() throws {
+        let data = Data(
+            """
+            {
+              "schemaVersion": 1,
+              "operationID": "legacy-operation",
+              "requestID": "legacy-request",
+              "method": "doctor",
+              "approvalState": "not_required",
+              "runtimeIdentity": {
+                "processID": 123,
+                "executablePath": "/tmp/macctld",
+                "bundlePath": "/tmp/macctld.app",
+                "bundleIdentifier": "com.jakyeamos.macctl.daemon",
+                "bundleVersion": "1"
+              },
+              "permissionContext": "daemon",
+              "permissions": [],
+              "status": "succeeded",
+              "evidence": [],
+              "startedAt": "2026-07-22T00:00:00Z",
+              "completedAt": "2026-07-22T00:00:01Z"
+            }
+            """.utf8
+        )
+
+        let receipt = try JSONCodec.decode(OperationReceipt.self, from: data)
+        XCTAssertEqual(receipt.executionResult, "not_run")
+        XCTAssertEqual(receipt.verificationResult, "not_run")
+    }
+
+    func testUnavailableDoctorDoesNotReportClientPermissionsAsDaemonPermissions() throws {
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(
+                directory: URL(fileURLWithPath: "/private/tmp/macctl-doctor-\(UUID().uuidString)")
+            ),
+            permissionContext: "client"
+        )
+        let request = RequestEnvelope(requestID: "request-unavailable", method: "doctor")
+        let response = service.unavailableDoctorResponse(request: request, socketError: "connection refused")
+        XCTAssertEqual(response.status, OperationStatus.blocked)
+        XCTAssertEqual(response.requestID, request.requestID)
+        let report = try JSONCodec.decode(
+            DoctorReport.self,
+            from: try JSONCodec.encode(response.result)
+        )
+        XCTAssertEqual(report.permissionContext, "unknown")
+        XCTAssertTrue(report.permissions.allSatisfy { $0.state == "unknown" || $0.state == "not_required" })
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.daemonUnavailable.rawValue)
+    }
+
+    func testReleaseGateRequiresEveryTierOneEvidenceDimension() {
+        let expectedExecutable = MacCtlPaths.daemonAppExecutableURL.path
+        let identity = RuntimeIdentity(
+            processID: 501,
+            executablePath: expectedExecutable,
+            bundlePath: MacCtlPaths.daemonAppURL.path,
+            bundleIdentifier: MacCtlDaemonBundle.bundleIdentifier,
+            bundleVersion: "1"
+        )
+        let launchAgent = LaunchAgentStatus(
+            plistPath: MacCtlPaths.launchAgentURL.path,
+            expectedExecutablePath: expectedExecutable,
+            configuredExecutablePath: expectedExecutable,
+            activeExecutablePath: expectedExecutable,
+            installed: true,
+            launchdLoaded: true,
+            loaded: true,
+            healthy: true,
+            processID: 501,
+            jobState: "running",
+            lastExitCode: 0,
+            identityMatches: true
+        )
+        let permissions = [
+            "Accessibility",
+            "Input Monitoring",
+            "Post Events",
+            "Screen Recording"
+        ].map {
+            PermissionStatus(
+                name: $0,
+                state: "granted",
+                requiredFor: "test",
+                instruction: "test"
+            )
+        }
+        let doctor = DoctorReport(
+            processID: 501,
+            osVersion: "test",
+            architecture: "arm64",
+            socketPath: MacCtlPaths.socketURL.path,
+            socketOwnerOnly: true,
+            permissions: permissions,
+            availableFrameworks: [],
+            warnings: [],
+            permissionContext: "daemon",
+            runtimeIdentity: identity,
+            launchAgent: launchAgent
+        )
+        let daemon = DaemonStatus(
+            daemonName: "macctld",
+            runtimeContext: "daemon",
+            processID: 501,
+            socketPath: MacCtlPaths.socketURL.path,
+            socketExists: true,
+            approvalCount: 0,
+            supportedSurfaces: SurfaceKind.allCases,
+            runtimeIdentity: identity,
+            launchAgent: launchAgent,
+            socketOwnerOnly: true,
+            receiptStore: ReceiptStoreStatus(
+                directory: MacCtlPaths.receiptsDirectory.path,
+                fileCount: 20,
+                maximumRecords: 1_000,
+                pendingPrune: 0,
+                invalidReceiptCount: 0,
+                writable: true,
+                directoryOwnerOnly: true,
+                filesOwnerOnly: true,
+                oldestReceipt: Date(timeIntervalSince1970: 9_000),
+                newestReceipt: Date(timeIntervalSince1970: 9_999)
+            )
+        )
+        let completedAt = Date(timeIntervalSince1970: 9_999)
+        func receipt(
+            method: String,
+            workflowID: String?,
+            status: OperationStatus,
+            approvalState: String = "not_required",
+            verificationResult: String = "not_required",
+            evidence: [ReceiptEvidence] = []
+        ) -> OperationReceipt {
+            OperationReceipt(
+                operationID: UUID().uuidString,
+                requestID: UUID().uuidString,
+                method: method,
+                workflowID: workflowID,
+                targetSurface: workflowID == "iphone.open-tinder" ? .iphoneMirroring : .macApp,
+                risk: workflowID == "test.sensitive" ? .sensitive : .safe,
+                approvalState: approvalState,
+                executionResult: status.rawValue,
+                verificationResult: verificationResult,
+                planDigest: "digest",
+                runtimeIdentity: identity,
+                permissionContext: "daemon",
+                permissions: permissions,
+                status: status,
+                errorCode: status == .blocked ? MacCtlErrorCode.approvalRequired.rawValue : nil,
+                evidence: evidence,
+                startedAt: completedAt.addingTimeInterval(-1),
+                completedAt: completedAt
+            )
+        }
+        let receipts = ReleaseGate.requiredMacWorkflows.map {
+            receipt(method: "workflow.run", workflowID: $0, status: .succeeded, verificationResult: "passed")
+        } + [
+            receipt(method: "workflow.run", workflowID: "iphone.open-tinder", status: .succeeded, verificationResult: "passed", evidence: [
+                ReceiptEvidence(kind: "ocr_anchor", source: "iPhone Mirroring"),
+                ReceiptEvidence(kind: "assertion", source: "iPhone Mirroring")
+            ]),
+            receipt(method: "workflow.prepare", workflowID: "test.sensitive", status: .prepared, approvalState: "prepared"),
+            receipt(method: "approval.approve", workflowID: "test.sensitive", status: .succeeded, approvalState: "approved"),
+            receipt(method: "approval.deny", workflowID: "test.sensitive", status: .succeeded, approvalState: "denied"),
+            receipt(method: "workflow.run", workflowID: "test.sensitive", status: .blocked, approvalState: "required")
+        ]
+        let snapshot = ReleaseGateSnapshot(
+            launchAgent: launchAgent,
+            daemonStatus: daemon,
+            doctorReport: doctor,
+            receiptStoreStatus: daemon.receiptStore,
+            receipts: receipts,
+            socketExists: true,
+            socketOwnerOnly: true,
+            daemonError: nil
+        )
+        let report = ReleaseGate(maximumEvidenceAge: 100, now: { Date(timeIntervalSince1970: 10_000) })
+            .evaluate(snapshot: snapshot)
+        XCTAssertTrue(report.passed)
+        XCTAssertEqual(report.blockerCount, 0)
+        XCTAssertTrue(report.checks.allSatisfy { $0.state == .passed })
+
+        let networkReport = ReleaseGate(maximumEvidenceAge: 100, now: { Date(timeIntervalSince1970: 10_000) })
+            .evaluate(snapshot: ReleaseGateSnapshot(
+                launchAgent: launchAgent,
+                daemonStatus: daemon,
+                doctorReport: doctor,
+                receiptStoreStatus: daemon.receiptStore,
+                receipts: receipts,
+                socketExists: true,
+                socketOwnerOnly: true,
+                networkListenerConfigured: true,
+                daemonError: nil
+            ))
+        XCTAssertEqual(
+            networkReport.checks.first(where: { $0.id == "transport.local_only" })?.state,
+            .failed
+        )
+
+        let blockedReport = ReleaseGate(maximumEvidenceAge: 100, now: { Date(timeIntervalSince1970: 10_000) })
+            .evaluate(snapshot: ReleaseGateSnapshot(
+                launchAgent: launchAgent,
+                daemonStatus: nil,
+                doctorReport: nil,
+                receiptStoreStatus: nil,
+                receipts: [],
+                socketExists: false,
+                socketOwnerOnly: false,
+                daemonError: "not running"
+            ))
+        XCTAssertFalse(blockedReport.passed)
+        XCTAssertGreaterThan(blockedReport.blockerCount, 0)
+        XCTAssertTrue(blockedReport.checks.contains { $0.id == "live.iphone-mirroring" && $0.state == .blocked })
     }
 }
