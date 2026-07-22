@@ -40,6 +40,7 @@ utility is permissioned and proven.
 | formatter/lint | not configured | Swift package has no formatter/linter dependency |
 | typecheck/build | passed | \`swift build\` completed without warnings |
 | tests | passed | \`swift test\`: 11 tests, 0 failures |
+| pre-commit readiness | passed | \`pre-cr\`: Swift coverage wrapper, lcov, and anti-slop passed |
 | dead-code/safety scan | passed | \`rg\` scan; no TODO/FIXME/fatalError or raw OCR result field |
 | installed smoke | passed with permission gate | doctor/status/Finder succeeded; Tinder blocked at Screen Recording |
 
@@ -58,7 +59,8 @@ utility is permissioned and proven.
 
 ## Current Position
 
-The LaunchAgent is installed and loaded in the logged-in Aqua session. The
+The initial implementation is committed as \`a68e2d4\` on \`dev\` and has not
+been pushed. The LaunchAgent is installed and loaded in the logged-in Aqua session. The
 installed daemon reports arm64/macOS 26.5.2, advertises all three surfaces,
 and passes the reversible Finder workflow. TCC remains user-controlled and is
 the only live blocker for input, capture/OCR, Caps Lock, and the Tinder smoke.
