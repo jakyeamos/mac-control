@@ -425,28 +425,60 @@ public final class ReleaseGate {
     }
 
     private func approvalSafetyCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
-        let required: [(String, String, OperationStatus, String)] = [
-            ("workflow.prepare", "prepared", .prepared, "prepared"),
-            ("approval.approve", "approved", .succeeded, "approved"),
-            ("approval.deny", "denied", .succeeded, "denied"),
-            ("workflow.run", "fail_closed", .blocked, "required")
+        let approvalWorkflow = "approval.smoke"
+        let required: [(String, (OperationReceipt) -> Bool)] = [
+            ("prepared", { receipt in
+                receipt.method == "workflow.prepare"
+                    && receipt.workflowID == approvalWorkflow
+                    && receipt.status == .prepared
+                    && receipt.approvalState == "prepared"
+            }),
+            ("approved_by_hud", { receipt in
+                receipt.method == "approval.approve"
+                    && receipt.workflowID == approvalWorkflow
+                    && receipt.source == "hud"
+                    && receipt.status == .succeeded
+                    && receipt.approvalState == "approved"
+            }),
+            ("denied_by_hud", { receipt in
+                receipt.method == "approval.deny"
+                    && receipt.workflowID == approvalWorkflow
+                    && receipt.source == "hud"
+                    && receipt.status == .succeeded
+                    && receipt.approvalState == "denied"
+            }),
+            ("expired", { receipt in
+                receipt.method == "approval.approve"
+                    && receipt.workflowID == approvalWorkflow
+                    && (receipt.source == "hud" || receipt.source == "cli" || receipt.source == nil)
+                    && receipt.status == .blocked
+                    && receipt.approvalState == "required"
+                    && receipt.verificationResult == "blocked"
+                    && receipt.errorCode == MacCtlErrorCode.approvalExpired.rawValue
+            }),
+            ("fail_closed", { receipt in
+                receipt.method == "workflow.run"
+                    && receipt.workflowID == approvalWorkflow
+                    && receipt.status == .blocked
+                    && receipt.approvalState == "required"
+                    && receipt.verificationResult == "blocked"
+                    && receipt.errorCode == MacCtlErrorCode.approvalRequired.rawValue
+            })
         ]
-        let missing = required.compactMap { method, label, status, approvalState in
-            let found = snapshot.receipts.contains {
-                $0.method == method
-                    && $0.status == status
-                    && $0.approvalState == approvalState
-                    && isFresh($0)
-            }
+        let missing = required.compactMap { label, predicate in
+            let found = snapshot.receipts.contains { predicate($0) && isFresh($0) }
             return found ? nil : label
         }
         return ReleaseGateCheck(
             id: "approval.safety",
             state: missing.isEmpty ? .passed : .blocked,
             message: missing.isEmpty
-                ? "Approval, denial, expiry/fail-closed evidence is fresh"
+                ? "Approval HUD, denial, expiry, and fail-closed evidence is fresh"
                 : "Approval safety evidence is missing",
-            details: ["missing": .array(missing.map(JSONValue.string))]
+            details: [
+                "workflow": .string(approvalWorkflow),
+                "missing": .array(missing.map(JSONValue.string))
+            ]
         )
     }
 

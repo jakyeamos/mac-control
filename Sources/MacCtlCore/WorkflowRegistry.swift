@@ -173,6 +173,25 @@ public final class WorkflowRegistry {
             )
         }
 
+        let approvalSmokeWorkflow = WorkflowSpec(
+            id: "approval.smoke",
+            name: "Approval Control-Plane Smoke",
+            summary: "Exercise approval, denial, expiry, and fail-closed behavior without external input or account changes",
+            surface: .macDesktop,
+            actions: [
+                ActionSpec(
+                    kind: .waitFor,
+                    surface: .macDesktop,
+                    parameters: [
+                        "seconds": .number(0.2),
+                        "approval_reason": .string("Tier-1 approval-control smoke; no external input or account change")
+                    ],
+                    risk: .sensitive
+                )
+            ],
+            recipe: "approval-smoke"
+        )
+
         let iPhoneWorkflow = WorkflowSpec(
             id: "iphone.open-tinder",
             name: "Open Tinder in iPhone Mirroring",
@@ -205,6 +224,6 @@ public final class WorkflowRegistry {
             recipe: "iphone-open-tinder"
         )
 
-        return safeOpenWorkflows + [iPhoneWorkflow]
+        return safeOpenWorkflows + [approvalSmokeWorkflow, iPhoneWorkflow]
     }
 }

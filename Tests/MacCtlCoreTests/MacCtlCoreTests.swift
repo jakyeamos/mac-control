@@ -93,6 +93,18 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(validation.errors.contains { $0.contains("approval_reason") })
     }
 
+    func testApprovalSmokeWorkflowIsSensitiveWithoutExternalInput() throws {
+        let workflow = try XCTUnwrap(WorkflowRegistry().workflow(id: "approval.smoke"))
+        let validation = WorkflowRegistry().validate(workflow)
+
+        XCTAssertTrue(validation.valid)
+        XCTAssertEqual(validation.risk, .sensitive)
+        XCTAssertEqual(workflow.actions.count, 1)
+        XCTAssertEqual(workflow.actions.first?.kind, .waitFor)
+        XCTAssertEqual(workflow.recipe, "approval-smoke")
+        XCTAssertNil(workflow.actions.first?.parameters["text_source"])
+    }
+
     func testApprovalDigestBindsEphemeralInputsWithoutReturningThem() {
         let workflow = WorkflowSpec(
             id: "test.ephemeral",
@@ -141,6 +153,48 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertThrowsError(try store.approve(token: expiring.record.token)) { error in
             XCTAssertEqual(error as? ApprovalStoreError, .expired)
         }
+    }
+
+    func testExpiredApprovalReceiptRetainsWorkflowAndHUDProvenance() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-expiry-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let service = MacCtlService(
+            approvalStore: ApprovalStore(lifetime: 0.02),
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "client"
+        )
+
+        let prepared = service.handle(RequestEnvelope(
+            method: "workflow.prepare",
+            params: ["workflow": .string("approval.smoke")]
+        ))
+        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
+        let token = try XCTUnwrap(approval["token"]?.stringValue)
+
+        Thread.sleep(forTimeInterval: 0.05)
+        let expired = service.handle(RequestEnvelope(
+            method: "approval.approve",
+            params: [
+                "token": .string(token),
+                "source": .string("hud")
+            ]
+        ))
+
+        XCTAssertEqual(expired.status, .blocked)
+        XCTAssertEqual(expired.error?.code, MacCtlErrorCode.approvalExpired.rawValue)
+        XCTAssertEqual(expired.error?.details["workflow_id"]?.stringValue, "approval.smoke")
+
+        let receipts = try OperationReceiptStore(directory: receiptDirectory).list(limit: 10)
+        let preparedReceipt = try XCTUnwrap(receipts.first { $0.method == "workflow.prepare" })
+        XCTAssertEqual(preparedReceipt.workflowID, "approval.smoke")
+        XCTAssertEqual(preparedReceipt.approvalState, "prepared")
+        let receipt = try XCTUnwrap(receipts.first { $0.method == "approval.approve" })
+        XCTAssertEqual(receipt.workflowID, "approval.smoke")
+        XCTAssertEqual(receipt.source, "hud")
+        XCTAssertEqual(receipt.status, .blocked)
+        XCTAssertEqual(receipt.approvalState, "required")
+        XCTAssertEqual(receipt.errorCode, MacCtlErrorCode.approvalExpired.rawValue)
+        XCTAssertEqual(receipt.verificationResult, "blocked")
     }
 
     func testDoubleTapDetectorHonorsTimingAndResetsAfterDetection() {
@@ -570,17 +624,22 @@ final class MacCtlCoreTests: XCTestCase {
             method: String,
             workflowID: String?,
             status: OperationStatus,
+            source: String? = nil,
             approvalState: String = "not_required",
             verificationResult: String = "not_required",
+            errorCode: String? = nil,
             evidence: [ReceiptEvidence] = []
         ) -> OperationReceipt {
             OperationReceipt(
                 operationID: UUID().uuidString,
                 requestID: UUID().uuidString,
                 method: method,
+                source: source,
                 workflowID: workflowID,
-                targetSurface: workflowID == "iphone.open-tinder" ? .iphoneMirroring : .macApp,
-                risk: workflowID == "test.sensitive" ? .sensitive : .safe,
+                targetSurface: workflowID == "iphone.open-tinder"
+                    ? .iphoneMirroring
+                    : workflowID == "approval.smoke" ? .macDesktop : .macApp,
+                risk: workflowID == "approval.smoke" ? .sensitive : .safe,
                 approvalState: approvalState,
                 executionResult: status.rawValue,
                 verificationResult: verificationResult,
@@ -589,7 +648,7 @@ final class MacCtlCoreTests: XCTestCase {
                 permissionContext: "daemon",
                 permissions: permissions,
                 status: status,
-                errorCode: status == .blocked ? MacCtlErrorCode.approvalRequired.rawValue : nil,
+                errorCode: errorCode ?? (status == .blocked ? MacCtlErrorCode.approvalRequired.rawValue : nil),
                 evidence: evidence,
                 startedAt: completedAt.addingTimeInterval(-1),
                 completedAt: completedAt
@@ -602,10 +661,18 @@ final class MacCtlCoreTests: XCTestCase {
                 ReceiptEvidence(kind: "ocr_anchor", source: "iPhone Mirroring"),
                 ReceiptEvidence(kind: "assertion", source: "iPhone Mirroring")
             ]),
-            receipt(method: "workflow.prepare", workflowID: "test.sensitive", status: .prepared, approvalState: "prepared"),
-            receipt(method: "approval.approve", workflowID: "test.sensitive", status: .succeeded, approvalState: "approved"),
-            receipt(method: "approval.deny", workflowID: "test.sensitive", status: .succeeded, approvalState: "denied"),
-            receipt(method: "workflow.run", workflowID: "test.sensitive", status: .blocked, approvalState: "required")
+            receipt(method: "workflow.prepare", workflowID: "approval.smoke", status: .prepared, approvalState: "prepared"),
+            receipt(method: "approval.approve", workflowID: "approval.smoke", status: .succeeded, source: "hud", approvalState: "approved"),
+            receipt(method: "approval.deny", workflowID: "approval.smoke", status: .succeeded, source: "hud", approvalState: "denied"),
+            receipt(
+                method: "approval.approve",
+                workflowID: "approval.smoke",
+                status: .blocked,
+                approvalState: "required",
+                verificationResult: "blocked",
+                errorCode: MacCtlErrorCode.approvalExpired.rawValue
+            ),
+            receipt(method: "workflow.run", workflowID: "approval.smoke", status: .blocked, approvalState: "required", verificationResult: "blocked")
         ]
         let snapshot = ReleaseGateSnapshot(
             launchAgent: launchAgent,

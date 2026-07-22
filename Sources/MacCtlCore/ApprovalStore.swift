@@ -93,6 +93,12 @@ public final class ApprovalStore {
             .sorted { $0.expiresAt < $1.expiresAt }
     }
 
+    public func record(for token: String) -> ApprovalRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[token]?.prepared.record
+    }
+
     public func approve(token: String) throws -> PreparedApproval {
         lock.lock()
         defer { lock.unlock() }

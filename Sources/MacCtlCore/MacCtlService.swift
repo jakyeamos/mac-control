@@ -226,8 +226,12 @@ public final class MacCtlService {
 
     private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
-        let prepared = try approvalStore.approve(token: token)
-        return try executePrepared(request, prepared: prepared)
+        do {
+            let prepared = try approvalStore.approve(token: token)
+            return try executePrepared(request, prepared: prepared)
+        } catch let error as ApprovalStoreError {
+            return approvalFailure(request, token: token, error: error)
+        }
     }
 
     private func executePrepared(_ request: RequestEnvelope, prepared: PreparedApproval) throws -> ResponseEnvelope {
@@ -266,7 +270,12 @@ public final class MacCtlService {
 
     private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
-        let record = try approvalStore.deny(token: token)
+        let record: ApprovalRecord
+        do {
+            record = try approvalStore.deny(token: token)
+        } catch let error as ApprovalStoreError {
+            return approvalFailure(request, token: token, error: error)
+        }
         logger.record(event: "approval_denied", metadata: [
             "workflow": record.workflowID,
             "source": request.params["source"]?.stringValue ?? "cli"
@@ -448,6 +457,9 @@ public final class MacCtlService {
         let workflowID = request.params["workflow"]?.stringValue
             ?? response.result["workflow_id"]?.stringValue
             ?? response.result["workflow"]?.stringValue
+            ?? response.result["approval"]?.objectValue?["workflowID"]?.stringValue
+            ?? response.result["approval"]?.objectValue?["workflow_id"]?.stringValue
+            ?? response.error?.details["workflow_id"]?.stringValue
         let workflow = workflowID.flatMap { workflowRegistry.workflow(id: $0) }
         let permissions = permissionContext == "daemon"
             ? PermissionDiagnostics.report()
@@ -482,11 +494,13 @@ public final class MacCtlService {
         } else {
             verificationResult = "not_required"
         }
+        let receiptSource = request.params["source"]?.stringValue
+            ?? (["approval.approve", "approval.deny"].contains(request.method) ? "cli" : nil)
         let receipt = OperationReceipt(
             operationID: response.operationID,
             requestID: response.requestID,
             method: request.method,
-            source: request.params["source"]?.stringValue,
+            source: receiptSource,
             workflowID: workflowID,
             targetSurface: workflow?.surface,
             risk: workflow.map { workflowRegistry.validate($0).risk },
@@ -560,12 +574,37 @@ public final class MacCtlService {
         status: OperationStatus,
         code: MacCtlErrorCode,
         message: String,
+        operationID: String? = nil,
         details: [String: JSONValue] = [:]
     ) -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
+            operationID: operationID ?? UUID().uuidString,
             status: status,
             error: MacCtlError(code: code.rawValue, message: message, details: details)
+        )
+    }
+
+    private func approvalFailure(
+        _ request: RequestEnvelope,
+        token: String,
+        error: ApprovalStoreError
+    ) -> ResponseEnvelope {
+        let record = approvalStore.record(for: token)
+        let details = record.map { ["workflow_id": JSONValue.string($0.workflowID)] } ?? [:]
+        let code: MacCtlErrorCode
+        switch error {
+        case .notFound: code = .approvalNotFound
+        case .expired: code = .approvalExpired
+        case .alreadyUsed: code = .approvalAlreadyUsed
+        }
+        return failure(
+            request,
+            status: .blocked,
+            code: code,
+            message: error.localizedDescription,
+            operationID: record?.operationID,
+            details: details
         )
     }
 

@@ -233,7 +233,9 @@ public final class OperationReceiptStore {
         lock.lock()
         defer { lock.unlock() }
         try ensureDirectory()
-        let path = directory.appendingPathComponent(fileName(for: receipt.operationID))
+        let path = directory.appendingPathComponent(
+            fileName(for: receipt.operationID, requestID: receipt.requestID)
+        )
         do {
             let data = try JSONCodec.encode(receipt)
             try data.write(to: path, options: .atomic)
@@ -370,7 +372,7 @@ public final class OperationReceiptStore {
         return removed
     }
 
-    private func fileName(for operationID: String) -> String {
+    private func fileName(for operationID: String, requestID: String) -> String {
         let normalized = operationID.unicodeScalars.reduce(into: "") { value, scalar in
             let code = scalar.value
             let isAlphanumeric = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
@@ -378,7 +380,16 @@ public final class OperationReceiptStore {
                 value.append(String(scalar))
             }
         }
-        return "receipt-\(normalized.isEmpty ? UUID().uuidString : normalized).json"
+        let normalizedRequest = requestID.unicodeScalars.reduce(into: "") { value, scalar in
+            let code = scalar.value
+            let isAlphanumeric = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+            if isAlphanumeric || code == 45 || code == 95 {
+                value.append(String(scalar))
+            }
+        }
+        let operationPart = normalized.isEmpty ? UUID().uuidString : normalized
+        let requestPart = normalizedRequest.isEmpty ? UUID().uuidString : normalizedRequest
+        return "receipt-\(operationPart)-\(requestPart).json"
     }
 }
 

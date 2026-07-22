@@ -96,6 +96,14 @@ public final class WorkflowExecutor {
             ))
         }
 
+        if workflow.recipe == "approval-smoke" {
+            evidence.append(Evidence(
+                kind: "approval_probe",
+                message: "Completed a no-input approval probe without changing an external surface",
+                source: "macctl"
+            ))
+        }
+
         for assertion in workflow.assertions {
             try verify(assertion)
             evidence.append(Evidence(

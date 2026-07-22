@@ -70,5 +70,20 @@ state. Missing Mirroring, capture, input, or window discovery produces a
 blocked result.
 
 Approval HUD approve/deny/expiry behavior and Caps Lock double-tap activation
-must be exercised by a user in the GUI session. Caps Lock only brings the HUD
-forward and never approves an operation.
+must be exercised by a user in the GUI session using the built-in
+`approval.smoke` workflow. That workflow waits for 0.2 seconds and performs no
+external input or account change, but is classified as sensitive to exercise
+the approval boundary. The release gate requires fresh receipts for:
+
+```sh
+~/.local/bin/macctl workflow prepare approval.smoke --json
+~/.local/bin/macctl workflow run approval.smoke --json
+```
+
+The first command must be followed by a HUD approve, a second prepare followed
+by a HUD deny, a third prepare left open until the 120-second token expires and
+then an expiry attempt from the HUD or daemon CLI, and the second command must
+be blocked because no approval token was supplied. Approve and deny receipts
+must identify the HUD as their source; the expiry receipt may identify the HUD
+or CLI because expiry is a backend state transition. Caps Lock only brings the
+HUD forward and never approves an operation.

@@ -110,6 +110,15 @@ approval, execute the exact prepared plan with
 `~/.local/bin/macctl approval approve <token>`; the token is single-use and the
 ephemeral input is never returned by the daemon or written to its log.
 
+The built-in `approval.smoke` workflow is the release-evidence path for this
+boundary. It only waits for 0.2 seconds, performs no external input, and is
+classified as sensitive solely so the approval lifecycle can be exercised
+without changing an app, device, account, or document. The Tier-1 gate accepts
+fresh HUD-sourced approve and deny receipts, a fresh expiry receipt from the
+HUD or the daemon CLI, and a direct fail-closed run without a token. Expiry is
+a backend state transition; the HUD must remain visible and untouched until
+the token expires.
+
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
 available and returns instructions; it does not attempt to bypass TCC.
@@ -134,6 +143,20 @@ It activates iPhone Mirroring, locates Tinder through an ephemeral OCR frame,
 and verifies visibility. It does not swipe, message, purchase, or submit. If
 Screen Recording, input, or a paired Mirroring session is unavailable, it
 returns a blocked result instead of attempting a best-effort click.
+
+The approval-evidence path is:
+
+```sh
+~/.local/bin/macctl workflow prepare approval.smoke --json
+```
+
+Use the HUD to approve one prepared plan and deny a second. For expiry, leave
+a third HUD panel untouched until its 120-second token expires, then attempt
+Approve from the HUD or run `macctl approval approve <token>` and confirm the
+result is `approval_expired`. Finally run
+`~/.local/bin/macctl workflow run approval.smoke --json` without a token; it
+must be blocked. Double-tapping Caps Lock may bring the HUD forward but never
+approves a plan or changes the Caps Lock state.
 
 The project does not modify AIOS or career-ops. Integration adapters remain a
 later step after this standalone control plane is permissioned and proven.
