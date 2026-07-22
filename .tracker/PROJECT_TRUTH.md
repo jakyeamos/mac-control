@@ -2,88 +2,99 @@
 
 ## summary
 
-Standalone native Swift command-first Mac control plane implemented on \`dev\`.
-\`macctl\` is the CLI, \`macctld\` is the packaged per-user AppKit daemon, and
-the runtime uses an owner-only Unix socket with fail-closed GUI, approval,
-capture, and iPhone Mirroring boundaries. AIOS and career-ops were not
-modified.
+Tier-1 local-product hardening is implemented in commit `ef2a1b6` on `dev`.
+The packaged `macctld.app` is the active launchd executable, the daemon uses
+an owner-only AF_UNIX socket, operation receipts are durable/redacted, and a
+machine-readable release gate now fails closed. The verified gate is not yet
+release-ready because this machine lacks fresh daemon TCC authorization,
+Safari, an active iPhone Mirroring session, and live approval evidence.
+AIOS and career-ops were not modified.
 
 ## nextStep
 
-Rerun the live semantic-input, OCR, Caps Lock, approval-panel, and paired
-iPhone Mirroring smokes now that all required daemon permissions are granted.
-Integrate existing automation only after this generic utility is proven.
+Re-authorize the exact packaged daemon at
+`/Users/jakyeamos/.local/share/macctl/macctld.app` in macOS Privacy & Security,
+then rerun `doctor`, input/capture/OCR, approval HUD, and Caps Lock smokes.
+Provide Safari or an approved replacement environment for `safari.open`, start
+an active consumer iPhone Mirroring session, run the user-gated Tinder
+foreground-only workflow, and rerun the release gate and TMCP local-product
+re-score.
 
 ## blockers
 
-- No current TCC blocker observed; Automation remains user-approved on first
-  AppleScript use and iPhone Mirroring remains session-dependent.
+- `macctl release check --json` is blocked with 4 checks: daemon Accessibility,
+  Input Monitoring, Post Events, and Screen Recording are missing; `safari.open`
+  is unavailable because Safari is not installed; iPhone Mirroring reports
+  `running=false` and `windowDetected=false`; live approval receipts for
+  prepared/approved/denied/fail-closed paths are missing.
+- The four other Mac foreground smokes (Finder, TextEdit, System Settings,
+  Notes) passed with fresh receipts. Unit tests cover approval expiry/reuse and
+  Caps Lock timing, but GUI HUD/Caps Lock evidence has not been exercised.
 
 ## risks
 
-- iPhone Mirroring remains a custom-rendered, device/session-dependent surface.
-- Image anchors use an in-memory native pixel matcher and should be validated
-  against each app's scale/theme before being used in a consequential workflow.
-- Approval HUD behavior needs a real user click or explicit CLI approval; Caps
-  Lock only brings the panel forward and never approves.
+- TCC authorization is user-controlled and can be invalidated when the
+  ad-hoc-signed packaged daemon is rebuilt or replaced.
+- iPhone Mirroring is session- and window-discovery-dependent; no Tinder action
+  beyond foreground/visibility verification is permitted.
+- Safari, scriptable-app, and custom-rendered-app live evidence must not be
+  represented by synthetic receipts.
 
 ## lastUpdated
 
-2026-07-21
+2026-07-22
 
 ## quality
 
 | check | status | evidence |
 | --- | --- | --- |
 | formatter/lint | not configured | Swift package has no formatter/linter dependency |
-| typecheck/build | passed | \`swift build\` completed without warnings |
-| tests | passed | \`swift test\`: 12 tests, 0 failures |
-| pre-commit readiness | passed | \`pre-cr\`: Swift coverage wrapper, lcov, and anti-slop passed |
-| dead-code/safety scan | passed | \`rg\` scan; no TODO/FIXME/fatalError or raw OCR result field |
-| installed smoke | passed | packaged daemon/status succeeded; Accessibility, Post Events, Input Monitoring, and Screen Recording granted |
+| typecheck/build | passed | `swift build -c release` completed successfully |
+| tests | passed | `swift test`: 18 tests, 0 failures |
+| pre-commit readiness | passed | commit `ef2a1b6` Pre-CR gate passed |
+| launchd/socket/transport | passed | packaged identity active; socket mode 0600; no TCP listener |
+| receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, invalid count 0 |
+| daemon permissions | failed | fresh daemon-authoritative doctor reports four required permissions missing |
+| Mac live smokes | blocked | Finder/TextEdit/System Settings/Notes passed; Safari absent |
+| iPhone Mirroring | blocked | no active session/window; Tinder smoke not run |
+| approval/HUD/Caps Lock | blocked | live prepare/approve/deny/fail-closed evidence not present |
+| Tier-1 release gate | blocked | `blockerCount=4`, `passed=false`, generated 2026-07-22T04:38:08Z |
+| legal calculation safety | N/A | macctl has no legal or calculation subsystem |
 
 ## Current State
 
 - Source root: /Users/jakyeamos/projects/mac-control
-- Branch: \`dev\`
+- Branch: `dev`
+- Latest implementation commit: `ef2a1b6`
 - Runtime: Swift Package Manager, macOS native frameworks first
-- CLI: \`/Users/jakyeamos/.local/bin/macctl\`
-- Daemon bundle: \`/Users/jakyeamos/.local/share/macctl/macctld.app\`
-- Daemon executable: \`/Users/jakyeamos/.local/share/macctl/macctld.app/Contents/MacOS/macctld\`
-- LaunchAgent: \`~/Library/LaunchAgents/com.jakyeamos.macctl.daemon.plist\`
-- Socket: \`~/Library/Application Support/macctl/macctld.sock\` with mode 0600
-- Log: \`~/Library/Logs/macctl/macctld.log\` with mode 0600
+- CLI: `/Users/jakyeamos/.local/bin/macctl`
+- Daemon bundle: `/Users/jakyeamos/.local/share/macctl/macctld.app`
+- Daemon executable: `/Users/jakyeamos/.local/share/macctl/macctld.app/Contents/MacOS/macctld`
+- LaunchAgent: `~/Library/LaunchAgents/com.jakyeamos.macctl.daemon.plist`
+- Socket: `~/Library/Application Support/macctl/macctld.sock` with mode 0600
+- Receipts: `~/Library/Application Support/macctl/receipts/` with mode 0700 and files mode 0600
+- Log: `~/Library/Logs/macctl/macctld.log` with mode 0600
 - Scope: local CLI, per-user daemon, app/Accessibility/CGEvent control,
   screenshot/OCR/image-anchor fallback, approval HUD/menu-bar/Caps Lock
-  front-door, workflows, and consumer iPhone Mirroring adapter
+  front-door, workflows, receipts, release gate, and consumer iPhone Mirroring
+  adapter
 
 ## Current Position
 
-The initial implementation is committed as \`a68e2d4\`, and the packaged daemon
-slice is committed as \`002efc2\` on \`dev\`; neither has been pushed. The
-LaunchAgent is installed and loaded in the logged-in Aqua session and targets
-the packaged executable. The daemon reports arm64/macOS 26.5.2, advertises all
-three surfaces, and has a live owner-only socket. All four required daemon TCC
-checks are granted; the remaining validation is the live semantic and iPhone
-Mirroring smoke pass.
+The packaged daemon is installed and loaded in the logged-in Aqua session. The
+last verified launchd status matched the packaged executable and bundle identity
+with PID 38476; the daemon answered through the owner-only socket. No changes
+were pushed. Release readiness remains blocked by the live conditions recorded
+above, not by stale metadata.
 
 ## Recent Progress
 
-- Created the standalone Swift package and \`dev\` branch outside AIOS.
-- Added JSON envelopes, owner-only Unix socket, structured operation evidence,
-  daemon lifecycle, and LaunchAgent installation.
-- Added native app discovery, Accessibility selectors, CGEvent input, display
-  and window-relative coordinate mapping, Vision OCR, and image anchors.
-- Added conservative risk classification, stdin-only ephemeral input binding,
-  short-lived plan-bound approval tokens, HUD/menu-bar fallback, and Caps Lock
-  front-door activation.
-- Added Finder/TextEdit/System Settings/Safari/Notes recipes and the
-  user-gated iPhone Mirroring Tinder foreground/visibility recipe.
-- Verified \`swift build\`, \`swift test\` (12/12), LaunchAgent/socket permissions,
-  daemon status, doctor diagnostics, Finder success, and Tinder fail-closed
-  behavior; restored Finder afterward.
-- Packaged \`macctld\` as a signed \`macctld.app\` with stable bundle identity,
-  moved LaunchAgent execution to its bundled executable, removed the legacy
-  bare daemon, and verified the installed bundle plus 12 passing tests.
-- Authenticated the new bundle in System Settings, added it to Accessibility,
-  and verified the packaged daemon reports all four required TCC checks granted.
+- Added launchd `bootout -> bootstrap -> print` reconciliation and runtime identity checks.
+- Made doctor/status permission and runtime reporting daemon-authoritative and fail closed when unavailable.
+- Added schema-versioned atomic redacted receipts, backward-compatible decoding, retention, listing, and diagnostics.
+- Added the machine-readable Tier-1 release gate for identity, transport, TCC, receipts, live smokes, iPhone Mirroring, and approval safety.
+- Added local-product policy documentation with explicit legal-calculation N/A mapping.
+- Rebuilt and installed the packaged binaries; verified launchd identity, socket ownership, and receipt compliance.
+- Recorded fresh successful Finder, TextEdit, System Settings, and Notes receipts.
+- Recorded Safari unavailable (`Application not found: Safari`) and iPhone Mirroring inactive (`running=false`, `windowDetected=false`) without fabricating evidence.
+- Ran `swift test` with 18/18 passing and committed the implementation as `ef2a1b6`.
