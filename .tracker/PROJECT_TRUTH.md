@@ -11,6 +11,8 @@ Post Events, and Screen Recording were re-registered once for that identity and
 remained granted after a fresh rebuild, reinstall, and launchd restart. The
 receipt lifecycle now preserves prepare, approval, denial, and expiry evidence
 as separate records, and the approval safety gate passes with fresh evidence.
+The approval HUD now schedules token-scoped expiry and removes the panel when a
+pending approval expires, implemented in commit `de7d5f4`.
 The verified gate remains blocked only by the physical iPhone Mirroring/Tinder
 smoke. AIOS and career-ops were not modified.
 
@@ -52,9 +54,9 @@ bundle ID, and installation path stay stable.
 | check | status | evidence |
 | --- | --- | --- |
 | formatter/lint | not configured | Swift package has no formatter/linter dependency |
-| typecheck/build | passed | `swift build -c release` completed successfully |
-| tests | passed | `swift test`: 22 tests, 0 failures |
-| pre-commit readiness | passed | commit `81924c8` Pre-CR gate passed |
+| typecheck/build | passed | `swift build -c release` completed successfully for `de7d5f4` |
+| tests | passed | `./scripts/test-with-coverage.sh`: 22 tests, 0 failures |
+| pre-commit readiness | passed | commit `de7d5f4` Pre-CR gate passed |
 | launchd/socket/transport | passed | Apple Development identity active; socket mode 0600; no TCP listener |
 | receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 143 files, invalid count 0, pending prune 0 |
 | daemon permissions | passed | daemon-authoritative doctor reports Accessibility/Input Monitoring/Post Events/Screen Recording granted after reinstall |
@@ -69,7 +71,7 @@ bundle ID, and installation path stay stable.
 
 - Source root: /Users/jakyeamos/projects/mac-control
 - Branch: `dev`
-- Latest implementation commit: `81924c8`
+- Latest implementation commit: `de7d5f4`
 - Runtime: Swift Package Manager, macOS native frameworks first
 - CLI: `/Users/jakyeamos/.local/bin/macctl`
 - Daemon bundle: `/Users/jakyeamos/.local/share/macctl/macctld.app`
@@ -93,7 +95,9 @@ with PID 10958; the daemon answered through the owner-only socket and retained
 all four required TCC grants after reinstall. Receipt storage is healthy and the
 approval safety evidence is complete. No changes were pushed. Release readiness
 remains blocked by the live iPhone condition recorded above, not by stale
-metadata. Final TMCP artifacts are in
+metadata. The source-only ApprovalHUD expiry fix was built and tested, but the
+packaged daemon was not reinstalled in this turn, so live GUI evidence still
+refers to the prior installed build. Final TMCP artifacts are in
 `/private/tmp/macctl-tmcp-tier1-final-local/`; the advisory TMCP receipt is
 `/Users/jakyeamos/.tmcp/receipts/2026-07/tmcp-review-plan-b25509ba-dcc090fbb1386edb0eddec27dd93f662-1c251938a5-f145b4cdee644a84b032bfb99f94ffc8.json`.
 
@@ -112,3 +116,4 @@ metadata. Final TMCP artifacts are in
 - Ran `swift test` with 22/22 passing and committed the implementation as `81924c8`.
 - Refreshed the Tier-1 gate: `blockerCount=1`; approval evidence now passes and only iPhone Mirroring Tinder evidence remains.
 - Ran the final TMCP `expert_rubric_remediation_v1` review against the local-product/public-sector rubric; the blocked score and explicit legal-calculation N/A mapping are recorded in `/private/tmp/macctl-tmcp-tier1-final-local/`.
+- Added automatic ApprovalHUD dismissal at approval-token expiry and committed it as `de7d5f4`; release build, coverage tests, and Pre-CR passed.
