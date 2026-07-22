@@ -44,19 +44,44 @@ public enum ProcessRunner {
     }
 }
 
+public enum MacCtlDaemonBundle {
+    public static let bundleIdentifier = "com.jakyeamos.macctl.daemon"
+    public static let executableName = "macctld"
+
+    public static var infoPlist: [String: Any] {
+        [
+            "CFBundleDevelopmentRegion": "en",
+            "CFBundleDisplayName": "macctld",
+            "CFBundleExecutable": executableName,
+            "CFBundleIdentifier": bundleIdentifier,
+            "CFBundleInfoDictionaryVersion": "6.0",
+            "CFBundleName": "macctld",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+            "LSMinimumSystemVersion": "13.0",
+            "LSUIElement": true,
+            "NSHighResolutionCapable": true
+        ]
+    }
+}
+
 public enum LaunchAgentError: Error, LocalizedError {
     case daemonExecutableMissing
     case launchctlFailed(String)
     case installFailed(String)
+    case signingFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .daemonExecutableMissing:
-            return "The macctld executable could not be located beside macctl"
+            return "The macctld executable could not be located beside macctl or in the installed daemon bundle"
         case .launchctlFailed(let message):
             return "launchctl failed: \(message)"
         case .installFailed(let message):
             return "Could not install macctl: \(message)"
+        case .signingFailed(let message):
+            return "Could not sign the macctld app bundle: \(message)"
         }
     }
 }
@@ -176,25 +201,29 @@ public final class LaunchAgentManager {
               fileManager.isExecutableFile(atPath: daemonSource.path) else {
             throw LaunchAgentError.daemonExecutableMissing
         }
-        let destinationDirectory = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin", isDirectory: true)
+        let destinationDirectory = MacCtlPaths.userLocalBinDirectory
         try fileManager.createDirectory(
             at: destinationDirectory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        let destinations = [
-            (source, destinationDirectory.appendingPathComponent("macctl")),
-            (daemonSource, destinationDirectory.appendingPathComponent("macctld"))
-        ]
-        for (sourceURL, destinationURL) in destinations {
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                try fileManager.removeItem(at: destinationURL)
-            }
-            try fileManager.copyItem(at: sourceURL, to: destinationURL)
-            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destinationURL.path)
+        let commandDestination = destinationDirectory.appendingPathComponent("macctl")
+        if fileManager.fileExists(atPath: commandDestination.path) {
+            try fileManager.removeItem(at: commandDestination)
         }
-        return destinations.map { $0.1.path }
+        try fileManager.copyItem(at: source, to: commandDestination)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandDestination.path)
+
+        let daemonBundleURL = try installDaemonBundle(from: daemonSource)
+        if fileManager.fileExists(atPath: MacCtlPaths.legacyDaemonExecutableURL.path) {
+            try fileManager.removeItem(at: MacCtlPaths.legacyDaemonExecutableURL)
+        }
+        return [commandDestination.path, daemonBundleURL.path, MacCtlPaths.daemonAppExecutableURL.path]
+    }
+
+    public static func installedDaemonExecutablePath() -> String? {
+        let path = MacCtlPaths.daemonAppExecutableURL.path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
     }
 
     public static func siblingDaemonPath(for commandPath: String) -> String? {
@@ -203,5 +232,73 @@ public final class LaunchAgentManager {
             .deletingLastPathComponent()
             .appendingPathComponent("macctld")
         return FileManager.default.isExecutableFile(atPath: sibling.path) ? sibling.path : nil
+    }
+
+    private func installDaemonBundle(from source: URL) throws -> URL {
+        let fileManager = self.fileManager
+        let parent = MacCtlPaths.daemonDataDirectory
+        try fileManager.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+
+        let stagingURL = parent.appendingPathComponent(".macctld.app.\(UUID().uuidString)", isDirectory: true)
+        defer {
+            if fileManager.fileExists(atPath: stagingURL.path) {
+                try? fileManager.removeItem(at: stagingURL)
+            }
+        }
+        let contentsURL = stagingURL.appendingPathComponent("Contents", isDirectory: true)
+        let executableDirectoryURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        try fileManager.createDirectory(
+            at: executableDirectoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let executableURL = executableDirectoryURL.appendingPathComponent(MacCtlDaemonBundle.executableName)
+        try fileManager.copyItem(at: source, to: executableURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+
+        let infoData: Data
+        do {
+            infoData = try PropertyListSerialization.data(
+                fromPropertyList: MacCtlDaemonBundle.infoPlist,
+                format: .xml,
+                options: 0
+            )
+        } catch {
+            throw LaunchAgentError.installFailed("could not create the daemon Info.plist: \(error.localizedDescription)")
+        }
+        let infoURL = contentsURL.appendingPathComponent("Info.plist")
+        do {
+            try infoData.write(to: infoURL, options: .atomic)
+            try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: infoURL.path)
+        } catch {
+            throw LaunchAgentError.installFailed("could not write the daemon Info.plist: \(error.localizedDescription)")
+        }
+
+        do {
+            let signingResult = try ProcessRunner.run(
+                executable: "/usr/bin/codesign",
+                arguments: ["--force", "--deep", "--sign", "-", stagingURL.path],
+                timeout: 30
+            )
+            guard signingResult.status == 0 else {
+                let message = signingResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw LaunchAgentError.signingFailed(message.isEmpty ? "codesign exited with status \(signingResult.status)" : message)
+            }
+        } catch let error as LaunchAgentError {
+            throw error
+        } catch {
+            throw LaunchAgentError.signingFailed(error.localizedDescription)
+        }
+
+        if fileManager.fileExists(atPath: MacCtlPaths.daemonAppURL.path) {
+            try fileManager.removeItem(at: MacCtlPaths.daemonAppURL)
+        }
+        try fileManager.moveItem(at: stagingURL, to: MacCtlPaths.daemonAppURL)
+        return MacCtlPaths.daemonAppURL
     }
 }

@@ -33,8 +33,11 @@ swift run macctl install
 ~/.local/bin/macctl daemon install
 ```
 
-The second command installs and loads the user LaunchAgent. Use
-`~/.local/bin/macctl daemon restart` after rebuilding and reinstalling.
+The first command installs `macctl` at `~/.local/bin/macctl` and packages the
+daemon at `~/.local/share/macctl/macctld.app`. The second command installs and
+loads the user LaunchAgent, which executes the bundle's
+`Contents/MacOS/macctld` binary. Use `~/.local/bin/macctl daemon restart` after
+rebuilding and reinstalling.
 
 ## Daemon lifecycle
 
@@ -49,7 +52,9 @@ Installation writes the user LaunchAgent at
 `~/Library/LaunchAgents/com.jakyeamos.macctl.daemon.plist` and uses only the
 user `gui/<uid>` launchd domain. The socket is
 `~/Library/Application Support/macctl/macctld.sock` and is never exposed over
-TCP.
+TCP. The daemon app bundle has the stable identifier
+`com.jakyeamos.macctl.daemon`; add the packaged `macctld.app` itself in macOS
+Privacy & Security settings.
 
 Useful read-only commands include:
 
@@ -89,6 +94,12 @@ ephemeral input is never returned by the daemon or written to its log.
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
 available and returns instructions; it does not attempt to bypass TCC.
+
+After migrating from an older bare `macctld` executable, remove the old
+`macctld` entry from Accessibility, Screen Recording, and Input Monitoring if
+it remains, then add `~/.local/share/macctl/macctld.app` to each list and
+restart the daemon. TCC permissions are attached to the packaged application
+identity, not granted automatically by the installer.
 
 The iPhone Mirroring backend is intentionally layered on top of the same
 Accessibility, window capture, OCR, and normalized-coordinate primitives. It

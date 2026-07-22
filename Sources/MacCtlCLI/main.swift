@@ -154,8 +154,9 @@ struct CLI {
         let manager = LaunchAgentManager()
         switch subcommand {
         case "install":
-            let daemonPath = LaunchAgentManager.siblingDaemonPath(for: CommandLine.arguments[0])
-                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/macctld").path
+            let daemonPath = LaunchAgentManager.installedDaemonExecutablePath()
+                ?? LaunchAgentManager.siblingDaemonPath(for: CommandLine.arguments[0])
+                ?? MacCtlPaths.legacyDaemonExecutableURL.path
             guard FileManager.default.isExecutableFile(atPath: daemonPath) else {
                 throw LaunchAgentError.daemonExecutableMissing
             }

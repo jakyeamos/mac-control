@@ -31,6 +31,28 @@ public enum MacCtlPaths {
             .appendingPathComponent("\(launchAgentLabel).plist")
     }
 
+    public static var userLocalBinDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin", isDirectory: true)
+    }
+
+    public static var daemonDataDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/macctl", isDirectory: true)
+    }
+
+    public static var daemonAppURL: URL {
+        daemonDataDirectory.appendingPathComponent("macctld.app", isDirectory: true)
+    }
+
+    public static var daemonAppExecutableURL: URL {
+        daemonAppURL.appendingPathComponent("Contents/MacOS/macctld")
+    }
+
+    public static var legacyDaemonExecutableURL: URL {
+        userLocalBinDirectory.appendingPathComponent("macctld")
+    }
+
     @discardableResult
     public static func ensureDirectories() throws -> [URL] {
         let directories = [applicationSupportDirectory, logDirectory, workflowDirectory]

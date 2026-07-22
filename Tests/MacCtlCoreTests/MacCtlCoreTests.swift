@@ -286,4 +286,13 @@ final class MacCtlCoreTests: XCTestCase {
             XCTAssertEqual(error as? UnixSocketError, .socketPathIsNotSocket)
         }
     }
+
+    func testDaemonBundleHasStableIdentityAndExecutablePath() {
+        XCTAssertEqual(MacCtlDaemonBundle.bundleIdentifier, "com.jakyeamos.macctl.daemon")
+        XCTAssertEqual(MacCtlDaemonBundle.infoPlist["CFBundleExecutable"] as? String, "macctld")
+        XCTAssertEqual(MacCtlDaemonBundle.infoPlist["CFBundlePackageType"] as? String, "APPL")
+        XCTAssertEqual(MacCtlDaemonBundle.infoPlist["LSUIElement"] as? Bool, true)
+        XCTAssertTrue(MacCtlPaths.daemonAppURL.path.hasSuffix("/.local/share/macctl/macctld.app"))
+        XCTAssertTrue(MacCtlPaths.daemonAppExecutableURL.path.hasSuffix("/.local/share/macctl/macctld.app/Contents/MacOS/macctld"))
+    }
 }
