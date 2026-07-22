@@ -51,6 +51,9 @@ public struct IPhoneMirroringState: Codable, Equatable {
 }
 
 public final class IPhoneMirroringController {
+    static let searchFallbackPoint = NormalizedPoint(x: 0.5, y: 0.82)
+    static let searchFieldFallbackPoint = NormalizedPoint(x: 0.5, y: 0.93)
+
     private let appController: AppController
     private let captureController: CaptureController
     private let inputController: InputController
@@ -90,7 +93,10 @@ public final class IPhoneMirroringController {
         guard (try? appController.resolve("iPhone Mirroring")) != nil else {
             throw IPhoneMirroringError.unavailable
         }
-        _ = try appController.activate("iPhone Mirroring")
+        let app = try appController.activate("iPhone Mirroring")
+        if let processID = app.processID {
+            focusWindow(processID: pid_t(processID))
+        }
         return state()
     }
 
@@ -100,27 +106,51 @@ public final class IPhoneMirroringController {
             throw IPhoneMirroringError.connectionRequired(recoveryReason)
         }
         try inputController.key("cmd+1")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-        try inputController.key("cmd+3")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        try inputController.key("cmd+a")
-        try inputController.type(name)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        wait(0.4)
 
+        let homeFrame = try captureController.capture(surface: .iphoneMirroring)
+        let homeOCR = try captureController.ocr(homeFrame)
+        if let searchMatch = homeOCR.matches.first(where: {
+            $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Search") == .orderedSame
+        }) {
+            try inputController.click(at: CGPoint(x: searchMatch.bounds.midX, y: searchMatch.bounds.midY))
+        } else {
+            let fallbackPoint = try CoordinateMapper.windowPoint(
+                normalized: Self.searchFallbackPoint,
+                in: homeFrame.bounds
+            )
+            try inputController.click(at: fallbackPoint)
+        }
+        wait(0.3)
         let spotlightFrame = try captureController.capture(surface: .iphoneMirroring)
-        let spotlightResult = try captureController.ocr(spotlightFrame)
+        let spotlightOCR = try captureController.ocr(spotlightFrame)
+        if let searchField = spotlightOCR.matches.first(where: {
+            $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Search") == .orderedSame
+                && $0.bounds.minY > spotlightFrame.bounds.minY + spotlightFrame.bounds.height * 0.75
+        }) {
+            try inputController.click(at: CGPoint(x: searchField.bounds.midX, y: searchField.bounds.midY))
+        } else {
+            let fallbackPoint = try CoordinateMapper.windowPoint(
+                normalized: Self.searchFieldFallbackPoint,
+                in: spotlightFrame.bounds
+            )
+            try inputController.click(at: fallbackPoint)
+        }
+        wait(0.2)
+        try inputController.type(name)
+        wait(0.6)
+
+        let resultFrame = try captureController.capture(surface: .iphoneMirroring)
+        let spotlightResult = try captureController.ocr(resultFrame)
         guard let spotlightMatch = spotlightResult.matches.first(where: {
             $0.text.localizedCaseInsensitiveCompare(name) == .orderedSame
         }) else {
             throw IPhoneMirroringError.appNotFound(name)
         }
-        // Spotlight's result bounds are in the captured image's coordinate space,
-        // while CGEvent coordinates are in global display space. Move focus from
-        // the search field to the matched result, then open it with Return.
-        try inputController.key("down")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-        try inputController.key("return")
-        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        try inputController.click(at: CGPoint(x: spotlightMatch.bounds.midX, y: spotlightMatch.bounds.midY))
+        wait(1.0)
         return spotlightMatch
     }
 
@@ -183,6 +213,92 @@ public final class IPhoneMirroringController {
             return "iPhone Mirroring is waiting for the iPhone to connect."
         }
         return nil
+    }
+
+    private func focusWindow(processID: pid_t) {
+        let application = AXUIElementCreateApplication(processID)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXWindowsAttribute as CFString,
+            &windowsValue
+        ) == .success,
+              let windows = windowsValue as? [AXUIElement] else {
+            return
+        }
+        let displayBounds = CGDisplayBounds(CGMainDisplayID())
+        let safeBounds = displayBounds.insetBy(dx: 20, dy: 40)
+        for window in windows {
+            repositionIfNeeded(window, inside: safeBounds)
+            _ = AXUIElementSetAttributeValue(
+                window,
+                kAXMainAttribute as CFString,
+                kCFBooleanTrue
+            )
+            _ = AXUIElementSetAttributeValue(
+                window,
+                kAXFocusedAttribute as CFString,
+                kCFBooleanTrue
+            )
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        wait(0.2)
+    }
+
+    private func repositionIfNeeded(_ window: AXUIElement, inside safeBounds: CGRect) {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXPositionAttribute as CFString,
+            &positionValue
+        ) == .success,
+              AXUIElementCopyAttributeValue(
+                  window,
+                  kAXSizeAttribute as CFString,
+                  &sizeValue
+              ) == .success,
+              let positionValue,
+              let sizeValue else {
+            return
+        }
+        guard CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return
+        }
+        let positionAXValue = positionValue as! AXValue
+        let sizeAXValue = sizeValue as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(
+            positionAXValue,
+            .cgPoint,
+            &position
+        ), AXValueGetValue(
+            sizeAXValue,
+            .cgSize,
+            &size
+        ) else {
+            return
+        }
+        let frame = CGRect(origin: position, size: size)
+        guard !safeBounds.contains(frame) else { return }
+        let target = CGPoint(
+            x: safeBounds.maxX - min(size.width, safeBounds.width),
+            y: safeBounds.minY
+        )
+        var mutableTarget = target
+        if let targetValue = AXValueCreate(.cgPoint, &mutableTarget) {
+            _ = AXUIElementSetAttributeValue(
+                window,
+                kAXPositionAttribute as CFString,
+                targetValue
+            )
+        }
+    }
+
+    private func wait(_ seconds: TimeInterval) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 
     private func collectAccessibilityText(

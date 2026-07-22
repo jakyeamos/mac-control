@@ -117,14 +117,14 @@ public final class InputController {
     public func type(_ text: String) throws {
         try requirePostEventAccess()
         guard !text.isEmpty else { return }
-        let utf16 = Array(text.utf16)
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
-            throw InputControllerError.permissionDenied
+        for character in text {
+            if let keyCode = Self.characterKeyCodes[character.lowercased().first ?? character] {
+                let flags: CGEventFlags = character.isUppercase ? [.maskShift] : []
+                try postKey(keyCode: keyCode, flags: flags)
+            } else {
+                try postUnicode(character)
+            }
         }
-        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        event.post(tap: .cghidEventTap)
-        let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
-        keyUp?.post(tap: .cghidEventTap)
     }
 
     public func key(_ specification: String) throws {
@@ -177,6 +177,45 @@ public final class InputController {
             throw InputControllerError.permissionDenied
         }
     }
+
+    private func postKey(keyCode: CGKeyCode, flags: CGEventFlags = []) throws {
+        let down = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: keyCode,
+            keyDown: true
+        )
+        let up = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: keyCode,
+            keyDown: false
+        )
+        guard let down, let up else { throw InputControllerError.permissionDenied }
+        down.flags.formUnion(flags)
+        up.flags.formUnion(flags)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+    }
+
+    private func postUnicode(_ character: Character) throws {
+        let utf16 = Array(String(character).utf16)
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+            throw InputControllerError.permissionDenied
+        }
+        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        event.post(tap: .cghidEventTap)
+        let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        keyUp?.post(tap: .cghidEventTap)
+    }
+
+    private static let characterKeyCodes: [Character: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+        "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+        "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
+        "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29,
+        "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37,
+        "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44,
+        "n": 45, "m": 46, ".": 47, " ": 49
+    ]
 }
 
 public struct KeySpecification: Equatable {

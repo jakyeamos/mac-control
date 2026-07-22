@@ -40,6 +40,24 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(Selector(rawX: 100, rawY: 200).tier, .rawCoordinate)
     }
 
+    func testMirroringSearchFallbackIsWindowRelative() throws {
+        let bounds = CGRect(x: 100, y: 50, width: 300, height: 600)
+        let point = try CoordinateMapper.windowPoint(
+            normalized: IPhoneMirroringController.searchFallbackPoint,
+            in: bounds
+        )
+
+        XCTAssertEqual(point.x, 250, accuracy: 0.001)
+        XCTAssertEqual(point.y, 542, accuracy: 0.001)
+
+        let searchFieldPoint = try CoordinateMapper.windowPoint(
+            normalized: IPhoneMirroringController.searchFieldFallbackPoint,
+            in: bounds
+        )
+        XCTAssertEqual(searchFieldPoint.x, 250, accuracy: 0.001)
+        XCTAssertEqual(searchFieldPoint.y, 608, accuracy: 0.001)
+    }
+
     func testRiskClassificationAndSensitiveValidation() {
         let safe = ActionSpec(kind: .capture, surface: .macDesktop)
         XCTAssertEqual(ActionRiskClassifier.classify(safe), .safe)
