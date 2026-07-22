@@ -402,19 +402,51 @@ public struct RuntimeIdentity: Codable, Equatable {
     public let bundlePath: String?
     public let bundleIdentifier: String?
     public let bundleVersion: String?
+    public let signingIdentity: String?
+    public let signingTeamIdentifier: String?
+    public let signatureValid: Bool?
 
     public init(
         processID: Int32,
         executablePath: String?,
         bundlePath: String?,
         bundleIdentifier: String?,
-        bundleVersion: String?
+        bundleVersion: String?,
+        signingIdentity: String? = nil,
+        signingTeamIdentifier: String? = nil,
+        signatureValid: Bool? = nil
     ) {
         self.processID = processID
         self.executablePath = executablePath
         self.bundlePath = bundlePath
         self.bundleIdentifier = bundleIdentifier
         self.bundleVersion = bundleVersion
+        self.signingIdentity = signingIdentity
+        self.signingTeamIdentifier = signingTeamIdentifier
+        self.signatureValid = signatureValid
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case processID
+        case executablePath
+        case bundlePath
+        case bundleIdentifier
+        case bundleVersion
+        case signingIdentity
+        case signingTeamIdentifier
+        case signatureValid
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        processID = try container.decode(Int32.self, forKey: .processID)
+        executablePath = try container.decodeIfPresent(String.self, forKey: .executablePath)
+        bundlePath = try container.decodeIfPresent(String.self, forKey: .bundlePath)
+        bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+        bundleVersion = try container.decodeIfPresent(String.self, forKey: .bundleVersion)
+        signingIdentity = try container.decodeIfPresent(String.self, forKey: .signingIdentity)
+        signingTeamIdentifier = try container.decodeIfPresent(String.self, forKey: .signingTeamIdentifier)
+        signatureValid = try container.decodeIfPresent(Bool.self, forKey: .signatureValid)
     }
 
     public static func current() -> RuntimeIdentity {
@@ -423,12 +455,19 @@ public struct RuntimeIdentity: Codable, Equatable {
         let bundlePath = bundle.bundleURL.path.isEmpty ? nil : bundle.bundleURL.path
         let bundleIdentifier = bundle.bundleIdentifier
         let bundleVersion = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        let isAppBundle = bundlePath?.hasSuffix(".app") == true
+        let signature = isAppBundle
+            ? MacCtlCodeSigning.inspect(bundleURL: bundle.bundleURL)
+            : .unavailable
         return RuntimeIdentity(
             processID: ProcessInfo.processInfo.processIdentifier,
             executablePath: executablePath,
             bundlePath: bundlePath,
             bundleIdentifier: bundleIdentifier,
-            bundleVersion: bundleVersion
+            bundleVersion: bundleVersion,
+            signingIdentity: signature.identity,
+            signingTeamIdentifier: signature.teamIdentifier,
+            signatureValid: isAppBundle ? signature.valid : nil
         )
     }
 }

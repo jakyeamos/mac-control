@@ -303,6 +303,30 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(MacCtlPaths.daemonAppExecutableURL.path.hasSuffix("/.local/share/macctl/macctld.app/Contents/MacOS/macctld"))
     }
 
+    func testCodeSigningIdentityParsingAndPreference() {
+        let output = """
+        1) 0123456789ABCDEF0123456789ABCDEF01234567 "Developer ID Application: Example"
+        2) 89ABCDEF0123456789ABCDEF0123456789ABCDEF "Apple Development: Example (TEAM123456)"
+        """
+        let identities = MacCtlCodeSigning.parseIdentities(output)
+        XCTAssertEqual(identities.count, 2)
+        XCTAssertEqual(identities[0].hash, "0123456789ABCDEF0123456789ABCDEF01234567")
+        XCTAssertEqual(
+            MacCtlCodeSigning.preferredIdentity(from: identities)?.name,
+            "Apple Development: Example (TEAM123456)"
+        )
+    }
+
+    func testRuntimeIdentityDecodesBeforeSigningFieldsWereAdded() throws {
+        let data = Data(
+            #"{"processID":7,"executablePath":"/tmp/macctld","bundlePath":"/tmp/macctld.app","bundleIdentifier":"com.jakyeamos.macctl.daemon","bundleVersion":"1"}"#.utf8
+        )
+        let identity = try JSONCodec.decode(RuntimeIdentity.self, from: data)
+        XCTAssertNil(identity.signingIdentity)
+        XCTAssertNil(identity.signingTeamIdentifier)
+        XCTAssertNil(identity.signatureValid)
+    }
+
     func testLaunchAgentStatusRejectsStaleIdentityAndSpawnFailure() {
         let expected = "/Users/test/.local/share/macctl/macctld.app/Contents/MacOS/macctld"
         let healthyOutput = """

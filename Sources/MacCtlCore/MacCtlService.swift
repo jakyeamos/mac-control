@@ -288,9 +288,13 @@ public final class MacCtlService {
         let architecture = "unknown"
         #endif
         let permissions = PermissionDiagnostics.report()
-        let warnings = permissions
+        let runtimeIdentity = RuntimeIdentity.current()
+        var warnings = permissions
             .filter { $0.state == "missing" || $0.state == "unknown" }
             .map { "\($0.name) permission is missing" }
+        if runtimeIdentity.signatureValid == false {
+            warnings.append("The daemon bundle code signature is missing or invalid")
+        }
         return DoctorReport(
             processID: ProcessInfo.processInfo.processIdentifier,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
@@ -304,7 +308,7 @@ public final class MacCtlService {
             ],
             warnings: warnings,
             permissionContext: permissionContext,
-            runtimeIdentity: .current(),
+            runtimeIdentity: runtimeIdentity,
             launchAgent: launchAgentManager.status()
         )
     }

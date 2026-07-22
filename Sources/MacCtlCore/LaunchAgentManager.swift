@@ -356,10 +356,17 @@ public final class LaunchAgentManager {
             throw LaunchAgentError.installFailed("could not write the daemon Info.plist: \(error.localizedDescription)")
         }
 
+        let signingIdentity: MacCtlCodeSigningIdentity
+        do {
+            signingIdentity = try MacCtlCodeSigning.resolve()
+        } catch {
+            throw LaunchAgentError.signingFailed(error.localizedDescription)
+        }
+
         do {
             let signingResult = try ProcessRunner.run(
                 executable: "/usr/bin/codesign",
-                arguments: ["--force", "--deep", "--sign", "-", stagingURL.path],
+                arguments: ["--force", "--deep", "--sign", signingIdentity.hash, stagingURL.path],
                 timeout: 30
             )
             guard signingResult.status == 0 else {

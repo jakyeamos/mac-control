@@ -29,6 +29,10 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("receipts", isDirectory: true)
     }
 
+    public static var signingIdentityURL: URL {
+        applicationSupportDirectory.appendingPathComponent("signing-identity.json")
+    }
+
     public static var launchAgentURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)

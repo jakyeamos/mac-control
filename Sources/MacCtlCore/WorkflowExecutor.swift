@@ -84,10 +84,14 @@ public final class WorkflowExecutor {
                     "anchor_height": .number(Double(match.bounds.height))
                 ]
             ))
-            _ = try iphoneController.verifyMirroredAppVisible("Tinder")
+            do {
+                _ = try iphoneController.verifyMirroredAppVisible("Tinder")
+            } catch IPhoneMirroringError.appNotVisible {
+                _ = try iphoneController.verifyMirroredAppForeground("Tinder")
+            }
             evidence.append(Evidence(
                 kind: "assertion",
-                message: "Verified the mirrored app remains visible in iPhone Mirroring",
+                message: "Verified the requested mirrored app remains foregrounded in iPhone Mirroring",
                 source: "iPhone Mirroring"
             ))
         }

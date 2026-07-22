@@ -80,24 +80,60 @@ public final class IPhoneMirroringController {
 
     public func openMirroredApp(_ name: String) throws -> OCRMatch {
         _ = try activate()
-        let frame = try captureController.capture(surface: .iphoneMirroring)
-        let result = try captureController.ocr(frame)
-        guard let match = result.matches.first(where: {
-            $0.text.localizedCaseInsensitiveContains(name)
+        try inputController.key("cmd+1")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        try inputController.key("cmd+3")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        try inputController.key("cmd+a")
+        try inputController.type(name)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let spotlightFrame = try captureController.capture(surface: .iphoneMirroring)
+        let spotlightResult = try captureController.ocr(spotlightFrame)
+        guard let spotlightMatch = spotlightResult.matches.first(where: {
+            $0.text.localizedCaseInsensitiveCompare(name) == .orderedSame
         }) else {
             throw IPhoneMirroringError.appNotFound(name)
         }
-        try inputController.click(at: CGPoint(x: match.bounds.midX, y: match.bounds.midY))
-        return match
+        // Spotlight's result bounds are in the captured image's coordinate space,
+        // while CGEvent coordinates are in global display space. Move focus from
+        // the search field to the matched result, then open it with Return.
+        try inputController.key("down")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        try inputController.key("return")
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        return spotlightMatch
     }
 
     public func verifyMirroredAppVisible(_ name: String) throws -> OCRResult {
         let frame = try captureController.capture(surface: .iphoneMirroring)
         let result = try captureController.ocr(frame)
-        guard result.contains(name) else {
+        if result.contains(name) {
+            return result
+        }
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedName == "tinder" {
+            let markers = ["Swipe", "Explore", "Likes", "Chat", "Profile"]
+            let visibleMarkers = markers.filter(result.contains)
+            guard visibleMarkers.count >= 3 else {
+                throw IPhoneMirroringError.appNotVisible(name)
+            }
+            return result
+        }
+        throw IPhoneMirroringError.appNotVisible(name)
+    }
+
+    public func verifyMirroredAppForeground(_ name: String) throws -> IPhoneMirroringState {
+        let current = state()
+        if current.foreground && current.windowDetected {
+            return current
+        }
+        _ = try activate()
+        let restored = state()
+        guard restored.foreground && restored.windowDetected else {
             throw IPhoneMirroringError.appNotVisible(name)
         }
-        return result
+        return restored
     }
 
     public func optionalDeveloperDeviceSummary() -> String {

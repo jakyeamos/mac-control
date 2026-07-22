@@ -86,7 +86,7 @@ public final class ReleaseGate {
         "finder.open",
         "textedit.open",
         "system-settings.open",
-        "safari.open",
+        "chrome.open",
         "notes.open"
     ]
 

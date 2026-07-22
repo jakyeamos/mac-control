@@ -26,6 +26,24 @@ permissions, socket ownership, receipt storage, approval safety, Mac GUI
 smokes, or the iPhone Mirroring smoke is missing. It does not launch a workflow
 or alter a device to manufacture evidence.
 
+## Stable daemon identity
+
+The packaged daemon is installed at
+`~/.local/share/macctl/macctld.app` and is signed with a persistent local
+Apple Development or Developer ID Application identity. macctl stores the
+selected certificate hash and name in
+`~/Library/Application Support/macctl/signing-identity.json` with mode `0600`.
+Each later install reuses that identity, so normal rebuilds replace the
+executable without requiring another Accessibility, Input Monitoring, Post
+Events, or Screen Recording grant. `MACCTL_CODESIGN_IDENTITY` may override the
+stored selector with a certificate hash or exact name for an intentional
+migration.
+
+Installation fails closed when no persistent signing identity is available;
+ad-hoc signing is not used. A certificate replacement, bundle identifier
+change, or installation under a different path can still require a one-time
+macOS permission migration.
+
 ## Evidence recorded by the daemon
 
 Every request receives a durable receipt under
@@ -44,7 +62,7 @@ diagnostics.
 ## Manual live checks
 
 The live gate requires a logged-in Aqua session and user-controlled privacy
-permissions. Run the reversible Finder, TextEdit, System Settings, Safari, and
+permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome, and
 Notes workflows, then run the user-gated `iphone.open-tinder` workflow only
 when iPhone Mirroring is active. The Tinder check verifies foreground/visible
 state only; it does not swipe, message, purchase, submit, or change account

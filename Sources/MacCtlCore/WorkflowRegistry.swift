@@ -142,7 +142,7 @@ public final class WorkflowRegistry {
             ("finder.open", "Open Finder", "Open Finder and activate its front window", "Finder"),
             ("textedit.open", "Open TextEdit", "Open TextEdit and activate its front window", "TextEdit"),
             ("system-settings.open", "Open System Settings", "Open System Settings and activate its front window", "System Settings"),
-            ("safari.open", "Open Safari", "Open Safari and activate its front window", "Safari"),
+            ("chrome.open", "Open Google Chrome", "Open Google Chrome and activate its front window", "Google Chrome"),
             ("notes.open", "Open Notes", "Open Notes and activate its front window", "Notes")
         ].map { id, name, summary, app in
             WorkflowSpec(
