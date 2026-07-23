@@ -130,3 +130,4 @@ above. Final TMCP artifacts are in
 - Added focus-preserving background workflows, fail-closed global-input validation, policy-bound approvals/receipts, CLI flags, and token-admission regression coverage in `5a153f3`; release build, 26 tests, and Pre-CR passed.
 - Installed and restarted the `5a153f3` packaged daemon; daemon-authoritative checks passed, and the live Calculator background smoke preserved `com.openai.codex` foreground focus before and after execution.
 - Refreshed `approval.smoke` prepared evidence and completed HUD denial; `approval.safety` now passes and only the iPhone Mirroring gate remains blocked.
+- Added the minimal agent operating contract and context index in `e0f2d90`; the repository now has a bounded default context route for future work.
