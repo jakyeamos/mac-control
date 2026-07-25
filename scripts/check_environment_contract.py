@@ -56,7 +56,12 @@ def _errors_for_packets() -> list[str]:
 def _errors_for_links() -> list[str]:
     index = (ROOT / ".agents" / "context" / "README.md").read_text(encoding="utf-8")
     errors: list[str] = []
-    for target in re.findall(r"`([^`]+\.md)`", index):
+    targets = [
+        target
+        for match in re.findall(r"\[[^\]]+\]\(([^)]+)\)|`([^`]+\.md)`", index)
+        for target in (match[0] or match[1],)
+    ]
+    for target in targets:
         if target in {"README.md", "AGENTS.md"}:
             continue
         if target.startswith("/") or not (ROOT / ".agents" / "context" / target).is_file():
