@@ -1,0 +1,28 @@
+# Deployment and rollback
+
+The owner-controlled deployment is local package build, install, and LaunchAgent
+restart:
+
+```sh
+swift build
+swift run macctl install
+~/.local/bin/macctl daemon install
+~/.local/bin/macctl daemon restart
+~/.local/bin/macctl release check --json
+```
+
+`macctld.app` is installed under `~/.local/share/macctl/` and launched through
+the user `gui/<uid>` `launchd` domain by a LaunchAgent. The stable bundle identity and persisted signing
+selector must remain unchanged unless an intentional TCC migration is planned.
+Installation, daemon restart, and live GUI/device checks require user control;
+they are never run by the repository audit as side effects.
+
+Rollback is a forward, reviewable reinstall of the last verified package and
+its known-good commit. Stop the user daemon, install the prior packaged build,
+restart the LaunchAgent, and rerun `doctor --json`, receipt diagnostics, and
+the Tier-1 gate. Do not rewrite Git history or delete receipts. If identity,
+path, or permissions changed, record the migration and require fresh evidence.
+
+Release ownership is the repository owner. The audit runtime may build and test
+an isolated disposable worktree only; it may not install, launch, merge, push,
+publish, or deploy.
