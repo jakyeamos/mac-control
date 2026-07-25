@@ -18,11 +18,14 @@ Focus-preserving background workflows are implemented in commit `5a153f3`:
 foreground is the default, background app launch is non-activating, named
 macOS app actions use Accessibility or process-targeted input, focus changes
 fail closed, and approval/report/receipt provenance includes the policy. The
-The live background smoke now passes in the installed Aqua daemon: Calculator
+live background smoke now passes in the installed Aqua daemon: Calculator
 ran as a named macOS app target while the focus guard recorded
 `com.openai.codex` as both the initial and final foreground app. AIOS and
 career-ops were not modified; Career Ops can invoke mac-control when it needs
-local macOS interaction.
+local macOS interaction. The environment-legibility contract is implemented
+in `488b91f` and `aef0572`: routed context packets, explicit native quality
+commands, a strict contract checker, and validated packet links now cover the
+repository’s machine-facing operating surface.
 
 ## nextStep
 
@@ -58,7 +61,7 @@ release gate is refreshed.
 
 ## lastUpdated
 
-2026-07-22
+2026-07-25
 
 ## quality
 
@@ -68,6 +71,7 @@ release gate is refreshed.
 | typecheck/build | passed | `swift build -c release` completed successfully for `5a153f3` |
 | tests | passed | `swift test`: 26 tests, 0 failures |
 | pre-commit readiness | passed | commit `5a153f3` Pre-CR gate passed |
+| environment contract | passed | `python3 scripts/check_environment_contract.py`; dynamic leverage audit `audit_d0256f05360fc20a` |
 | launchd/socket/transport | passed | Apple Development identity active; socket mode 0600; no TCP listener |
 | receipt storage | passed | owner-only 0700/0600, atomic writes, retention 1,000, 209 files, invalid count 0, pending prune 0 |
 | daemon permissions | passed | daemon-authoritative doctor reports Accessibility/Input Monitoring/Post Events/Screen Recording granted after reinstall |
@@ -83,7 +87,7 @@ release gate is refreshed.
 
 - Source root: /Users/jakyeamos/projects/mac-control
 - Branch: `dev`
-- Latest implementation commit: `5a153f3`
+- Latest implementation commit: `aef0572` (environment contract routing); runtime implementation remains `5a153f3`
 - Runtime: Swift Package Manager, macOS native frameworks first
 - CLI: `/Users/jakyeamos/.local/bin/macctl`
 - Daemon bundle: `/Users/jakyeamos/.local/share/macctl/macctld.app`
@@ -107,9 +111,12 @@ the signed packaged identity, owner-only socket, all four required TCC grants,
 and healthy owner-only receipt storage. The live background workflow receipt
 records Calculator PID 8554, `background` focus policy, and the unchanged
 `com.openai.codex` foreground app before and after execution; the temporary
-workflow was removed and Calculator was closed after the smoke. No changes were
-pushed. Release readiness remains blocked only by the iPhone condition recorded
-above. Final TMCP artifacts are in
+workflow was removed and Calculator was closed after the smoke. The repository
+environment audit is complete at maturity `4.0/4.0` across all 10 dimensions
+with zero findings; replay is deterministic with summary hash
+`798e50624027a7ca97ae13bf6722c393b342868f7a817e2a3d7ccf4420be59af`. Release
+readiness remains blocked only by the iPhone condition recorded above. Final
+TMCP artifacts are in
 `/private/tmp/macctl-tmcp-tier1-final-local/`; the advisory TMCP receipt is
 `/Users/jakyeamos/.tmcp/receipts/2026-07/tmcp-review-plan-b25509ba-dcc090fbb1386edb0eddec27dd93f662-1c251938a5-f145b4cdee644a84b032bfb99f94ffc8.json`.
 
@@ -131,3 +138,5 @@ above. Final TMCP artifacts are in
 - Installed and restarted the `5a153f3` packaged daemon; daemon-authoritative checks passed, and the live Calculator background smoke preserved `com.openai.codex` foreground focus before and after execution.
 - Refreshed `approval.smoke` prepared evidence and completed HUD denial; `approval.safety` now passes and only the iPhone Mirroring gate remains blocked.
 - Added the minimal agent operating contract and context index in `e0f2d90`; the repository now has a bounded default context route for future work.
+- Added routed architecture, commands, conventions, security, failure-mode, examples, done, and deployment packets plus a strict contract checker in `488b91f`; native build/test/coverage and checker gates passed.
+- Converted the context index to validated Markdown links in `aef0572`; dynamic leverage audit `audit_d0256f05360fc20a` passed all 10 dimensions at `4.0/4.0`, with deterministic replay.
