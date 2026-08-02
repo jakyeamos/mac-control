@@ -1,6 +1,6 @@
 ---
 name: mac-control
-description: Route and execute verified macOS UI work through the installed macctl control plane. Use when a task needs a visible macOS app, native control, menu, focus movement, keyboard shortcut, or iPhone Mirroring; when no mature CLI, API, typed app connector, or browser DOM route covers the exact action; or when choosing among Mac Control semantic Accessibility, keyboard navigation, generic GUI, and visual or coordinate interaction. Prefer a mature direct interface when it fully covers the task.
+description: Route and execute verified macOS UI work through the installed macctl control plane. Use when a task needs a visible macOS app, native control, menu, focus movement, keyboard shortcut, or iPhone Mirroring; when no mature CLI, API, typed app connector, or browser DOM route covers the exact action; or when choosing among Mac Control semantic Accessibility, keyboard navigation, generic GUI, and visual or coordinate interaction. Prefer a mature direct interface when it fully covers the task, and do not use Mac Control merely for read-only settings or state that a direct macOS command can answer.
 ---
 
 # Mac Control
@@ -8,6 +8,9 @@ description: Route and execute verified macOS UI work through the installed macc
 Choose the highest-confidence, lowest-overhead route that can verify the result. Use Mac
 Control to extend an agent's speed and reach; do not use it merely because a task happens on
 a Mac.
+
+Load this packet once. If the source, canonical installation, or provider projection resolves
+to the same skill, do not load another copy.
 
 ## Route before acting
 
@@ -27,7 +30,19 @@ the task, and independently verifiable. Do not count a read-only interface as co
 required mutation. Read [references/routing.md](references/routing.md) when the route is
 ambiguous, the task spans applications, or the action carries approval or private-input risk.
 
-## Reconcile the live prerequisite
+For a read-only Full Keyboard Access status check, use the direct preference read:
+
+```sh
+/usr/bin/defaults read -g AppleKeyboardUIMode
+```
+
+Do not run `macctl doctor`, `macctl capabilities`, or `macctl control status` merely to answer
+that preference question. A missing key or unreadable result is unknown, not disabled.
+
+## Reconcile the live prerequisite only for a Mac Control route
+
+Stop here when the direct route fully covers the task. Run the following checks only after
+selecting a Mac Control route that will send or prepare synthetic input:
 
 Resolve the installed command and inspect the live control plane before input:
 

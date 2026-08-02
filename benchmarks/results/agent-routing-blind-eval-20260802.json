@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-02",
+  "provider": "codex",
+  "surface": "fresh-context subagent routing",
+  "executionMode": "plan-only; no GUI input",
+  "firstPrinciple": "Choose the highest-confidence, lowest-overhead route that can verify the result; use a mature direct interface when it fully covers the task.",
+  "excludedPilot": {
+    "runs": 3,
+    "reason": "The initial harness prohibited all command execution, which also prevented read-only skill loading."
+  },
+  "preFix": {
+    "validRunsPerCase": 3,
+    "cases": {
+      "focus-next-control": {
+        "runnerPasses": 3,
+        "judgePasses": 3,
+        "expectedRoute": "macctl atomic app-scoped next-control"
+      },
+      "full-keyboard-access-status": {
+        "runnerPasses": 0,
+        "judgePasses": 0,
+        "expectedRoute": "/usr/bin/defaults read -g AppleKeyboardUIMode",
+        "observedFailure": "All runners chose indirect macctl diagnostics."
+      },
+      "known-save-button": {
+        "runnerPasses": 3,
+        "judgePasses": 2,
+        "expectedRoute": "macctl atomic semantic AXButton activation",
+        "observedFailure": "One runner loaded both source and installed copies of the same skill."
+      }
+    }
+  },
+  "repair": {
+    "changes": [
+      "Made direct read-only settings and state queries an explicit negative trigger.",
+      "Made macctl prerequisite reconciliation conditional on selecting a Mac Control route.",
+      "Added the exact Full Keyboard Access preference read to the core skill.",
+      "Required loading only one source, canonical, or provider projection of the skill."
+    ],
+    "regressionTestsAdded": 2
+  },
+  "postFix": {
+    "validRunsPerCase": 3,
+    "cases": {
+      "focus-next-control": {
+        "runnerPasses": 3,
+        "judgePasses": 3,
+        "selectedRoute": "macctl control perform next-control --app System Settings --confirm --json"
+      },
+      "full-keyboard-access-status": {
+        "runnerPasses": 3,
+        "judgePasses": 3,
+        "selectedRoute": "/usr/bin/defaults read -g AppleKeyboardUIMode"
+      },
+      "known-save-button": {
+        "runnerPasses": 3,
+        "judgePasses": 3,
+        "selectedRoute": "macctl control perform activate --app TextEdit --confirm --role AXButton --title Save --json"
+      }
+    },
+    "duplicateSkillLoads": 0,
+    "overall": "pass"
+  },
+  "evidenceBoundary": {
+    "triggerAndDecision": "behavior-verified for these three Codex routing cases",
+    "liveAction": "not executed by this evaluation",
+    "generalization": "Additional task families and other providers remain unverified."
+  }
+}

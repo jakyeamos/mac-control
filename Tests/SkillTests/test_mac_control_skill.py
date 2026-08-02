@@ -35,6 +35,25 @@ class MacControlSkillTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
+    def test_direct_status_queries_do_not_trigger_macctl_preflight(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        direct = "/usr/bin/defaults read -g AppleKeyboardUIMode"
+        self.assertIn(direct, text)
+        self.assertIn("Stop here when the direct route fully covers the task", text)
+        self.assertIn(
+            "Run the following checks only after\nselecting a Mac Control route",
+            text,
+        )
+        self.assertIn(
+            "Do not run `macctl doctor`, `macctl capabilities`, or `macctl control status` merely to answer",
+            text,
+        )
+
+    def test_skill_is_loaded_only_once_across_projections(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("Load this packet once", text)
+        self.assertIn("do not load another copy", text)
+
     def test_reference_has_positive_negative_and_ambiguous_cases(self) -> None:
         text = ROUTING.read_text(encoding="utf-8")
         for marker in (
