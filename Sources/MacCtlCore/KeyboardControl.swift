@@ -60,6 +60,15 @@ public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
         }
     }
 
+    public var expectsFocusChange: Bool {
+        switch self {
+        case .activate, .passThrough:
+            return false
+        default:
+            return true
+        }
+    }
+
     public static func resolve(_ value: String) throws -> KeyboardCommand {
         let normalized = value
             .trimmingCharacters(in: .whitespacesAndNewlines)

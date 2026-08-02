@@ -509,22 +509,13 @@ public final class MacCtlService {
         let count = try requestedKeyboardCount(from: request)
         let interKeyDelay = try requestedInterKeyDelay(from: request)
         let report = try withExecutionLock {
-            let (lease, application) = try requireKeyboardInputLease(
-                token: token,
-                requireFullKeyboardAccess: true
-            )
-            return try keyboardAccessController.send(
+            try semanticActionRouter.perform(
                 command: command,
+                selector: nil,
+                leaseToken: token,
                 count: count,
-                targetApplication: application,
-                leaseExpiresAt: lease.expiresAt,
                 interKeyDelay: interKeyDelay,
-                beforeEach: { _ in
-                    _ = try self.requireKeyboardInputLease(
-                        token: token,
-                        requireFullKeyboardAccess: true
-                    )
-                }
+                allowRawCoordinate: false
             )
         }
         return try success(
@@ -532,7 +523,7 @@ public final class MacCtlService {
             value: report,
             evidence: [Evidence(
                 kind: "keyboard_input",
-                message: "Named keyboard navigation ran under a live lease and per-key focus checks",
+                message: "Named keyboard navigation ran under a live lease and reported post-action focus verification",
                 source: "macctld"
             )]
         )
@@ -1610,8 +1601,11 @@ public final class MacCtlService {
         } else {
             approvalState = "not_required"
         }
+        let controlVerification = response.result["verification"]?.objectValue?["state"]?.stringValue
         let verificationResult: String
-        if taskLifecycleState == TaskLifecycleState.completed.rawValue {
+        if let controlVerification {
+            verificationResult = controlVerification
+        } else if taskLifecycleState == TaskLifecycleState.completed.rawValue {
             verificationResult = "passed"
         } else if taskLifecycleState == TaskLifecycleState.indeterminate.rawValue {
             verificationResult = "indeterminate"
@@ -1643,6 +1637,7 @@ public final class MacCtlService {
             stepID: taskStepID,
             route: response.result["last_route"]?.stringValue
                 ?? response.result["lastRoute"]?.stringValue
+                ?? response.result["route"]?.stringValue
                 ?? checkpoint?.route,
             adapterID: taskStep?.action.parameters["adapter_id"]?.stringValue,
             recoveryClassification: taskStep?.recovery.mode,

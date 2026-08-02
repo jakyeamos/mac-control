@@ -442,7 +442,12 @@ public final class ReleaseGate {
         if !hasFreshReceipt(method: "keyboard.lease.acquire", evidenceKind: "keyboard_lease", in: snapshot.receipts) {
             missing.append("lease_acquisition")
         }
-        if !hasFreshReceipt(method: "keyboard.navigate", evidenceKind: "keyboard_input", in: snapshot.receipts) {
+        if !hasFreshReceipt(
+            method: "keyboard.navigate",
+            evidenceKind: "keyboard_input",
+            verificationResult: ControlVerificationState.passed.rawValue,
+            in: snapshot.receipts
+        ) {
             missing.append("named_navigation")
         }
         if !hasFreshReceipt(method: "keyboard.inspect", evidenceKind: "keyboard_focus", in: snapshot.receipts) {
@@ -668,11 +673,13 @@ public final class ReleaseGate {
     private func hasFreshReceipt(
         method: String,
         evidenceKind: String,
+        verificationResult: String? = nil,
         in receipts: [OperationReceipt]
     ) -> Bool {
         receipts.contains {
             $0.method == method
                 && $0.status == .succeeded
+                && (verificationResult == nil || $0.verificationResult == verificationResult)
                 && $0.evidence.contains { $0.kind == evidenceKind }
                 && isFresh($0)
         }

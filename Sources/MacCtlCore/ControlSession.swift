@@ -310,24 +310,29 @@ public final class ControlSession {
     public func completeAction(
         _ context: ControlActionContext,
         action: String,
-        route: ControlActionRoute
+        route: ControlActionRoute,
+        requireFocusChange: Bool = false
     ) throws -> ControlActionVerification {
         _ = try revalidate(context)
+        let readObservation = { [self] in
+            let foreground = foregroundApplication()
+            return ControlObservation(
+                foregroundApplication: foreground,
+                focusedElement: focusedElement(for: foreground)
+            )
+        }
         let observation: ControlObservation
         do {
             observation = try verifier.waitUntil(
                 timeout: postActionTimeout,
-                read: { [self] in
-                    let foreground = foregroundApplication()
-                    return ControlObservation(
-                        foregroundApplication: foreground,
-                        focusedElement: focusedElement(for: foreground)
-                    )
-                },
-                predicate: { $0.foregroundApplication?.processID != nil }
+                read: readObservation,
+                predicate: {
+                    guard $0.foregroundApplication?.processID != nil else { return false }
+                    return !requireFocusChange || context.focusedElement != $0.focusedElement
+                }
             )
         } catch ControlStateVerifierError.timedOut {
-            throw KeyboardControlError.foregroundUnavailable
+            observation = readObservation()
         }
         guard let after = observation.foregroundApplication else {
             throw KeyboardControlError.foregroundUnavailable
@@ -336,9 +341,7 @@ public final class ControlSession {
         try validateScope(context.lease, against: after)
         let focusChanged = context.focusedElement != observation.focusedElement
         let verification = ControlActionVerification(
-            state: context.focusedElement != nil && observation.focusedElement != nil
-                ? .passed
-                : .foregroundOnly,
+            state: focusChanged ? .passed : .foregroundOnly,
             foregroundBefore: context.foregroundApplication,
             foregroundAfter: after,
             foregroundChanged: !sameApplication(context.foregroundApplication, after),
@@ -617,7 +620,8 @@ public final class SemanticActionRouter {
         let verification = try session.completeAction(
             context,
             action: command.rawValue,
-            route: .keyboard
+            route: .keyboard,
+            requireFocusChange: command.expectsFocusChange
         )
         return SemanticActionReport(
             action: report.action,

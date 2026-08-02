@@ -495,8 +495,60 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(report.keyCount, 0)
         XCTAssertEqual(accessibility.pressCount, 1)
         XCTAssertTrue(sender.keys.isEmpty)
-        XCTAssertEqual(report.verification.state, .passed)
+        XCTAssertEqual(report.verification.state, .foregroundOnly)
+        XCTAssertFalse(report.verification.focusChanged)
         XCTAssertEqual(report.verification.focusAfter?.title, "Save")
+    }
+
+    func testKeyboardNavigationPassesOnlyAfterFocusChanges() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let sender = RecordingKeyboardEventSender()
+        let store = KeyboardDriveStore()
+        let before = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXTextField",
+            subrole: nil,
+            identifier: "address",
+            title: nil
+        )
+        let after = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "reload",
+            title: "Reload"
+        )
+        let session = ControlSession(
+            keyboardDriveStore: store,
+            focusedElementInspector: SequencedFocusedElementInspector([before, after]),
+            foregroundApplication: { app },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true }
+        )
+        let router = SemanticActionRouter(
+            session: session,
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            accessibilityActionController: TestAccessibilityActionPerformer(),
+            visualActionController: TestVisualActionPerformer()
+        )
+        let lease = try store.acquire(scope: .session, application: nil, seconds: 30, confirm: true)
+
+        let report = try router.perform(
+            command: .nextControl,
+            selector: nil,
+            leaseToken: lease.token,
+            count: 1,
+            interKeyDelay: 0,
+            allowRawCoordinate: false
+        )
+
+        XCTAssertEqual(sender.keys, ["tab"])
+        XCTAssertEqual(report.verification.state, .passed)
+        XCTAssertTrue(report.verification.focusChanged)
+        XCTAssertEqual(report.verification.focusAfter?.identifier, "reload")
     }
 
     func testSemanticRouterFallsBackFromMissingAccessibilityElementToKeyboard() throws {
@@ -2118,7 +2170,7 @@ final class MacCtlCoreTests: XCTestCase {
             receipt(method: "keyboard.lease.acquire", workflowID: nil, status: .succeeded, evidence: [
                 ReceiptEvidence(kind: "keyboard_lease", source: "macctld")
             ]),
-            receipt(method: "keyboard.navigate", workflowID: nil, status: .succeeded, evidence: [
+            receipt(method: "keyboard.navigate", workflowID: nil, status: .succeeded, verificationResult: "passed", evidence: [
                 ReceiptEvidence(kind: "keyboard_input", source: "macctld")
             ]),
             receipt(method: "keyboard.inspect", workflowID: nil, status: .succeeded, evidence: [
@@ -2161,6 +2213,37 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(report.passed)
         XCTAssertEqual(report.blockerCount, 0)
         XCTAssertTrue(report.checks.allSatisfy { $0.state == .passed })
+
+        let unverifiedKeyboardReceipts = receipts.map { existing in
+            guard existing.method == "keyboard.navigate" else { return existing }
+            return receipt(
+                method: "keyboard.navigate",
+                workflowID: nil,
+                status: .succeeded,
+                verificationResult: "foreground_only",
+                evidence: [ReceiptEvidence(kind: "keyboard_input", source: "macctld")]
+            )
+        }
+        let unverifiedKeyboardReport = ReleaseGate(
+            maximumEvidenceAge: 100,
+            now: { Date(timeIntervalSince1970: 10_000) }
+        ).evaluate(snapshot: ReleaseGateSnapshot(
+            launchAgent: launchAgent,
+            daemonStatus: daemon,
+            doctorReport: doctor,
+            receiptStoreStatus: daemon.receiptStore,
+            receipts: unverifiedKeyboardReceipts,
+            socketExists: true,
+            socketOwnerOnly: true,
+            daemonError: nil,
+            keyboardAccessStatus: keyboardStatus,
+            taskCapabilities: taskCapabilities,
+            checkpointStoreStatus: checkpointStatus
+        ))
+        XCTAssertEqual(
+            unverifiedKeyboardReport.checks.first(where: { $0.id == "live.keyboard-control" })?.state,
+            .blocked
+        )
 
         let networkReport = ReleaseGate(maximumEvidenceAge: 100, now: { Date(timeIntervalSince1970: 10_000) })
             .evaluate(snapshot: ReleaseGateSnapshot(
@@ -2305,6 +2388,22 @@ private final class TestFocusedElementInspector: FocusedElementInspecting {
             throw failure
         }
         return try XCTUnwrap(value)
+    }
+}
+
+private final class SequencedFocusedElementInspector: FocusedElementInspecting {
+    private let snapshots: [FocusedElementSnapshot]
+    private var index = 0
+
+    init(_ snapshots: [FocusedElementSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func focusedElementSnapshot(pid: pid_t, application: AppInfo) throws -> FocusedElementSnapshot {
+        let fallback = try XCTUnwrap(snapshots.last)
+        let snapshot = index < snapshots.count ? snapshots[index] : fallback
+        index += 1
+        return snapshot
     }
 }
 
