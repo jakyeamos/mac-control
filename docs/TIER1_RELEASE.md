@@ -64,10 +64,15 @@ diagnostics.
 The live gate requires a logged-in Aqua session and user-controlled privacy
 permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome, and
 Notes workflows, then run the user-gated `iphone.open-tinder` workflow only
-when iPhone Mirroring is active. The Tinder check verifies foreground/visible
-state only; it does not swipe, message, purchase, submit, or change account
-state. Missing Mirroring, capture, input, or window discovery produces a
-blocked result.
+when iPhone Mirroring is active and the user has explicitly acquired the
+short-lived driving lease. The lease is an in-memory handoff: after
+`macctl iphone drive begin`, keep hands off the trackpad, pass the returned
+token with `--driving-lease`, and release it with `macctl iphone drive end
+<token>`. The daemon does not infer trackpad activity or claim hardware-level
+input telemetry. The Tinder check verifies foreground/visible state only; it
+does not swipe, message, purchase, submit, or change account state. Missing
+Mirroring, capture, input, window discovery, or driving-lease coordination
+produces a blocked result.
 
 Approval HUD approve/deny/expiry behavior and Caps Lock double-tap activation
 must be exercised by a user in the GUI session using the built-in
@@ -87,3 +92,84 @@ be blocked because no approval token was supplied. Approve and deny receipts
 must identify the HUD as their source; the expiry receipt may identify the HUD
 or CLI because expiry is a backend state transition. Caps Lock only brings the
 HUD forward and never approves an operation.
+
+## Keyboard-first evidence
+
+The keyboard release dimension is separate from generic workflow-key approval
+and from iPhone Mirroring shared input. After Full Keyboard Access is enabled
+by the user, the live smoke run is:
+
+```sh
+~/.local/bin/macctl keyboard status --json
+~/.local/bin/macctl keyboard lease acquire \
+  --scope app --app "Google Chrome" --seconds 30 --confirm --json
+~/.local/bin/macctl keyboard navigate commands-help --lease-token "$TOKEN" --json
+~/.local/bin/macctl keyboard inspect --json
+~/.local/bin/macctl keyboard send escape --lease-token "$TOKEN" --json
+~/.local/bin/macctl keyboard lease release "$TOKEN" --json
+```
+
+The Tier-1 gate requires fresh evidence for Full Keyboard Access status,
+successful lease acquisition, named navigation, focused-element inspection,
+lease release or expiry, and receipt redaction. Receipts may prove that an
+operation occurred and which evidence kind it produced, but must not contain
+raw keys, lease tokens, AX values, private text, screenshots, or OCR text.
+Source XCTest results, daemon receipt evidence, and manual GUI response are
+reported as distinct proof layers. The release check is read-only and never
+manufactures keyboard evidence. Browser DOM automation remains outside this
+surface, and iPhone Mirroring remains a separate shared-input product surface.
+
+Semantic-control checks are available during manual GUI validation:
+
+```sh
+~/.local/bin/macctl control status --json
+~/.local/bin/macctl control perform next-control --lease-token "$TOKEN" --json
+```
+
+These responses distinguish the selected route (`accessibility`, `keyboard`,
+or `visual`) from the post-action verification state. The control session
+revalidates the lease and foreground process before and after each action;
+session leases may follow an app switch, while app leases fail closed. Raw
+coordinate fallback is disabled unless the request explicitly opts in.
+
+## Checkpointed task and adapter evidence
+
+The task-control release dimension covers the structured `task.prepare`,
+`task.run`, `task.status`, `task.resume`, and `task.cancel` methods plus the
+allowlisted application-adapter manifests. A release candidate must show:
+
+- a prepared approval bound to the exact plan, target, risk, recovery policy,
+  and ephemeral-input digest;
+- a completed safe task or an explicit blocked/paused result with a durable
+  redacted checkpoint;
+- fresh lease, permission, target, timeout, cancellation, and action-budget
+  revalidation at each dispatch boundary;
+- explicit fresh authority and a new approval for resume after interruption;
+- adapter capability and Automation-permission diagnostics, including an
+  unsupported-operation block; and
+- receipts/checkpoints containing only task/step IDs, plan digest, route,
+  recovery class, lifecycle state, hashes, timestamps, and redacted
+  verification results.
+
+The lifecycle states `paused`, `blocked`, `indeterminate`, `completed`,
+`cancelled`, and `expired` must remain distinguishable. Safe recovery is
+bounded to three attempts, reversible recovery to two, and sensitive actions
+to one dispatch; an uncertain sensitive result is indeterminate and is never
+retried. Automatic resume is disabled. The original plan is required again on
+resume, and any mutation of it invalidates the previous approval.
+
+The first adapter set is Finder, System Settings, Terminal, TextEdit, Preview,
+Mail, Calendar, Notes, and Messages. Only declared typed operations may use
+AppleScript/JXA routes; arbitrary script or shell execution is not exposed.
+Read-only observation may be exercised without input authority, while every
+adapter mutation shares keyboard leases and target revalidation. Browser DOM
+automation and iPhone Mirroring remain outside this task surface.
+
+For safe live proof, use a visible Finder/System Settings/TextEdit flow with
+no private content, then a read-only adapter inspection or empty draft route
+only when Automation permission is present. Record four layers separately:
+XCTest results, daemon receipts, redacted checkpoints, and manual GUI response.
+Do not use a successful source test or stale daemon receipt as proof that the
+current Mac GUI responded. Missing Automation, ambiguous or stale targets,
+expired authority, modal/unreadable focus, and unsupported operations are
+valid blocked evidence.

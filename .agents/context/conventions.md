@@ -15,4 +15,4 @@
 - Add behavior-focused XCTest coverage for approval, validation, redaction,
   receipt lifecycle, focus policy, and release-gate changes.
 - Update the live project snapshot after each coherent implementation commit;
-  do not turn `PROJECT_TRUTH.md` into an append-only changelog.
+  do not turn project notes into an append-only changelog.
