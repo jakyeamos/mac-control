@@ -85,3 +85,8 @@ python3 scripts/control_benchmark.py summarize \
   --json-output benchmarks/results/summary.json \
   --markdown-output benchmarks/results/summary.md
 ```
+
+The summary preserves a lane that blocks before its first measured sample. Its
+timing fields remain `null`/`—`, and the interpretation carries the latest
+redacted blocker instead of treating absence as success or silently omitting
+the lane.

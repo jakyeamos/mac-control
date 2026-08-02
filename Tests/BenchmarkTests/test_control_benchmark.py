@@ -95,12 +95,35 @@ class ControlBenchmarkTests(unittest.TestCase):
                     "user_help": 0,
                     "status": "passed",
                     "expand_to_seven": False,
+                    "interpretation": "passed",
                 }
             ]
         }
         table = benchmark.markdown_summary(summary)
         for heading in ("Task", "Lane", "Median", "Tool calls", "Recoveries", "Verified", "User help", "Interpretation"):
             self.assertIn(heading, table)
+
+    def test_blocked_lane_without_measurements_remains_in_summary(self):
+        record = benchmark.make_record(
+            task="focus-next-control",
+            lane="mac-control",
+            phase="warmup",
+            sample=1,
+            duration_ms=0,
+            tool_calls=2,
+            recoveries=1,
+            verified=False,
+            user_help=False,
+            status="blocked",
+            oracle="focus changed",
+            notes="lease blocked",
+        )
+        summary = benchmark.summarize_records([record])
+        group = summary["groups"][0]
+        self.assertEqual(group["samples"], 0)
+        self.assertIsNone(group["median_ms"])
+        self.assertEqual(group["status"], "blocked")
+        self.assertIn("lease blocked", group["interpretation"])
 
     def test_mac_focus_reestablishes_foreground_before_lease(self):
         calls = []

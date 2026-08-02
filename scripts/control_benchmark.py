@@ -383,6 +383,9 @@ def percentile(values: list[float], fraction: float) -> float:
 def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     measured = [record for record in records if record["phase"] == "measured"]
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    all_grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        all_grouped.setdefault((record["task"], record["lane"]), []).append(record)
     for record in measured:
         grouped.setdefault((record["task"], record["lane"]), []).append(record)
 
@@ -405,19 +408,56 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "user_help": sum(bool(s["user_help"]) for s in samples),
                 "status": "passed" if all(s["status"] == "passed" for s in samples) else "mixed",
                 "expand_to_seven": len(samples) < 3 or (len(samples) == 3 and coefficient > 0.15),
+                "interpretation": "passed",
             }
         )
+
+    measured_keys = set(grouped)
+    for (task, lane), attempts in sorted(all_grouped.items()):
+        if (task, lane) in measured_keys:
+            continue
+        latest = max(attempts, key=lambda record: record["recorded_at"])
+        status = "blocked" if any(record["status"] == "blocked" for record in attempts) else "failed"
+        reason = latest.get("notes", "no measured sample satisfied the oracle")
+        groups.append(
+            {
+                "task": task,
+                "lane": lane,
+                "samples": 0,
+                "median_ms": None,
+                "p95_ms": None,
+                "range_ms": None,
+                "mean_tool_calls": None,
+                "recoveries": sum(sample["recoveries"] for sample in attempts),
+                "verified": 0,
+                "user_help": sum(bool(sample["user_help"]) for sample in attempts),
+                "status": status,
+                "expand_to_seven": False,
+                "interpretation": f"{status} before measurement: {reason}",
+            }
+        )
+
+    groups.sort(key=lambda group: (group["task"], group["lane"]))
 
     by_task: dict[str, list[dict[str, Any]]] = {}
     for group in groups:
         by_task.setdefault(group["task"], []).append(group)
     for task_groups in by_task.values():
-        ranked = sorted(task_groups, key=lambda group: group["median_ms"])
+        ranked = sorted(
+            (group for group in task_groups if group["median_ms"] is not None),
+            key=lambda group: group["median_ms"],
+        )
         if len(ranked) >= 2 and ranked[1]["median_ms"]:
             gap = (ranked[1]["median_ms"] - ranked[0]["median_ms"]) / ranked[1]["median_ms"]
             if gap < 0.10:
                 ranked[0]["expand_to_seven"] = True
                 ranked[1]["expand_to_seven"] = True
+
+    for group in groups:
+        if group["expand_to_seven"]:
+            group["interpretation"] = "expand to 7 samples"
+        elif group["status"] == "passed":
+            group["interpretation"] = "passed"
 
     return {"schema_version": 1, "generated_at": utc_now(), "groups": groups}
 
@@ -428,11 +468,12 @@ def markdown_summary(summary: dict[str, Any]) -> str:
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for group in summary["groups"]:
-        interpretation = "expand to 7 samples" if group["expand_to_seven"] else group["status"]
+        median = "—" if group["median_ms"] is None else f"{group['median_ms']:.3f} ms"
+        tool_calls = "—" if group["mean_tool_calls"] is None else f"{group['mean_tool_calls']:.2f}"
         lines.append(
-            f"| {group['task']} | {group['lane']} | {group['median_ms']:.3f} ms | "
-            f"{group['mean_tool_calls']:.2f} | {group['recoveries']} | "
-            f"{group['verified']}/{group['samples']} | {group['user_help']} | {interpretation} |"
+            f"| {group['task']} | {group['lane']} | {median} | "
+            f"{tool_calls} | {group['recoveries']} | "
+            f"{group['verified']}/{group['samples']} | {group['user_help']} | {group['interpretation']} |"
         )
     return "\n".join(lines) + "\n"
 
