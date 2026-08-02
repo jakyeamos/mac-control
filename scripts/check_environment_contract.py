@@ -31,6 +31,10 @@ REQUIRED_FILES = (
     "docs/TIER1_RELEASE.md",
     ".agents/context/README.md",
     "scripts/check_environment_contract.py",
+    "scripts/install_mac_control_skill.py",
+    "skills/mac-control/SKILL.md",
+    "skills/mac-control/agents/openai.yaml",
+    "skills/mac-control/references/routing.md",
 )
 
 
@@ -88,6 +92,8 @@ def _errors_for_contract() -> list[str]:
         "swift test",
         "swift test --enable-code-coverage",
         "python3 scripts/check_environment_contract.py",
+        "python3 -m unittest discover -s Tests/BenchmarkTests",
+        "python3 -m unittest discover -s Tests/SkillTests",
     }
     commands = set(item for item in contract.get("qualityCommands", []) if isinstance(item, str))
     errors = [f"missing quality command: {command}" for command in sorted(expected_commands - commands)]
@@ -100,6 +106,46 @@ def _errors_for_contract() -> list[str]:
         errors.append("environment-contract quality adapter is not configured")
     if contract.get("checks", {}).get("security") is not True:
         errors.append("security check is not enabled")
+    return errors
+
+
+def _errors_for_mac_control_skill() -> list[str]:
+    skill_path = ROOT / "skills" / "mac-control" / "SKILL.md"
+    routing_path = ROOT / "skills" / "mac-control" / "references" / "routing.md"
+    metadata_path = ROOT / "skills" / "mac-control" / "agents" / "openai.yaml"
+    if not all(path.is_file() for path in (skill_path, routing_path, metadata_path)):
+        return ["Mac Control skill source is incomplete"]
+
+    skill = skill_path.read_text(encoding="utf-8")
+    routing = routing_path.read_text(encoding="utf-8")
+    metadata = metadata_path.read_text(encoding="utf-8")
+    errors: list[str] = []
+    if "TODO" in skill:
+        errors.append("Mac Control skill contains TODO text")
+    if not re.match(r"^---\nname: mac-control\ndescription: .+\n---\n", skill):
+        errors.append("Mac Control skill frontmatter is invalid")
+    required_skill_markers = (
+        "mature direct CLI, API, typed connector, or browser DOM route",
+        "Mac Control adapter or semantic Accessibility target",
+        "named Mac Control keyboard action",
+        "generic Accessibility GUI control",
+        "screenshot, OCR, or coordinates",
+        "keyboard_focus_changed",
+        "lease_released",
+        "result.verification.state",
+    )
+    missing = [marker for marker in required_skill_markers if marker not in skill]
+    if missing:
+        errors.append(f"Mac Control skill missing markers: {', '.join(missing)}")
+    route_positions = [skill.find(marker) for marker in required_skill_markers[:5]]
+    if -1 not in route_positions and route_positions != sorted(route_positions):
+        errors.append("Mac Control route order is not strongest-to-weakest")
+    for marker in ("Positive and negative examples", "Ambiguous cases", "Evidence basis"):
+        if marker not in routing:
+            errors.append(f"Mac Control routing reference missing marker: {marker}")
+    for marker in ('display_name: "Mac Control"', "$mac-control"):
+        if marker not in metadata:
+            errors.append(f"Mac Control OpenAI metadata missing marker: {marker}")
     return errors
 
 
@@ -130,6 +176,7 @@ def validate() -> list[str]:
         errors.extend(_errors_for_links())
     if (ROOT / ".pre-cr.json").is_file():
         errors.extend(_errors_for_contract())
+    errors.extend(_errors_for_mac_control_skill())
     errors.extend(_tracked_path_errors())
     return sorted(set(errors))
 

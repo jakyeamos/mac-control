@@ -7,14 +7,19 @@ worktree:
 swift build
 swift test
 swift test --enable-code-coverage
+python3 -m unittest discover -s Tests/BenchmarkTests
+python3 -m unittest discover -s Tests/SkillTests
 python3 scripts/check_environment_contract.py
 ./scripts/test-with-coverage.sh
 ```
 
 `swift build` is the compile/typecheck gate. `swift test` is the behavioral
-gate. The coverage-enabled test command produces the Swift profile; the
-coverage script additionally exports `coverage/lcov.info`. The environment
-checker validates this contract and all routed packets. There is no
+gate. The Python suites cover benchmark accounting and the distributable Mac
+Control skill contract, including its canonical install and Codex projection.
+The coverage-enabled test command produces the Swift profile; the coverage
+script additionally exports `coverage/lcov.info`. The environment checker
+validates this contract, all routed packets, and the skill's routing and
+metadata invariants. There is no
 repository formatter/linter dependency; do not claim lint coverage that has
 not been installed and executed.
 

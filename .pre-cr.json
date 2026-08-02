@@ -5,7 +5,9 @@
     "swift build",
     "swift test",
     "swift test --enable-code-coverage",
-    "python3 scripts/check_environment_contract.py"
+    "python3 scripts/check_environment_contract.py",
+    "python3 -m unittest discover -s Tests/BenchmarkTests",
+    "python3 -m unittest discover -s Tests/SkillTests"
   ],
   "qualityAdapters": [
     {

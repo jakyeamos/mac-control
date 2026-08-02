@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+python3 -m unittest discover -s Tests/BenchmarkTests
+python3 -m unittest discover -s Tests/SkillTests
+
 swift test --enable-code-coverage
 
 swift_bin_path="$(swift build --show-bin-path)"
