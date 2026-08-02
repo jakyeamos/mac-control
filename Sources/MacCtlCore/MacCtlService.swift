@@ -19,6 +19,8 @@ public final class MacCtlService {
     private let semanticActionRouter: SemanticActionRouter
     private let foregroundApplication: () -> AppInfo?
     private let resolveApplication: (String) throws -> AppInfo
+    private let activateApplication: (String) throws -> AppInfo
+    private let foregroundStabilityVerifier: ControlStateVerifier
     private let hasPostEventAccess: () -> Bool
     private let launchAgentManager: LaunchAgentManager
     private let logger: SafeLog
@@ -51,6 +53,8 @@ public final class MacCtlService {
         semanticActionRouter: SemanticActionRouter? = nil,
         foregroundApplication: (() -> AppInfo?)? = nil,
         resolveApplication: ((String) throws -> AppInfo)? = nil,
+        activateApplication: ((String) throws -> AppInfo)? = nil,
+        foregroundStabilityVerifier: ControlStateVerifier? = nil,
         hasPostEventAccess: (() -> Bool)? = nil
     ) {
         self.appController = appController
@@ -78,6 +82,8 @@ public final class MacCtlService {
         self.foregroundApplication = resolvedForegroundApplication
         let resolvedApplicationResolver = resolveApplication ?? { try appController.resolve($0) }
         self.resolveApplication = resolvedApplicationResolver
+        self.activateApplication = activateApplication ?? { try appController.activate($0) }
+        self.foregroundStabilityVerifier = foregroundStabilityVerifier ?? ControlStateVerifier()
         self.hasPostEventAccess = resolvedPostEventAccess
         let inputController = InputController()
         let captureController = CaptureController(appController: appController)
@@ -583,17 +589,45 @@ public final class MacCtlService {
     }
 
     private func performControlAction(_ request: RequestEnvelope) throws -> ResponseEnvelope {
-        let token = request.params["lease_token"]?.stringValue ?? ""
+        let token = request.params["lease_token"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedApplication = request.params["app"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasToken = token?.isEmpty == false
+        let hasRequestedApplication = requestedApplication?.isEmpty == false
+        guard !(hasToken && hasRequestedApplication) else {
+            throw WorkflowExecutionError.unsafeInput(
+                "control.perform accepts either lease_token or app, not both"
+            )
+        }
         let command = try KeyboardCommand.resolve(try requiredString(request, key: "action"))
         let selector = try requestedControlSelector(from: request)
+        let count = try requestedKeyboardCount(from: request)
+        let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let allowRawCoordinate = request.params["allow_raw_coordinate"]?.boolValue == true
+        let usesEphemeralLease = hasRequestedApplication
         let report = try withExecutionLock {
-            try semanticActionRouter.perform(
+            if let requestedApplication, !requestedApplication.isEmpty {
+                guard request.params["confirm"]?.boolValue == true else {
+                    throw KeyboardDriveStoreError.confirmationRequired
+                }
+                return try performEphemeralControlAction(
+                    applicationName: requestedApplication,
+                    command: command,
+                    selector: selector,
+                    count: count,
+                    interKeyDelay: interKeyDelay,
+                    allowRawCoordinate: allowRawCoordinate
+                )
+            }
+            guard let token, !token.isEmpty else { throw KeyboardControlError.leaseRequired }
+            return try semanticActionRouter.perform(
                 command: command,
                 selector: selector,
                 leaseToken: token,
-                count: try requestedKeyboardCount(from: request),
-                interKeyDelay: try requestedInterKeyDelay(from: request),
-                allowRawCoordinate: request.params["allow_raw_coordinate"]?.boolValue == true
+                count: count,
+                interKeyDelay: interKeyDelay,
+                allowRawCoordinate: allowRawCoordinate
             )
         }
         return try success(
@@ -608,9 +642,70 @@ public final class MacCtlService {
                     "fallback_used": .bool(report.fallbackUsed),
                     "verification": .string(report.verification.state.rawValue),
                     "foreground_changed": .bool(report.verification.foregroundChanged),
-                    "focus_changed": .bool(report.verification.focusChanged)
+                    "focus_changed": .bool(report.verification.focusChanged),
+                    "lease_mode": .string(usesEphemeralLease ? "ephemeral" : "provided"),
+                    "lease_released": .bool(usesEphemeralLease),
+                    "foreground_reasserted": .bool(usesEphemeralLease)
                 ]
             )]
+        )
+    }
+
+    private func performEphemeralControlAction(
+        applicationName: String,
+        command: KeyboardCommand,
+        selector: Selector?,
+        count: Int,
+        interKeyDelay: TimeInterval,
+        allowRawCoordinate: Bool
+    ) throws -> SemanticActionReport {
+        let activated = try activateApplication(applicationName)
+        let stableForeground: AppInfo
+        do {
+            let observation = try foregroundStabilityVerifier.waitUntil(
+                timeout: 2,
+                pollInterval: 0.05,
+                consecutiveMatches: 2,
+                read: {
+                    ControlObservation(
+                        foregroundApplication: self.foregroundApplication(),
+                        focusedElement: nil
+                    )
+                },
+                predicate: { observation in
+                    guard let current = observation.foregroundApplication else { return false }
+                    return self.sameKeyboardApplication(
+                        activated,
+                        current,
+                        requireProcess: activated.processID != nil
+                    )
+                }
+            )
+            guard let current = observation.foregroundApplication else {
+                throw KeyboardControlError.foregroundUnavailable
+            }
+            stableForeground = current
+        } catch ControlStateVerifierError.timedOut {
+            throw KeyboardControlError.appScopeMismatch(
+                expected: keyboardApplicationLabel(activated),
+                actual: keyboardApplicationLabel(foregroundApplication())
+            )
+        }
+
+        let lease = try keyboardDriveStore.acquire(
+            scope: .app,
+            application: stableForeground,
+            seconds: 30,
+            confirm: true
+        )
+        defer { keyboardDriveStore.invalidate(token: lease.token) }
+        return try semanticActionRouter.perform(
+            command: command,
+            selector: selector,
+            leaseToken: lease.token,
+            count: count,
+            interKeyDelay: interKeyDelay,
+            allowRawCoordinate: allowRawCoordinate
         )
     }
 
@@ -1301,6 +1396,7 @@ public final class MacCtlService {
                 "keyboard focus inspection returns only role, subrole, identifier, title, and target application",
                 "semantic control prefers Accessibility actions, then keyboard navigation, then explicit visual fallback",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
+                "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
                 "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
                 "task recovery is capped at three safe, two reversible, and one sensitive attempt",
                 "sensitive uncertainty is indeterminate and is never retried automatically",

@@ -62,10 +62,13 @@ public final class ControlStateVerifier {
     public func waitUntil(
         timeout: TimeInterval = 1.0,
         pollInterval: TimeInterval = 0.05,
+        consecutiveMatches: Int = 1,
         read: () throws -> ControlObservation,
         predicate: (ControlObservation) -> Bool
     ) throws -> ControlObservation {
-        guard (0...30).contains(timeout), (0.001...1).contains(pollInterval) else {
+        guard (0...30).contains(timeout),
+              (0.001...1).contains(pollInterval),
+              (1...20).contains(consecutiveMatches) else {
             throw ControlStateVerifierError.invalidPolicy
         }
 
@@ -78,9 +81,17 @@ public final class ControlStateVerifier {
             eventLock.unlock()
         }
         defer { eventMonitor?.stop() }
+        var matchingReads = 0
         while true {
-            if let observation = try? read(), predicate(observation) {
-                return observation
+            if let observation = try? read() {
+                if predicate(observation) {
+                    matchingReads += 1
+                    if matchingReads >= consecutiveMatches {
+                        return observation
+                    }
+                } else {
+                    matchingReads = 0
+                }
             }
             guard now() < deadline else { break }
             eventLock.lock()

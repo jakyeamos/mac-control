@@ -452,6 +452,33 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(reads, 3)
     }
 
+    func testControlStateVerifierRequiresStableConsecutiveForegroundReads() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let other = testApp(name: "Safari", processID: 43)
+        var now = Date(timeIntervalSince1970: 100)
+        var reads = [other, app, other, app, app]
+        let verifier = ControlStateVerifier(
+            now: { now },
+            sleep: { interval in now = now.addingTimeInterval(interval) }
+        )
+
+        let observation = try verifier.waitUntil(
+            timeout: 1,
+            pollInterval: 0.1,
+            consecutiveMatches: 2,
+            read: {
+                ControlObservation(
+                    foregroundApplication: reads.removeFirst(),
+                    focusedElement: nil
+                )
+            },
+            predicate: { $0.foregroundApplication == app }
+        )
+
+        XCTAssertEqual(observation.foregroundApplication, app)
+        XCTAssertTrue(reads.isEmpty)
+    }
+
     func testSemanticRouterPrefersAccessibilityAndReturnsRedactedVerification() throws {
         let app = testApp(name: "Chrome", processID: 42)
         let sender = RecordingKeyboardEventSender()
@@ -724,6 +751,247 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(action.status, .succeeded)
         XCTAssertEqual(action.result["route"]?.stringValue, "keyboard")
         XCTAssertEqual(sender.keys, ["tab"])
+    }
+
+    func testAtomicControlWaitsForForegroundAndReleasesEphemeralLease() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let other = testApp(name: "Safari", processID: 43)
+        let before = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXTextField",
+            subrole: nil,
+            identifier: "address",
+            title: nil
+        )
+        let after = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "reload",
+            title: "Reload"
+        )
+        var foreground = other
+        var now = Date(timeIntervalSince1970: 100)
+        let store = KeyboardDriveStore()
+        let sender = RecordingKeyboardEventSender()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: store,
+            focusedElementInspector: SequencedFocusedElementInspector([before, after]),
+            foregroundApplication: { foreground },
+            activateApplication: { _ in
+                foreground = app
+                return app
+            },
+            foregroundStabilityVerifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "inter_key_ms": .number(0)
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .succeeded)
+        XCTAssertEqual(action.result["verification"]?.objectValue?["state"]?.stringValue, "passed")
+        XCTAssertEqual(sender.keys, ["tab"])
+        XCTAssertNil(store.activeLease())
+        XCTAssertEqual(action.evidence.first?.metadata["lease_mode"]?.stringValue, "ephemeral")
+        XCTAssertEqual(action.evidence.first?.metadata["lease_released"]?.boolValue, true)
+    }
+
+    func testAtomicControlRequiresOneExplicitAuthorityModeAndConfirmation() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        var activationCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            foregroundApplication: { app },
+            activateApplication: { _ in
+                activationCount += 1
+                return app
+            },
+            hasPostEventAccess: { true }
+        )
+
+        let conflicting = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "lease_token": .string("caller-owned"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true)
+            ]
+        ))
+        XCTAssertEqual(conflicting.status, .blocked)
+        XCTAssertEqual(conflicting.error?.code, MacCtlErrorCode.unsafeInput.rawValue)
+
+        let unconfirmed = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome")
+            ]
+        ))
+        XCTAssertEqual(unconfirmed.status, .blocked)
+        XCTAssertEqual(
+            unconfirmed.error?.code,
+            MacCtlErrorCode.keyboardConfirmationRequired.rawValue
+        )
+        XCTAssertEqual(activationCount, 0)
+    }
+
+    func testAtomicControlFailsClosedWhenForegroundIsStolenBeforeExecution() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let other = testApp(name: "Safari", processID: 43)
+        var foregroundReads = 0
+        var now = Date(timeIntervalSince1970: 100)
+        let store = KeyboardDriveStore()
+        let sender = RecordingKeyboardEventSender()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: FocusedElementSnapshot(
+                targetApplication: app,
+                role: "AXTextField",
+                subrole: nil,
+                identifier: "address",
+                title: nil
+            )),
+            foregroundApplication: {
+                foregroundReads += 1
+                return foregroundReads <= 2 ? app : other
+            },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "inter_key_ms": .number(0)
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .blocked)
+        XCTAssertEqual(action.error?.code, MacCtlErrorCode.keyboardFocusChanged.rawValue)
+        XCTAssertTrue(sender.keys.isEmpty)
+        XCTAssertNil(store.activeLease())
+    }
+
+    func testAtomicControlCanEstablishInitiallyAbsentAccessibilityFocus() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let after = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "reload",
+            title: "Reload"
+        )
+        var now = Date(timeIntervalSince1970: 100)
+        let store = KeyboardDriveStore()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: RecordingKeyboardEventSender(),
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: store,
+            focusedElementInspector: OptionalSequencedFocusedElementInspector([nil, after]),
+            foregroundApplication: { app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "inter_key_ms": .number(0)
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .succeeded)
+        XCTAssertEqual(action.result["verification"]?.objectValue?["state"]?.stringValue, "passed")
+        XCTAssertEqual(
+            action.result["verification"]?.objectValue?["focusAfter"]?.objectValue?["identifier"]?.stringValue,
+            "reload"
+        )
+        XCTAssertNil(store.activeLease())
+    }
+
+    func testAtomicControlKeepsUnchangedReadableFocusAsForegroundOnly() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let focus = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXTextField",
+            subrole: nil,
+            identifier: "address",
+            title: nil
+        )
+        var now = Date(timeIntervalSince1970: 100)
+        let store = KeyboardDriveStore()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: RecordingKeyboardEventSender(),
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "inter_key_ms": .number(0)
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .succeeded)
+        XCTAssertEqual(
+            action.result["verification"]?.objectValue?["state"]?.stringValue,
+            "foreground_only"
+        )
+        XCTAssertNil(store.activeLease())
     }
 
     func testLegacyDoctorAndCapabilityReportsDecodeWithoutKeyboardFields() throws {
@@ -2403,6 +2671,23 @@ private final class SequencedFocusedElementInspector: FocusedElementInspecting {
         let fallback = try XCTUnwrap(snapshots.last)
         let snapshot = index < snapshots.count ? snapshots[index] : fallback
         index += 1
+        return snapshot
+    }
+}
+
+private final class OptionalSequencedFocusedElementInspector: FocusedElementInspecting {
+    private let snapshots: [FocusedElementSnapshot?]
+    private var index = 0
+
+    init(_ snapshots: [FocusedElementSnapshot?]) {
+        self.snapshots = snapshots
+    }
+
+    func focusedElementSnapshot(pid: pid_t, application: AppInfo) throws -> FocusedElementSnapshot {
+        guard !snapshots.isEmpty else { throw AccessibilityControllerError.unreadableFocus }
+        let snapshot = index < snapshots.count ? snapshots[index] : snapshots[snapshots.count - 1]
+        index += 1
+        guard let snapshot else { throw AccessibilityControllerError.unreadableFocus }
         return snapshot
     }
 }

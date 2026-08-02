@@ -407,6 +407,19 @@ public final class KeyboardDriveStore {
         return active.lease
     }
 
+    /// Invalidates a matching lease without depending on its expiry state.
+    ///
+    /// This is used by daemon-owned ephemeral control actions so cleanup remains
+    /// fail-closed even when the action or its post-action verification throws.
+    @discardableResult
+    public func invalidate(token: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let active, active.lease.token == token else { return false }
+        self.active = nil
+        return true
+    }
+
     private func purgeExpired(at date: Date) {
         guard let active, active.lease.expiresAt <= date else { return }
         self.active = nil

@@ -126,6 +126,14 @@ Semantic-control checks are available during manual GUI validation:
 ~/.local/bin/macctl control perform next-control --lease-token "$TOKEN" --json
 ```
 
+The atomic app-scoped form owns activation and lease cleanup within one daemon
+request, avoiding foreground handoff between separate client calls:
+
+```sh
+~/.local/bin/macctl control perform next-control \
+  --app "System Settings" --confirm --json
+```
+
 These responses distinguish the selected route (`accessibility`, `keyboard`,
 or `visual`) from the post-action verification state. The control session
 revalidates the lease and foreground process before and after each action;

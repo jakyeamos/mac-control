@@ -238,6 +238,17 @@ action:
   --lease-token "$TOKEN" --role AXButton --title "Save" --json
 ```
 
+For a self-contained action, provide the target app and explicit confirmation
+instead of a lease token. The daemon activates the app, waits for two stable
+foreground reads, acquires an app-scoped ephemeral lease, performs and verifies
+the action, and invalidates the lease before replying. Foreground changes still
+fail closed with `keyboard_focus_changed`.
+
+```sh
+~/.local/bin/macctl control perform next-control \
+  --app "System Settings" --confirm --json
+```
+
 Routing is ordered by confidence: an Accessibility selector is attempted
 first; if the target is not found, the named keyboard command is used; visual
 text/image or normalized-coordinate selectors are the last fallback. Raw

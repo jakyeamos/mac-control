@@ -317,17 +317,34 @@ struct CLI {
 
     private func runControl(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl control status|perform <action> --lease-token <token>")
+            throw CLIError.usage("Usage: macctl control status|perform <action> (--lease-token <token> | --app <app> --confirm)")
         }
         switch subcommand {
         case "status":
             return render(sendOrLocal(method: "control.status", params: [:], localFallback: true))
         case "perform":
             guard let action = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl control perform <action> --lease-token <token> [selector options]")
+                throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [selector options]")
             }
             var params: [String: JSONValue] = ["action": .string(action)]
-            params["lease_token"] = .string(try requiredOption("--lease-token", from: args))
+            let leaseToken = try optionalOption("--lease-token", from: args)
+            let application = try optionalOption("--app", from: args)
+            guard (leaseToken == nil) != (application == nil) else {
+                throw CLIError.usage("Provide exactly one of --lease-token or --app")
+            }
+            if let leaseToken {
+                guard !args.contains("--confirm") else {
+                    throw CLIError.usage("--confirm is only valid with --app")
+                }
+                params["lease_token"] = .string(leaseToken)
+            }
+            if let application {
+                guard args.contains("--confirm") else {
+                    throw CLIError.usage("Atomic app control requires --confirm")
+                }
+                params["app"] = .string(application)
+                params["confirm"] = .bool(true)
+            }
             if let count = try optionalOption("--count", from: args) {
                 guard let value = Int(count), value > 0 else {
                     throw CLIError.usage("--count must be a positive integer")
@@ -376,7 +393,7 @@ struct CLI {
             }
             return render(sendOrLocal(method: "control.perform", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl control status|perform <action> --lease-token <token>")
+            throw CLIError.usage("Usage: macctl control status|perform <action> (--lease-token <token> | --app <app> --confirm)")
         }
     }
 
@@ -612,7 +629,7 @@ struct CLI {
         macctl keyboard navigate <command> --lease-token <token> [--count N]
         macctl keyboard send <key>... --lease-token <token>
         macctl control status [--json]
-        macctl control perform <action> --lease-token <token> [--title <title>] [--role <role>]
+        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--title <title>] [--role <role>]
         macctl task prepare|run|status|resume|cancel
         macctl task prepare --plan-stdin [--json]
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
