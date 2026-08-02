@@ -34,14 +34,14 @@ The first tasks are:
 The raw JSONL contains outcome metadata only. Do not store command output,
 screenshots, application content, selectors, credentials, approval tokens, or
 keyboard lease tokens. The recorder rejects sensitive field names. The Mac
-Control focus runner holds its lease token in memory, suppresses release output,
-and releases in a `finally` block. It also re-establishes the requested
-foreground app through `macctl app open` immediately before lease acquisition;
-that provider-handoff setup is excluded from the measured action interval.
-After activation, it performs one unmeasured navigation precondition check. If
-the window has no readable focused control, that action establishes one. If
-focus was already present and moved, the runner restores it before timing. A
-trial never passes unless both the before and after focus states are observed.
+Control focus runner uses one atomic daemon request per action. That request
+activates the target, waits for stable foreground, acquires an ephemeral
+app-scoped lease, performs and verifies the action, and releases the lease on
+every exit path. All of that work is included in the measured action interval.
+Before measurement, the runner performs one unmeasured navigation precondition
+check. If the window has no readable focused control, that action establishes
+one. If focus was already present and moved, the runner restores it. A trial
+never passes unless both the before and after focus states are observed.
 
 Mac Control samples require live `macctld` evidence and never accept a local
 fallback as a valid result. Generic GUI samples must use the Computer Use
@@ -59,8 +59,8 @@ python3 scripts/control_benchmark.py run-fka-readonly \
   --lane mac-control --output benchmarks/results/raw.jsonl
 ```
 
-With System Settings foreground and the user hands off the keyboard and
-trackpad, run the leased focus samples:
+With the user handing off the keyboard and trackpad, run the atomic focus
+samples. The daemon reasserts System Settings foreground inside every action:
 
 ```sh
 python3 scripts/control_benchmark.py run-mac-focus \

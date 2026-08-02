@@ -184,13 +184,6 @@ def run_fka_readonly(args: argparse.Namespace) -> int:
     return 0
 
 
-def extract_lease_token(payload: dict[str, Any]) -> str:
-    lease = result_object(payload).get("lease")
-    if not isinstance(lease, dict) or not isinstance(lease.get("token"), str):
-        raise RuntimeError("lease acquisition response did not contain an in-memory token")
-    return lease["token"]
-
-
 def focus_verified(payload: dict[str, Any]) -> bool:
     result = result_object(payload)
     verification = result.get("verification")
@@ -215,120 +208,59 @@ def focus_established(payload: dict[str, Any]) -> bool:
 
 
 def run_mac_focus(args: argparse.Namespace) -> int:
-    # Computer-control providers commonly restore their own app to the foreground
-    # when a tool call returns. Re-establish the benchmark app inside this same
-    # process immediately before acquiring the app-scoped lease. This is setup,
-    # so it remains outside the measured action interval.
-    opened, _ = run_json([args.macctl, "app", "open", args.app, "--json"])
-    opened_app = result_object(opened)
-    if opened_app.get("name") != args.app or opened_app.get("isRunning") is not True:
-        raise RuntimeError("Mac Control did not establish the requested foreground app")
-
-    acquire, _ = run_json(
-        [
-            args.macctl,
-            "keyboard",
-            "lease",
-            "acquire",
-            "--scope",
-            "app",
-            "--app",
-            args.app,
-            "--seconds",
-            str(args.seconds),
-            "--confirm",
-            "--json",
-        ]
-    )
-    lease_token = extract_lease_token(acquire)
-    try:
-        # An app activation can legitimately restore the window without an AX
-        # focused control. Prime that precondition outside the timer. If focus
-        # was already established and moved, restore it; if the first Tab only
-        # established focus, keep that known control as the trial start state.
-        primed, _ = run_json(
+    def perform(action: str) -> tuple[dict[str, Any], float]:
+        return run_json(
             [
                 args.macctl,
-                "keyboard",
-                "navigate",
-                "next-control",
-                "--lease-token",
-                lease_token,
+                "control",
+                "perform",
+                action,
+                "--app",
+                args.app,
+                "--confirm",
                 "--json",
             ]
         )
-        if focus_verified(primed):
-            restored, _ = run_json(
-                [
-                    args.macctl,
-                    "keyboard",
-                    "navigate",
-                    "previous-control",
-                    "--lease-token",
-                    lease_token,
-                    "--json",
-                ]
+
+    # An app activation can legitimately restore the window without an AX
+    # focused control. Prime that precondition outside the timer. Each action is
+    # nevertheless self-contained: the daemon reasserts stable foreground,
+    # acquires an ephemeral app lease, verifies, and releases before replying.
+    primed, _ = perform("next-control")
+    if focus_verified(primed):
+        restored, _ = perform("previous-control")
+        if not focus_verified(restored):
+            raise RuntimeError("precondition focus reset did not verify")
+    elif not focus_established(primed):
+        raise RuntimeError("Mac Control could not establish a readable focus precondition")
+
+    for phase, count in (("warmup", args.warmups), ("measured", args.samples)):
+        for sample in range(1, count + 1):
+            payload, duration_ms = perform("next-control")
+            verified = focus_verified(payload)
+            append_record(
+                args.output,
+                make_record(
+                    task="focus-next-control",
+                    lane="mac-control",
+                    phase=phase,
+                    sample=sample,
+                    duration_ms=duration_ms,
+                    tool_calls=1,
+                    recoveries=0,
+                    verified=verified,
+                    user_help=False,
+                    status="passed" if verified else "failed",
+                    oracle="Accessibility focus changed to the next control",
+                    route="keyboard",
+                ),
             )
-            if not focus_verified(restored):
-                raise RuntimeError("precondition focus reset did not verify")
-        elif not focus_established(primed):
-            raise RuntimeError("Mac Control could not establish a readable focus precondition")
+            if not verified:
+                return 1
 
-        for phase, count in (("warmup", args.warmups), ("measured", args.samples)):
-            for sample in range(1, count + 1):
-                payload, duration_ms = run_json(
-                    [
-                        args.macctl,
-                        "keyboard",
-                        "navigate",
-                        "next-control",
-                        "--lease-token",
-                        lease_token,
-                        "--json",
-                    ]
-                )
-                verified = focus_verified(payload)
-                append_record(
-                    args.output,
-                    make_record(
-                        task="focus-next-control",
-                        lane="mac-control",
-                        phase=phase,
-                        sample=sample,
-                        duration_ms=duration_ms,
-                        tool_calls=1,
-                        recoveries=0,
-                        verified=verified,
-                        user_help=False,
-                        status="passed" if verified else "failed",
-                        oracle="Accessibility focus changed to the next control",
-                        route="keyboard",
-                    ),
-                )
-                if not verified:
-                    return 1
-
-                reset, _ = run_json(
-                    [
-                        args.macctl,
-                        "keyboard",
-                        "navigate",
-                        "previous-control",
-                        "--lease-token",
-                        lease_token,
-                        "--json",
-                    ]
-                )
-                if not focus_verified(reset):
-                    raise RuntimeError("focus reset did not verify")
-    finally:
-        # Keep the capability-bearing value in memory only and always release it.
-        subprocess.run(
-            [args.macctl, "keyboard", "lease", "release", lease_token, "--json"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+            reset, _ = perform("previous-control")
+            if not focus_verified(reset):
+                raise RuntimeError("focus reset did not verify")
     return 0
 
 
@@ -499,9 +431,8 @@ def build_parser() -> argparse.ArgumentParser:
     fka.add_argument("--output", required=True, type=Path)
     fka.set_defaults(handler=run_fka_readonly)
 
-    focus = subparsers.add_parser("run-mac-focus", help="measure leased next-control navigation")
+    focus = subparsers.add_parser("run-mac-focus", help="measure atomic next-control navigation")
     focus.add_argument("--app", required=True)
-    focus.add_argument("--seconds", type=int, default=60)
     focus.add_argument("--warmups", type=int, default=1)
     focus.add_argument("--samples", type=int, default=3)
     focus.add_argument("--macctl", default=str(Path.home() / ".local/bin/macctl"))

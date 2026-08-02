@@ -125,16 +125,12 @@ class ControlBenchmarkTests(unittest.TestCase):
         self.assertEqual(group["status"], "blocked")
         self.assertIn("lease blocked", group["interpretation"])
 
-    def test_mac_focus_reestablishes_foreground_before_lease(self):
+    def test_mac_focus_uses_atomic_app_control_for_prime_and_samples(self):
         calls = []
 
         def fake_run_json(command):
             calls.append(command)
-            if command[1:3] == ["app", "open"]:
-                return ({"status": "succeeded", "result": {"name": "System Settings", "isRunning": True}}, 1.0)
-            if command[1:4] == ["keyboard", "lease", "acquire"]:
-                return ({"status": "succeeded", "result": {"lease": {"token": "memory-only"}}}, 1.0)
-            if command[1:4] == ["keyboard", "navigate", "next-control"]:
+            if command[1:3] == ["control", "perform"]:
                 return (
                     {
                         "status": "succeeded",
@@ -142,8 +138,8 @@ class ControlBenchmarkTests(unittest.TestCase):
                         "result": {
                             "route": "keyboard",
                             "verification": {
-                                "state": "foreground_only",
-                                "focusChanged": False,
+                                "state": "passed",
+                                "focusChanged": True,
                                 "focusAfter": {"role": "AXTextField"},
                             },
                         },
@@ -152,23 +148,24 @@ class ControlBenchmarkTests(unittest.TestCase):
                 )
             raise AssertionError(f"unexpected measured command: {command}")
 
-        args = SimpleNamespace(
-            macctl="/tmp/macctl",
-            app="System Settings",
-            seconds=60,
-            warmups=0,
-            samples=0,
-            output=Path("/tmp/not-written.jsonl"),
-        )
-        with patch.object(benchmark, "run_json", side_effect=fake_run_json), patch.object(
-            benchmark.subprocess, "run"
-        ) as release:
-            self.assertEqual(benchmark.run_mac_focus(args), 0)
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                macctl="/tmp/macctl",
+                app="System Settings",
+                warmups=0,
+                samples=1,
+                output=Path(directory) / "raw.jsonl",
+            )
+            with patch.object(benchmark, "run_json", side_effect=fake_run_json):
+                self.assertEqual(benchmark.run_mac_focus(args), 0)
 
-        self.assertEqual(calls[0][1:4], ["app", "open", "System Settings"])
-        self.assertEqual(calls[1][1:4], ["keyboard", "lease", "acquire"])
-        self.assertEqual(calls[2][1:4], ["keyboard", "navigate", "next-control"])
-        release.assert_called_once()
+        self.assertEqual(calls[0][1:4], ["control", "perform", "next-control"])
+        self.assertEqual(calls[0][4:7], ["--app", "System Settings", "--confirm"])
+        self.assertNotIn("--lease-token", calls[0])
+        self.assertEqual(
+            [command[3] for command in calls],
+            ["next-control", "previous-control", "next-control", "previous-control"],
+        )
 
     def test_focus_precondition_requires_observed_focus_after(self):
         payload = {
