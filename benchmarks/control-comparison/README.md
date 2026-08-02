@@ -67,6 +67,15 @@ python3 scripts/control_benchmark.py run-mac-focus \
   --app "System Settings" --output benchmarks/results/raw.jsonl
 ```
 
+When the first three measured samples trigger the expansion rule, append the
+remaining four with unique sample numbers:
+
+```sh
+python3 scripts/control_benchmark.py run-mac-focus \
+  --app "System Settings" --warmups 0 --samples 4 --sample-offset 3 \
+  --output benchmarks/results/raw.jsonl
+```
+
 Append an externally timed generic GUI or other manual sample:
 
 ```sh

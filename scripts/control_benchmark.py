@@ -208,6 +208,9 @@ def focus_established(payload: dict[str, Any]) -> bool:
 
 
 def run_mac_focus(args: argparse.Namespace) -> int:
+    if args.sample_offset < 0:
+        raise ValueError("sample offset must be non-negative")
+
     def perform(action: str) -> tuple[dict[str, Any], float]:
         return run_json(
             [
@@ -244,7 +247,7 @@ def run_mac_focus(args: argparse.Namespace) -> int:
                     task="focus-next-control",
                     lane="mac-control",
                     phase=phase,
-                    sample=sample,
+                    sample=sample + args.sample_offset,
                     duration_ms=duration_ms,
                     tool_calls=1,
                     recoveries=0,
@@ -435,6 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     focus.add_argument("--app", required=True)
     focus.add_argument("--warmups", type=int, default=1)
     focus.add_argument("--samples", type=int, default=3)
+    focus.add_argument("--sample-offset", type=int, default=0)
     focus.add_argument("--macctl", default=str(Path.home() / ".local/bin/macctl"))
     focus.add_argument("--output", required=True, type=Path)
     focus.set_defaults(handler=run_mac_focus)

@@ -154,10 +154,12 @@ class ControlBenchmarkTests(unittest.TestCase):
                 app="System Settings",
                 warmups=0,
                 samples=1,
+                sample_offset=3,
                 output=Path(directory) / "raw.jsonl",
             )
             with patch.object(benchmark, "run_json", side_effect=fake_run_json):
                 self.assertEqual(benchmark.run_mac_focus(args), 0)
+            self.assertEqual(benchmark.load_records(args.output)[0]["sample"], 4)
 
         self.assertEqual(calls[0][1:4], ["control", "perform", "next-control"])
         self.assertEqual(calls[0][4:7], ["--app", "System Settings", "--confirm"])
@@ -166,6 +168,11 @@ class ControlBenchmarkTests(unittest.TestCase):
             [command[3] for command in calls],
             ["next-control", "previous-control", "next-control", "previous-control"],
         )
+
+    def test_mac_focus_rejects_negative_sample_offset(self):
+        args = SimpleNamespace(sample_offset=-1)
+        with self.assertRaisesRegex(ValueError, "sample offset"):
+            benchmark.run_mac_focus(args)
 
     def test_focus_precondition_requires_observed_focus_after(self):
         payload = {
