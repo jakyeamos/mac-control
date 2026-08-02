@@ -3,3 +3,5 @@
 .DS_Store
 .aios/
 coverage/
+__pycache__/
+*.pyc
