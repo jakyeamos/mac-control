@@ -204,6 +204,15 @@ def focus_verified(payload: dict[str, Any]) -> bool:
 
 
 def run_mac_focus(args: argparse.Namespace) -> int:
+    # Computer-control providers commonly restore their own app to the foreground
+    # when a tool call returns. Re-establish the benchmark app inside this same
+    # process immediately before acquiring the app-scoped lease. This is setup,
+    # so it remains outside the measured action interval.
+    opened, _ = run_json([args.macctl, "app", "open", args.app, "--json"])
+    opened_app = result_object(opened)
+    if opened_app.get("name") != args.app or opened_app.get("isRunning") is not True:
+        raise RuntimeError("Mac Control did not establish the requested foreground app")
+
     acquire, _ = run_json(
         [
             args.macctl,

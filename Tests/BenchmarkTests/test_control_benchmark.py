@@ -2,6 +2,8 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "control_benchmark.py"
@@ -99,6 +101,34 @@ class ControlBenchmarkTests(unittest.TestCase):
         table = benchmark.markdown_summary(summary)
         for heading in ("Task", "Lane", "Median", "Tool calls", "Recoveries", "Verified", "User help", "Interpretation"):
             self.assertIn(heading, table)
+
+    def test_mac_focus_reestablishes_foreground_before_lease(self):
+        calls = []
+
+        def fake_run_json(command):
+            calls.append(command)
+            if command[1:3] == ["app", "open"]:
+                return ({"status": "succeeded", "result": {"name": "System Settings", "isRunning": True}}, 1.0)
+            if command[1:4] == ["keyboard", "lease", "acquire"]:
+                return ({"status": "succeeded", "result": {"lease": {"token": "memory-only"}}}, 1.0)
+            raise AssertionError(f"unexpected measured command: {command}")
+
+        args = SimpleNamespace(
+            macctl="/tmp/macctl",
+            app="System Settings",
+            seconds=60,
+            warmups=0,
+            samples=0,
+            output=Path("/tmp/not-written.jsonl"),
+        )
+        with patch.object(benchmark, "run_json", side_effect=fake_run_json), patch.object(
+            benchmark.subprocess, "run"
+        ) as release:
+            self.assertEqual(benchmark.run_mac_focus(args), 0)
+
+        self.assertEqual(calls[0][1:4], ["app", "open", "System Settings"])
+        self.assertEqual(calls[1][1:4], ["keyboard", "lease", "acquire"])
+        release.assert_called_once()
 
 
 if __name__ == "__main__":

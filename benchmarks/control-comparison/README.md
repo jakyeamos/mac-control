@@ -35,7 +35,9 @@ The raw JSONL contains outcome metadata only. Do not store command output,
 screenshots, application content, selectors, credentials, approval tokens, or
 keyboard lease tokens. The recorder rejects sensitive field names. The Mac
 Control focus runner holds its lease token in memory, suppresses release output,
-and releases in a `finally` block.
+and releases in a `finally` block. It also re-establishes the requested
+foreground app through `macctl app open` immediately before lease acquisition;
+that provider-handoff setup is excluded from the measured action interval.
 
 Mac Control samples require live `macctld` evidence and never accept a local
 fallback as a valid result. Generic GUI samples must use the Computer Use
