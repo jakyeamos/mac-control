@@ -51,6 +51,9 @@ public struct ReleaseGateSnapshot {
     public let launchAgent: LaunchAgentStatus
     public let daemonStatus: DaemonStatus?
     public let doctorReport: DoctorReport?
+    public let keyboardAccessStatus: KeyboardAccessStatus?
+    public let taskCapabilities: TaskCapabilityReport?
+    public let checkpointStoreStatus: TaskCheckpointStoreStatus?
     public let receiptStoreStatus: ReceiptStoreStatus?
     public let receipts: [OperationReceipt]
     public let socketExists: Bool
@@ -67,11 +70,17 @@ public struct ReleaseGateSnapshot {
         socketExists: Bool,
         socketOwnerOnly: Bool,
         networkListenerConfigured: Bool = false,
-        daemonError: String?
+        daemonError: String?,
+        keyboardAccessStatus: KeyboardAccessStatus? = nil,
+        taskCapabilities: TaskCapabilityReport? = nil,
+        checkpointStoreStatus: TaskCheckpointStoreStatus? = nil
     ) {
         self.launchAgent = launchAgent
         self.daemonStatus = daemonStatus
         self.doctorReport = doctorReport
+        self.keyboardAccessStatus = keyboardAccessStatus
+        self.taskCapabilities = taskCapabilities ?? doctorReport?.taskCapabilities
+        self.checkpointStoreStatus = checkpointStoreStatus ?? doctorReport?.checkpointStore
         self.receiptStoreStatus = receiptStoreStatus
         self.receipts = receipts
         self.socketExists = socketExists
@@ -114,6 +123,8 @@ public final class ReleaseGate {
             permissionCheck(snapshot),
             receiptStoreCheck(snapshot),
             macWorkflowCheck(snapshot),
+            keyboardAccessCheck(snapshot),
+            taskControlCheck(snapshot),
             iPhoneMirroringCheck(snapshot),
             approvalSafetyCheck(snapshot)
         ]
@@ -134,6 +145,7 @@ public final class ReleaseGate {
         let socketExists = FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
         let socketOwnerOnly = MacCtlPaths.ownerOnlySocketPath()
         var doctorReport: DoctorReport?
+        var keyboardAccessStatus: KeyboardAccessStatus?
         var daemonStatus: DaemonStatus?
         var daemonError: String?
 
@@ -162,6 +174,21 @@ public final class ReleaseGate {
                 } else if daemonError == nil {
                     daemonError = statusResponse.error?.message ?? "daemon status request was not successful"
                 }
+                let keyboardResponse = try client.send(RequestEnvelope(method: "keyboard.status"))
+                if keyboardResponse.status == .succeeded {
+                    do {
+                        keyboardAccessStatus = try decodeResult(
+                            KeyboardAccessStatus.self,
+                            from: keyboardResponse
+                        )
+                    } catch {
+                        if daemonError == nil {
+                            daemonError = "keyboard status response decode failed: \(error.localizedDescription)"
+                        }
+                    }
+                } else if daemonError == nil {
+                    daemonError = keyboardResponse.error?.message ?? "daemon keyboard status request was not successful"
+                }
             } catch {
                 daemonError = error.localizedDescription
             }
@@ -183,7 +210,10 @@ public final class ReleaseGate {
             socketExists: socketExists,
             socketOwnerOnly: socketOwnerOnly,
             networkListenerConfigured: false,
-            daemonError: daemonError
+            daemonError: daemonError,
+            keyboardAccessStatus: keyboardAccessStatus,
+            taskCapabilities: doctorReport?.taskCapabilities,
+            checkpointStoreStatus: doctorReport?.checkpointStore
         )
     }
 
@@ -396,6 +426,150 @@ public final class ReleaseGate {
         )
     }
 
+    private func keyboardAccessCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        guard let status = snapshot.keyboardAccessStatus else {
+            return ReleaseGateCheck(
+                id: "live.keyboard-control",
+                state: .blocked,
+                message: "Full Keyboard Access status could not be read",
+                details: ["missing": .array([.string("status")])]
+            )
+        }
+        var missing: [String] = []
+        if status.fullKeyboardAccessEnabled != true {
+            missing.append("full_keyboard_access")
+        }
+        if !hasFreshReceipt(method: "keyboard.lease.acquire", evidenceKind: "keyboard_lease", in: snapshot.receipts) {
+            missing.append("lease_acquisition")
+        }
+        if !hasFreshReceipt(method: "keyboard.navigate", evidenceKind: "keyboard_input", in: snapshot.receipts) {
+            missing.append("named_navigation")
+        }
+        if !hasFreshReceipt(method: "keyboard.inspect", evidenceKind: "keyboard_focus", in: snapshot.receipts) {
+            missing.append("focus_inspection")
+        }
+        let leaseEnded = hasFreshReceipt(
+            method: "keyboard.lease.release",
+            evidenceKind: "keyboard_lease",
+            in: snapshot.receipts
+        ) || snapshot.receipts.contains {
+            $0.method == "keyboard.navigate"
+                && $0.errorCode == MacCtlErrorCode.keyboardLeaseExpired.rawValue
+                && isFresh($0)
+        }
+        if !leaseEnded {
+            missing.append("lease_release_or_expiry")
+        }
+        let keyboardReceipts = snapshot.receipts.filter { $0.method.hasPrefix("keyboard.") }
+        let receiptData = (try? JSONCodec.encode(keyboardReceipts)) ?? Data()
+        let receiptText = String(decoding: receiptData, as: UTF8.self)
+        let privateMarkers = ["raw_keys", "AXValue", "document_text", "private_text", "ocr_text", "lease_token"]
+        if privateMarkers.contains(where: { receiptText.localizedCaseInsensitiveContains($0) }) {
+            missing.append("redacted_receipts")
+        }
+        return ReleaseGateCheck(
+            id: "live.keyboard-control",
+            state: missing.isEmpty ? .passed : .blocked,
+            message: missing.isEmpty
+                ? "Full Keyboard Access, lease, navigation, focus, and release evidence is fresh"
+                : "Keyboard-first GUI smoke evidence is missing",
+            details: [
+                "full_keyboard_access": .bool(status.fullKeyboardAccessEnabled == true),
+                "missing": .array(missing.map(JSONValue.string)),
+                "permission_context": .string(status.permissionContext)
+            ]
+        )
+    }
+
+    private func taskControlCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        var missing: [String] = []
+        let requiredMethods = ["task.prepare", "task.run", "task.status", "task.resume", "task.cancel"]
+        guard let capabilities = snapshot.taskCapabilities else {
+            return ReleaseGateCheck(
+                id: "task.control",
+                state: .blocked,
+                message: "Task-controller capabilities were not reported by the daemon",
+                details: ["missing": .array([.string("capabilities")])]
+            )
+        }
+        let methods = Set(capabilities.methods)
+        missing.append(contentsOf: requiredMethods.filter { !methods.contains($0) })
+        if capabilities.automaticResume {
+            missing.append("automatic_resume_disabled")
+        }
+        if (snapshot.receipts.filter { $0.method == "adapter.capabilities" && isFresh($0) }).isEmpty {
+            missing.append("adapter_capabilities")
+        }
+        guard let checkpoint = snapshot.checkpointStoreStatus else {
+            missing.append("checkpoint_storage")
+            return ReleaseGateCheck(
+                id: "task.control",
+                state: .blocked,
+                message: "Task-controller release evidence is missing",
+                details: ["missing": .array(missing.map(JSONValue.string))]
+            )
+        }
+        if !checkpoint.writable || !checkpoint.directoryOwnerOnly || !checkpoint.filesOwnerOnly {
+            missing.append("checkpoint_storage_permissions")
+        }
+        if checkpoint.pendingPrune != 0 || checkpoint.invalidCheckpointCount != 0 {
+            missing.append("checkpoint_storage_health")
+        }
+        if !hasFreshTaskReceipt(
+            method: "task.prepare",
+            status: .prepared,
+            state: "prepared",
+            in: snapshot.receipts
+        ) {
+            missing.append("task_prepare")
+        }
+        if !hasFreshTaskReceipt(method: "task.run", state: "completed", in: snapshot.receipts)
+            && !hasFreshTaskReceipt(method: "task.resume", state: "completed", in: snapshot.receipts) {
+            missing.append("task_completion")
+        }
+        if !hasFreshReceipt(method: "task.status", evidenceKind: "task_checkpoint", in: snapshot.receipts) {
+            missing.append("task_status")
+        }
+        if !hasFreshReceipt(method: "task.cancel", evidenceKind: "task_checkpoint", in: snapshot.receipts) {
+            missing.append("task_cancel")
+        }
+        let taskReceipts = snapshot.receipts.filter { $0.method.hasPrefix("task.") }
+        let receiptText = String(decoding: (try? JSONCodec.encode(taskReceipts)) ?? Data(), as: UTF8.self)
+        let privateMarkers = [
+            "raw_keys", "lease_token", "approval_token", "AXValue", "document_text", "private_text", "ocr_text"
+        ]
+        if privateMarkers.contains(where: { receiptText.localizedCaseInsensitiveContains($0) }) {
+            missing.append("redacted_task_receipts")
+        }
+        return ReleaseGateCheck(
+            id: "task.control",
+            state: missing.isEmpty ? .passed : .blocked,
+            message: missing.isEmpty
+                ? "Task capabilities, checkpoint health, adapter diagnostics, and task smoke evidence are fresh"
+                : "Task-controller release evidence is missing",
+            details: [
+                "missing": .array(missing.map(JSONValue.string)),
+                "automatic_resume": .bool(capabilities.automaticResume),
+                "checkpoint_writable": .bool(checkpoint.writable)
+            ]
+        )
+    }
+
+    private func hasFreshTaskReceipt(
+        method: String,
+        status: OperationStatus = .succeeded,
+        state: String,
+        in receipts: [OperationReceipt]
+    ) -> Bool {
+        receipts.contains {
+            $0.method == method
+                && $0.status == status
+                && $0.lifecycleState == state
+                && $0.evidence.contains { $0.kind == "task_checkpoint" }
+                && isFresh($0)
+        }
+    }
+
     private func iPhoneMirroringCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
         let candidates = snapshot.receipts.filter {
             $0.workflowID == "iphone.open-tinder"
@@ -412,7 +586,7 @@ public final class ReleaseGate {
             )
         }
         let evidenceKinds = Set(receipt.evidence.map(\.kind))
-        let requiredKinds = Set(["ocr_anchor", "assertion"])
+        let requiredKinds = Set(["mirroring_driving_lease", "ocr_anchor", "assertion"])
         let missingKinds = requiredKinds.subtracting(evidenceKinds).sorted()
         return ReleaseGateCheck(
             id: "live.iphone-mirroring",
@@ -487,6 +661,19 @@ public final class ReleaseGate {
             $0.workflowID == workflowID
                 && $0.status == .succeeded
                 && $0.verificationResult == "passed"
+                && isFresh($0)
+        }
+    }
+
+    private func hasFreshReceipt(
+        method: String,
+        evidenceKind: String,
+        in receipts: [OperationReceipt]
+    ) -> Bool {
+        receipts.contains {
+            $0.method == method
+                && $0.status == .succeeded
+                && $0.evidence.contains { $0.kind == evidenceKind }
                 && isFresh($0)
         }
     }

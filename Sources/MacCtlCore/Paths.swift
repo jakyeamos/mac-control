@@ -29,6 +29,11 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("receipts", isDirectory: true)
     }
 
+    /// Durable task checkpoints are intentionally separate from operation receipts.
+    public static var taskCheckpointsDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("task-checkpoints", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -63,7 +68,13 @@ public enum MacCtlPaths {
 
     @discardableResult
     public static func ensureDirectories() throws -> [URL] {
-        let directories = [applicationSupportDirectory, logDirectory, workflowDirectory, receiptsDirectory]
+        let directories = [
+            applicationSupportDirectory,
+            logDirectory,
+            workflowDirectory,
+            receiptsDirectory,
+            taskCheckpointsDirectory
+        ]
         for directory in directories {
             try FileManager.default.createDirectory(
                 at: directory,

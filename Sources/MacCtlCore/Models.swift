@@ -227,6 +227,8 @@ public enum ActionKind: String, Codable, Equatable, CaseIterable {
     case capture
     case ocr
     case assert
+    /// A typed operation resolved through the allowlisted application-adapter registry.
+    case adapter
 }
 
 public enum SelectorTier: Int, Codable, Equatable {
@@ -294,6 +296,14 @@ public struct Selector: Codable, Equatable {
 }
 
 public struct ActionSpec: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case surface
+        case selector
+        case parameters
+        case risk
+    }
+
     public let kind: ActionKind
     public let surface: SurfaceKind
     public let selector: Selector?
@@ -312,6 +322,15 @@ public struct ActionSpec: Codable, Equatable {
         self.selector = selector
         self.parameters = parameters
         self.risk = risk
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(ActionKind.self, forKey: .kind)
+        surface = try container.decode(SurfaceKind.self, forKey: .surface)
+        selector = try container.decodeIfPresent(Selector.self, forKey: .selector)
+        parameters = try container.decodeIfPresent([String: JSONValue].self, forKey: .parameters) ?? [:]
+        risk = try container.decodeIfPresent(RiskLevel.self, forKey: .risk)
     }
 }
 
@@ -528,6 +547,9 @@ public struct DoctorReport: Codable, Equatable {
     public let permissionContext: String
     public let runtimeIdentity: RuntimeIdentity
     public let launchAgent: LaunchAgentStatus?
+    public let keyboardAccess: KeyboardAccessStatus?
+    public let taskCapabilities: TaskCapabilityReport?
+    public let checkpointStore: TaskCheckpointStoreStatus?
 
     public init(
         processID: Int32,
@@ -540,7 +562,10 @@ public struct DoctorReport: Codable, Equatable {
         warnings: [String],
         permissionContext: String = "daemon",
         runtimeIdentity: RuntimeIdentity = .current(),
-        launchAgent: LaunchAgentStatus? = nil
+        launchAgent: LaunchAgentStatus? = nil,
+        keyboardAccess: KeyboardAccessStatus? = nil,
+        taskCapabilities: TaskCapabilityReport? = nil,
+        checkpointStore: TaskCheckpointStoreStatus? = nil
     ) {
         self.processID = processID
         self.osVersion = osVersion
@@ -553,6 +578,9 @@ public struct DoctorReport: Codable, Equatable {
         self.permissionContext = permissionContext
         self.runtimeIdentity = runtimeIdentity
         self.launchAgent = launchAgent
+        self.keyboardAccess = keyboardAccess
+        self.taskCapabilities = taskCapabilities
+        self.checkpointStore = checkpointStore
     }
 }
 
@@ -561,17 +589,57 @@ public struct CapabilityReport: Codable, Equatable {
     public let optionalBackends: [String]
     public let permissionGates: [String]
     public let safety: [String]
+    public let keyboardAccess: KeyboardAccessStatus?
+    public let taskCapabilities: TaskCapabilityReport?
+    public let adapterManifests: [AppAdapterManifest]
+    public let automationPermissions: [PermissionStatus]
+    public let checkpointStore: TaskCheckpointStoreStatus?
+
+    private enum CodingKeys: String, CodingKey {
+        case capabilities
+        case optionalBackends
+        case permissionGates
+        case safety
+        case keyboardAccess
+        case taskCapabilities
+        case adapterManifests
+        case automationPermissions
+        case checkpointStore
+    }
 
     public init(
         capabilities: [String],
         optionalBackends: [String],
         permissionGates: [String],
-        safety: [String]
+        safety: [String],
+        keyboardAccess: KeyboardAccessStatus? = nil,
+        taskCapabilities: TaskCapabilityReport? = nil,
+        adapterManifests: [AppAdapterManifest] = [],
+        automationPermissions: [PermissionStatus] = [],
+        checkpointStore: TaskCheckpointStoreStatus? = nil
     ) {
         self.capabilities = capabilities
         self.optionalBackends = optionalBackends
         self.permissionGates = permissionGates
         self.safety = safety
+        self.keyboardAccess = keyboardAccess
+        self.taskCapabilities = taskCapabilities
+        self.adapterManifests = adapterManifests
+        self.automationPermissions = automationPermissions
+        self.checkpointStore = checkpointStore
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        capabilities = try container.decode([String].self, forKey: .capabilities)
+        optionalBackends = try container.decode([String].self, forKey: .optionalBackends)
+        permissionGates = try container.decode([String].self, forKey: .permissionGates)
+        safety = try container.decode([String].self, forKey: .safety)
+        keyboardAccess = try container.decodeIfPresent(KeyboardAccessStatus.self, forKey: .keyboardAccess)
+        taskCapabilities = try container.decodeIfPresent(TaskCapabilityReport.self, forKey: .taskCapabilities)
+        adapterManifests = try container.decodeIfPresent([AppAdapterManifest].self, forKey: .adapterManifests) ?? []
+        automationPermissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .automationPermissions) ?? []
+        checkpointStore = try container.decodeIfPresent(TaskCheckpointStoreStatus.self, forKey: .checkpointStore)
     }
 }
 
@@ -731,6 +799,39 @@ public enum MacCtlErrorCode: String {
     case focusChanged = "focus_changed"
     case launchAgentUnhealthy = "launch_agent_unhealthy"
     case receiptUnavailable = "receipt_unavailable"
+    case mirroringDrivingLeaseRequired = "mirroring_driving_lease_required"
+    case mirroringDrivingLeaseHeld = "mirroring_driving_lease_held"
+    case mirroringDrivingLeaseInvalid = "mirroring_driving_lease_invalid"
+    case keyboardAccessDisabled = "keyboard_access_disabled"
+    case keyboardConfirmationRequired = "keyboard_confirmation_required"
+    case keyboardEnableVerificationFailed = "keyboard_enable_verification_failed"
+    case keyboardLeaseRequired = "keyboard_lease_required"
+    case keyboardLeaseNotFound = "keyboard_lease_not_found"
+    case keyboardLeaseExpired = "keyboard_lease_expired"
+    case keyboardLeaseConflict = "keyboard_lease_conflict"
+    case keyboardLeaseInvalid = "keyboard_lease_invalid"
+    case keyboardFocusChanged = "keyboard_focus_changed"
+    case keyboardFocusUnavailable = "keyboard_focus_unavailable"
+    case keyboardCommandInvalid = "keyboard_command_invalid"
+    case keyboardSequenceInvalid = "keyboard_sequence_invalid"
+    case keyboardPrintableKeyRejected = "keyboard_printable_key_rejected"
+    case taskInvalidPlan = "task_invalid_plan"
+    case taskNotFound = "task_not_found"
+    case taskApprovalRequired = "task_approval_required"
+    case taskApprovalMismatch = "task_approval_mismatch"
+    case taskStateInvalid = "task_state_invalid"
+    case taskLeaseRequired = "task_lease_required"
+    case taskCancelled = "task_cancelled"
+    case taskExpired = "task_expired"
+    case taskTimeout = "task_timeout"
+    case taskActionBudgetExceeded = "task_action_budget_exceeded"
+    case taskPreconditionFailed = "task_precondition_failed"
+    case taskPostconditionFailed = "task_postcondition_failed"
+    case taskBlocked = "task_blocked"
+    case taskIndeterminate = "task_indeterminate"
+    case taskCheckpointUnavailable = "task_checkpoint_unavailable"
+    case adapterUnsupported = "adapter_unsupported"
+    case adapterPermissionMissing = "adapter_permission_missing"
 }
 
 struct ApprovalDigestPayload: Codable {

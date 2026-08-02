@@ -6,6 +6,20 @@ public final class MacCtlService {
     private let workflowExecutor: WorkflowExecutor
     private let approvalStore: ApprovalStore
     private let iphoneController: IPhoneMirroringController
+    private let iphoneDrivingLeaseStore: IPhoneMirroringDrivingLeaseStore
+    private let keyboardAccessController: KeyboardAccessController
+    private let keyboardDriveStore: KeyboardDriveStore
+    private let taskApprovalStore: TaskApprovalStore
+    private let taskCheckpointStore: TaskCheckpointStore
+    private let taskRunner: TaskRunner
+    private let adapterRegistry: AppAdapterRegistry
+    private let targetInspector: ControlTargetInspecting
+    private let focusedElementInspector: FocusedElementInspecting
+    private let controlSession: ControlSession
+    private let semanticActionRouter: SemanticActionRouter
+    private let foregroundApplication: () -> AppInfo?
+    private let resolveApplication: (String) throws -> AppInfo
+    private let hasPostEventAccess: () -> Bool
     private let launchAgentManager: LaunchAgentManager
     private let logger: SafeLog
     private let receiptStore: OperationReceiptStore
@@ -20,7 +34,24 @@ public final class MacCtlService {
         presentApproval: ((ApprovalRecord) -> Void)? = nil,
         logger: SafeLog = SafeLog(),
         receiptStore: OperationReceiptStore = OperationReceiptStore(),
-        permissionContext: String = "daemon"
+        permissionContext: String = "daemon",
+        iphoneDrivingLeaseStore: IPhoneMirroringDrivingLeaseStore = IPhoneMirroringDrivingLeaseStore(),
+        keyboardAccessController: KeyboardAccessController = KeyboardAccessController(),
+        keyboardDriveStore: KeyboardDriveStore = KeyboardDriveStore(),
+        taskApprovalStore: TaskApprovalStore = TaskApprovalStore(),
+        taskCheckpointStore: TaskCheckpointStore = TaskCheckpointStore(),
+        adapterRegistry: AppAdapterRegistry = AppAdapterRegistry(),
+        taskActionExecutor: TaskActionExecuting? = nil,
+        taskRunner: TaskRunner? = nil,
+        targetInspector: ControlTargetInspecting? = nil,
+        focusedElementInspector: FocusedElementInspecting? = nil,
+        accessibilityActionController: AccessibilityActionPerforming? = nil,
+        visualActionController: VisualActionPerforming? = nil,
+        controlSession: ControlSession? = nil,
+        semanticActionRouter: SemanticActionRouter? = nil,
+        foregroundApplication: (() -> AppInfo?)? = nil,
+        resolveApplication: ((String) throws -> AppInfo)? = nil,
+        hasPostEventAccess: (() -> Bool)? = nil
     ) {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
@@ -29,8 +60,48 @@ public final class MacCtlService {
         self.logger = logger
         self.receiptStore = receiptStore
         self.permissionContext = permissionContext
+        self.iphoneDrivingLeaseStore = iphoneDrivingLeaseStore
+        self.keyboardAccessController = keyboardAccessController
+        self.keyboardDriveStore = keyboardDriveStore
+        self.taskApprovalStore = taskApprovalStore
+        self.taskCheckpointStore = taskCheckpointStore
+        self.adapterRegistry = adapterRegistry
+        let defaultAccessibilityController = AccessibilityController()
+        let resolvedTargetInspector = targetInspector
+            ?? AccessibilityTargetInspector(accessibility: defaultAccessibilityController)
+        self.targetInspector = resolvedTargetInspector
+        let resolvedFocusedElementInspector = focusedElementInspector ?? defaultAccessibilityController
+        let resolvedAccessibilityActionController = accessibilityActionController ?? defaultAccessibilityController
+        let resolvedForegroundApplication = foregroundApplication ?? { appController.foregroundApplication() }
+        let resolvedPostEventAccess = hasPostEventAccess ?? PermissionDiagnostics.hasPostEventAccess
+        self.focusedElementInspector = resolvedFocusedElementInspector
+        self.foregroundApplication = resolvedForegroundApplication
+        let resolvedApplicationResolver = resolveApplication ?? { try appController.resolve($0) }
+        self.resolveApplication = resolvedApplicationResolver
+        self.hasPostEventAccess = resolvedPostEventAccess
         let inputController = InputController()
         let captureController = CaptureController(appController: appController)
+        let resolvedControlSession = controlSession ?? ControlSession(
+            keyboardDriveStore: keyboardDriveStore,
+            focusedElementInspector: resolvedFocusedElementInspector,
+            foregroundApplication: resolvedForegroundApplication,
+            hasPostEventAccess: resolvedPostEventAccess,
+            fullKeyboardAccessEnabled: {
+                keyboardAccessController.status(permissionContext: permissionContext).fullKeyboardAccessEnabled == true
+            }
+        )
+        self.controlSession = resolvedControlSession
+        let resolvedSemanticActionRouter = semanticActionRouter ?? SemanticActionRouter(
+            session: resolvedControlSession,
+            keyboardAccessController: keyboardAccessController,
+            accessibilityActionController: resolvedAccessibilityActionController,
+            visualActionController: visualActionController
+                ?? VisualControlFallback(
+                    captureController: captureController,
+                    inputController: inputController
+                )
+        )
+        self.semanticActionRouter = resolvedSemanticActionRouter
         let resolvedIPhoneController = IPhoneMirroringController(
             appController: appController,
             captureController: captureController,
@@ -42,6 +113,91 @@ public final class MacCtlService {
             inputController: inputController,
             captureController: captureController,
             iphoneController: resolvedIPhoneController
+        )
+        let resolvedTaskExecutor = taskActionExecutor ?? MacTaskActionExecutor(
+            appController: appController,
+            accessibilityController: defaultAccessibilityController,
+            inputController: inputController,
+            keyboardAccessController: keyboardAccessController,
+            semanticActionRouter: resolvedSemanticActionRouter,
+            adapterRegistry: adapterRegistry,
+            foregroundApplication: resolvedForegroundApplication
+        )
+        self.taskRunner = taskRunner ?? TaskRunner(
+            checkpointStore: taskCheckpointStore,
+            approvalStore: taskApprovalStore,
+            actionExecutor: resolvedTaskExecutor,
+            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, adapterRegistry] step in
+                let target = step.target
+                var requestedApplication = target?.application ?? target?.bundleID
+                if requestedApplication == nil,
+                   [.launchApp, .activateWindow].contains(step.action.kind) {
+                    requestedApplication = step.action.parameters["app"]?.stringValue
+                }
+                if requestedApplication == nil,
+                   step.action.kind == .adapter,
+                   let adapterID = step.action.parameters["adapter_id"]?.stringValue,
+                   let manifest = adapterRegistry.manifest(adapterID: adapterID) {
+                    requestedApplication = step.action.parameters["app"]?.stringValue ?? manifest.displayName
+                }
+                let application: AppInfo?
+                if let name = requestedApplication {
+                    application = try resolvedApplicationResolver(name)
+                } else {
+                    application = resolvedForegroundApplication()
+                }
+                guard let application else {
+                    throw ControlTargetInspectionError.applicationUnavailable
+                }
+                let isAdapterOpen = step.action.kind == .adapter
+                    && step.action.parameters["operation"]?.stringValue == "open"
+                if isAdapterOpen {
+                    guard target?.processID == nil,
+                          target?.windowFingerprint == nil,
+                          target?.focusedElementFingerprint == nil,
+                          target?.selector == nil else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let snapshot = ControlTargetSnapshot(
+                        application: application,
+                        focusedElement: nil,
+                        fingerprint: ControlTargetFingerprints.make(
+                            application: application,
+                            focus: nil,
+                            window: AccessibilityWindowState(visible: false, modal: false)
+                        ),
+                        windowVisible: false,
+                        modal: false,
+                        focusReadable: false,
+                        hung: false
+                    )
+                    try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
+                    return snapshot
+                }
+                if let selector = target?.selector,
+                   selector.tier == .accessibility,
+                   let pid = application.processID {
+                    do {
+                        _ = try defaultAccessibilityController.findElement(pid: pid, selector: selector)
+                    } catch AccessibilityControllerError.ambiguousMatch {
+                        throw ControlTargetInspectionError.ambiguousTarget
+                    } catch AccessibilityControllerError.elementNotFound {
+                        throw ControlTargetInspectionError.targetChanged
+                    } catch AccessibilityControllerError.permissionDenied {
+                        throw ControlTargetInspectionError.unreadableFocus
+                    }
+                }
+                let snapshot = try resolvedTargetInspector.inspect(application: application)
+                if MacCtlService.actionRequiresReadableFocus(
+                    step.action,
+                    adapterRegistry: adapterRegistry
+                ), !snapshot.focusReadable {
+                    throw ControlTargetInspectionError.unreadableFocus
+                }
+                try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
+                return snapshot
+            },
+            adapterRegistry: adapterRegistry
         )
         self.launchAgentManager = LaunchAgentManager()
     }
@@ -75,6 +231,49 @@ public final class MacCtlService {
                 return try success(request, value: capabilityReport())
             case "status":
                 return try success(request, value: daemonStatus())
+            case "keyboard.status":
+                return try keyboardStatus(request)
+            case "keyboard.setup":
+                return try keyboardSetup(request)
+            case "keyboard.enable":
+                return try keyboardEnable(request)
+            case "keyboard.inspect":
+                return try keyboardInspect(request)
+            case "keyboard.lease.acquire":
+                return try acquireKeyboardLease(request)
+            case "keyboard.lease.release":
+                return try releaseKeyboardLease(request)
+            case "keyboard.navigate":
+                return try navigateKeyboard(request)
+            case "keyboard.send":
+                return try sendKeyboard(request)
+            case "task.prepare":
+                return try prepareTask(request)
+            case "task.run":
+                return try runTask(request)
+            case "task.status":
+                return try statusTask(request)
+            case "task.resume":
+                return try resumeTask(request)
+            case "task.cancel":
+                return try cancelTask(request)
+            case "adapter.capabilities":
+                return try success(
+                    request,
+                    result: [
+                        "manifests": try JSONValue.fromEncodable(adapterRegistry.manifests()),
+                        "automation_permissions": try JSONValue.fromEncodable(adapterRegistry.automationPermissions())
+                    ],
+                    evidence: [Evidence(
+                        kind: "adapter_capabilities",
+                        message: "Allowlisted adapter manifests and Automation diagnostics were inspected",
+                        source: "macctld"
+                    )]
+                )
+            case "control.status":
+                return try controlStatus(request)
+            case "control.perform":
+                return try performControlAction(request)
             case "app.list":
                 return try success(request, value: appController.listApplications())
             case "app.open":
@@ -110,7 +309,7 @@ public final class MacCtlService {
             case "workflow.run":
                 return try runWorkflow(request)
             case "approval.list":
-                return try success(request, value: approvalStore.list())
+                return try success(request, value: approvalStore.list() + taskApprovalStore.list())
             case "approval.approve":
                 return try approve(request)
             case "approval.deny":
@@ -123,10 +322,15 @@ public final class MacCtlService {
                 return try success(request, value: ["lines": logger.tail()])
             case "iphone.status":
                 return try success(request, value: iphoneController.state())
+            case "iphone.drive.begin":
+                return try beginIPhoneDrivingLease(request)
+            case "iphone.drive.end":
+                return try endIPhoneDrivingLease(request)
             case "iphone.open-app":
                 let appName = try requiredString(request, key: "name")
+                let drivingLease = try requiredIPhoneDrivingLease(from: request)
                 let match = try withExecutionLock {
-                    try iphoneController.openMirroredApp(appName)
+                    try iphoneController.openMirroredApp(appName, drivingLease: drivingLease)
                 }
                 return try success(
                     request,
@@ -135,11 +339,18 @@ public final class MacCtlService {
                         "anchor_x": .number(Double(match.bounds.midX)),
                         "anchor_y": .number(Double(match.bounds.midY))
                     ],
-                    evidence: [Evidence(
-                        kind: "ocr_anchor",
-                        message: "Mirrored app located and clicked by OCR",
-                        source: "iPhone Mirroring"
-                    )]
+                    evidence: [
+                        Evidence(
+                            kind: "mirroring_driving_lease",
+                            message: "Synthetic Mirroring navigation ran under an active user-held exclusive driving lease",
+                            source: "macctld"
+                        ),
+                        Evidence(
+                            kind: "ocr_anchor",
+                            message: "Mirrored app located and clicked by OCR",
+                            source: "iPhone Mirroring"
+                        )
+                    ]
                 )
             default:
                 return failure(
@@ -153,6 +364,587 @@ public final class MacCtlService {
 
     public func localReadOnlyHandle(_ request: RequestEnvelope) -> ResponseEnvelope {
         handle(request)
+    }
+
+    private func keyboardStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let status = keyboardAccessController.status(
+            permissionContext: permissionContext,
+            activeLease: keyboardDriveStore.activeLease()
+        )
+        return try success(
+            request,
+            value: status,
+            evidence: [Evidence(
+                kind: "keyboard_status",
+                message: "Full Keyboard Access and keyboard permission status were inspected",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func keyboardSetup(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        return try success(
+            request,
+            value: keyboardAccessController.setup(),
+            evidence: [Evidence(
+                kind: "keyboard_setup",
+                message: "Keyboard setup guidance was returned without changing system preferences",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func keyboardEnable(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let status = try keyboardAccessController.enable(
+            confirm: request.params["confirm"]?.boolValue == true,
+            permissionContext: permissionContext,
+            activeLease: keyboardDriveStore.activeLease()
+        )
+        return try success(
+            request,
+            value: status,
+            evidence: [Evidence(
+                kind: "keyboard_setting",
+                message: "Full Keyboard Access was explicitly requested and verified through AppKit",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func keyboardInspect(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard let application = foregroundApplication(), let processID = application.processID else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        let snapshot = try focusedElementInspector.focusedElementSnapshot(
+            pid: processID,
+            application: application
+        )
+        return try success(
+            request,
+            value: snapshot,
+            evidence: [Evidence(
+                kind: "keyboard_focus",
+                message: "Focused Accessibility metadata was inspected without reading values or child trees",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func acquireKeyboardLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let rawScope = try requiredString(request, key: "scope").lowercased()
+        guard let scope = KeyboardLeaseScope(rawValue: rawScope) else {
+            throw KeyboardControlError.invalidSequence("scope")
+        }
+        guard hasPostEventAccess() else {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+        let application: AppInfo?
+        switch scope {
+        case .app:
+            guard let requestedName = request.params["app"]?.stringValue,
+                  !requestedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw KeyboardDriveStoreError.applicationRequired
+            }
+            let requestedApplication = try resolveApplication(requestedName)
+            guard let currentApplication = foregroundApplication() else {
+                throw KeyboardControlError.foregroundUnavailable
+            }
+            guard sameKeyboardApplication(requestedApplication, currentApplication, requireProcess: true) else {
+                throw KeyboardControlError.appScopeMismatch(
+                    expected: keyboardApplicationLabel(requestedApplication),
+                    actual: keyboardApplicationLabel(currentApplication)
+                )
+            }
+            application = currentApplication
+        case .session:
+            application = nil
+        }
+        let lease = try keyboardDriveStore.acquire(
+            scope: scope,
+            application: application,
+            seconds: try requestedKeyboardLifetime(from: request),
+            confirm: request.params["confirm"]?.boolValue == true
+        )
+        return try success(
+            request,
+            result: [
+                "message": .string("Keyboard driving lease acquired; keep the physical keyboard and trackpad idle while driving"),
+                "lease": try JSONValue.fromEncodable(lease),
+                "scope": .string(scope.rawValue),
+                "expires_at": try JSONValue.fromEncodable(lease.expiresAt)
+            ],
+            evidence: [Evidence(
+                kind: "keyboard_lease",
+                message: "A short-lived keyboard driving lease was acquired in memory",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func releaseKeyboardLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard let token = request.params["token"]?.stringValue, !token.isEmpty else {
+            throw KeyboardControlError.leaseRequired
+        }
+        let lease = try keyboardDriveStore.release(token: token)
+        return try success(
+            request,
+            result: [
+                "released": .bool(true),
+                "scope": .string(lease.scope.rawValue),
+                "expires_at": try JSONValue.fromEncodable(lease.expiresAt)
+            ],
+            evidence: [Evidence(
+                kind: "keyboard_lease",
+                message: "Keyboard driving lease was released from memory",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func navigateKeyboard(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard let token = request.params["lease_token"]?.stringValue, !token.isEmpty else {
+            throw KeyboardControlError.leaseRequired
+        }
+        let command = try KeyboardCommand.resolve(try requiredString(request, key: "command"))
+        let count = try requestedKeyboardCount(from: request)
+        let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let report = try withExecutionLock {
+            let (lease, application) = try requireKeyboardInputLease(
+                token: token,
+                requireFullKeyboardAccess: true
+            )
+            return try keyboardAccessController.send(
+                command: command,
+                count: count,
+                targetApplication: application,
+                leaseExpiresAt: lease.expiresAt,
+                interKeyDelay: interKeyDelay,
+                beforeEach: { _ in
+                    _ = try self.requireKeyboardInputLease(
+                        token: token,
+                        requireFullKeyboardAccess: true
+                    )
+                }
+            )
+        }
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "keyboard_input",
+                message: "Named keyboard navigation ran under a live lease and per-key focus checks",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func sendKeyboard(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard let values = request.params["keys"]?.arrayValue else {
+            throw KeyboardControlError.invalidSequence("keys")
+        }
+        let keys = values.map { $0.stringValue }
+        guard keys.allSatisfy({ $0 != nil }) else {
+            throw KeyboardControlError.invalidSequence("keys")
+        }
+        guard let token = request.params["lease_token"]?.stringValue, !token.isEmpty else {
+            throw KeyboardControlError.leaseRequired
+        }
+        let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let report = try withExecutionLock {
+            let (lease, application) = try requireKeyboardInputLease(
+                token: token,
+                requireFullKeyboardAccess: false
+            )
+            return try keyboardAccessController.sendRaw(
+                keys: keys.compactMap { $0 },
+                targetApplication: application,
+                leaseExpiresAt: lease.expiresAt,
+                interKeyDelay: interKeyDelay,
+                beforeEach: { _ in
+                    _ = try self.requireKeyboardInputLease(
+                        token: token,
+                        requireFullKeyboardAccess: false
+                    )
+                }
+            )
+        }
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "keyboard_input",
+                message: "Raw non-printable keyboard shortcuts ran under a live lease and per-key focus checks",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func controlStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        try success(
+            request,
+            value: controlSession.snapshot(),
+            evidence: [Evidence(
+                kind: "control_session",
+                message: "Foreground, redacted focus, lease, and last verification state were inspected",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func performControlAction(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let token = request.params["lease_token"]?.stringValue ?? ""
+        let command = try KeyboardCommand.resolve(try requiredString(request, key: "action"))
+        let selector = try requestedControlSelector(from: request)
+        let report = try withExecutionLock {
+            try semanticActionRouter.perform(
+                command: command,
+                selector: selector,
+                leaseToken: token,
+                count: try requestedKeyboardCount(from: request),
+                interKeyDelay: try requestedInterKeyDelay(from: request),
+                allowRawCoordinate: request.params["allow_raw_coordinate"]?.boolValue == true
+            )
+        }
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "control_action",
+                message: "Semantic control used the strongest available route and verified the resulting foreground state",
+                source: "macctld",
+                metadata: [
+                    "route": .string(report.route.rawValue),
+                    "fallback_used": .bool(report.fallbackUsed),
+                    "verification": .string(report.verification.state.rawValue),
+                    "foreground_changed": .bool(report.verification.foregroundChanged),
+                    "focus_changed": .bool(report.verification.focusChanged)
+                ]
+            )]
+        )
+    }
+
+    private func requestedControlSelector(from request: RequestEnvelope) throws -> Selector? {
+        guard let raw = request.params["selector"] else { return nil }
+        if raw == .null { return nil }
+        guard raw.objectValue != nil,
+              let data = try? JSONCodec.encode(raw),
+              let selector = try? JSONCodec.decode(Selector.self, from: data) else {
+            throw SemanticActionRouterError.invalidSelector
+        }
+        return selector
+    }
+
+    private func requireKeyboardInputLease(
+        token: String,
+        requireFullKeyboardAccess: Bool
+    ) throws -> (KeyboardDriveLease, AppInfo) {
+        let lease = try keyboardDriveStore.lease(for: token)
+        guard hasPostEventAccess() else {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+        guard let application = foregroundApplication(), application.processID != nil else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        if lease.scope == .app {
+            guard let expected = lease.application,
+                  sameKeyboardApplication(expected, application, requireProcess: true) else {
+                throw KeyboardControlError.appScopeMismatch(
+                    expected: keyboardApplicationLabel(lease.application),
+                    actual: keyboardApplicationLabel(application)
+                )
+            }
+        }
+        if requireFullKeyboardAccess {
+            let status = keyboardAccessController.status(
+                permissionContext: permissionContext,
+                activeLease: lease
+            )
+            guard status.fullKeyboardAccessEnabled == true else {
+                throw KeyboardControlError.fullKeyboardAccessDisabled
+            }
+        }
+        return (lease, application)
+    }
+
+    private func requestedKeyboardLifetime(from request: RequestEnvelope) throws -> TimeInterval? {
+        guard let raw = request.params["seconds"] else { return nil }
+        guard let seconds = raw.doubleValue else { throw KeyboardDriveStoreError.invalidLifetime }
+        return seconds
+    }
+
+    private func requestedKeyboardCount(from request: RequestEnvelope) throws -> Int {
+        guard let raw = request.params["count"] else { return 1 }
+        guard let value = raw.doubleValue, value.rounded() == value else {
+            throw KeyboardControlError.repetitionLimitExceeded
+        }
+        return Int(value)
+    }
+
+    private func requestedInterKeyDelay(from request: RequestEnvelope) throws -> TimeInterval {
+        guard let raw = request.params["inter_key_ms"] else { return 0.05 }
+        guard let milliseconds = raw.doubleValue, (0...1_000).contains(milliseconds) else {
+            throw KeyboardControlError.invalidInterKeyDelay
+        }
+        return milliseconds / 1_000
+    }
+
+    private func sameKeyboardApplication(
+        _ expected: AppInfo,
+        _ actual: AppInfo,
+        requireProcess: Bool
+    ) -> Bool {
+        if requireProcess, expected.processID != actual.processID {
+            return false
+        }
+        if let expectedBundle = expected.bundleID, let actualBundle = actual.bundleID {
+            return expectedBundle == actualBundle
+        }
+        return expected.path == actual.path
+    }
+
+    private func keyboardApplicationLabel(_ application: AppInfo?) -> String {
+        application?.bundleID ?? application?.path ?? application?.name ?? "none"
+    }
+
+    private func beginIPhoneDrivingLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let lease = try iphoneDrivingLeaseStore.acquire()
+        return try success(
+            request,
+            result: [
+                "message": .string(
+                    "Exclusive iPhone Mirroring driving lease acquired; keep hands off the trackpad until the operation completes"
+                ),
+                "driving_lease_token": .string(lease.token),
+                "expires_at": try JSONValue.fromEncodable(lease.expiresAt),
+                "duration_seconds": .number(iphoneDrivingLeaseStore.lifetimeSeconds)
+            ],
+            evidence: [Evidence(
+                kind: "mirroring_driving_lease",
+                message: "User-held exclusive Mirroring driving lease acquired in memory",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func endIPhoneDrivingLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let token = try requiredString(request, key: "driving_lease_token")
+        guard iphoneDrivingLeaseStore.release(token: token) else {
+            throw IPhoneMirroringDrivingLeaseError.invalidOrExpired
+        }
+        return try success(
+            request,
+            result: [
+                "message": .string("Exclusive iPhone Mirroring driving lease released"),
+                "released": .bool(true)
+            ],
+            evidence: [Evidence(
+                kind: "mirroring_driving_lease",
+                message: "User-held exclusive Mirroring driving lease released",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func prepareTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let plan = try taskPlan(from: request)
+        let prepared = try withExecutionLock {
+            try taskRunner.prepare(
+                plan: plan,
+                ephemeralInputs: try ephemeralInputs(from: request),
+                operationID: UUID().uuidString
+            )
+        }
+        presentApproval?(prepared.approval)
+        logger.record(event: "task_prepared", metadata: [
+            "task_id": prepared.taskID,
+            "plan_digest": prepared.planDigest,
+            "operation_id": prepared.approval.operationID
+        ])
+        return try success(
+            request,
+            status: .prepared,
+            operationID: prepared.approval.operationID,
+            value: prepared,
+            evidence: [Evidence(
+                kind: "task_approval",
+                message: "Exact task plan prepared; approval is required before execution",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func runTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let plan = try taskPlan(from: request)
+        let token = try requiredString(request, key: "approval_token")
+        let inputs = try ephemeralInputs(from: request)
+        let authority = try taskAuthority(for: plan, request: request, force: false)
+        let report = try withExecutionLock {
+            try taskRunner.run(
+                plan: plan,
+                approvalToken: token,
+                ephemeralInputs: inputs,
+                authority: authority
+            )
+        }
+        return try taskResponse(request, report: report, message: "Task completed")
+    }
+
+    private func statusTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let taskID = try requiredString(request, key: "task_id")
+        let report = try withExecutionLock { try taskRunner.status(taskID: taskID) }
+        return try taskResponse(request, report: report, message: "Task status")
+    }
+
+    private func resumeTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let plan = try taskPlan(from: request)
+        let token = try requiredString(request, key: "approval_token")
+        let inputs = try ephemeralInputs(from: request)
+        let authority = try taskAuthority(for: plan, request: request, force: true)
+        guard let authority else { throw TaskControlError.leaseRequired }
+        let report = try withExecutionLock {
+            try taskRunner.resume(
+                plan: plan,
+                approvalToken: token,
+                ephemeralInputs: inputs,
+                authority: authority
+            )
+        }
+        return try taskResponse(request, report: report, message: "Task resumed and completed")
+    }
+
+    private func cancelTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let taskID = try requiredString(request, key: "task_id")
+        // Cancellation is intentionally outside the action lock so a caller can
+        // interrupt a task that is waiting on a bounded Accessibility or adapter
+        // action.  TaskRunner owns its checkpoint/cancellation synchronization.
+        let report = try taskRunner.cancel(taskID: taskID)
+        return try taskResponse(request, report: report, message: "Task cancellation requested")
+    }
+
+    private func taskPlan(from request: RequestEnvelope) throws -> TaskPlan {
+        guard let value = request.params["plan"] else {
+            throw TaskControlError.invalidPlan(["plan is required"])
+        }
+        guard let data = try? JSONCodec.encode(value) else {
+            throw TaskControlError.invalidPlan(["plan is not valid JSON"])
+        }
+        do {
+            return try JSONCodec.decode(TaskPlan.self, from: data)
+        } catch {
+            throw TaskControlError.invalidPlan(["plan could not be decoded"])
+        }
+    }
+
+    private func taskAuthority(
+        for plan: TaskPlan,
+        request: RequestEnvelope,
+        force: Bool
+    ) throws -> TaskExecutionAuthority? {
+        guard force || plan.requiresInputAuthority(using: adapterRegistry) else { return nil }
+        guard let token = request.params["lease_token"]?.stringValue, !token.isEmpty else {
+            throw TaskControlError.leaseRequired
+        }
+        let requiresFullKeyboardAccess = plan.steps.contains { $0.action.kind == .key }
+        let context = try controlSession.beginAction(
+            leaseToken: token,
+            requireFullKeyboardAccess: requiresFullKeyboardAccess
+        )
+        return TaskExecutionAuthority(
+            leaseToken: token,
+            leaseExpiresAt: context.lease.expiresAt,
+            fresh: true,
+            revalidate: { [controlSession] in
+                try controlSession.revalidate(context)
+            },
+            fingerprint: { [controlSession] in
+                let application = try? controlSession.revalidate(context)
+                return application.map { ControlTargetFingerprints.make(application: $0, focus: nil) }
+            }
+        )
+    }
+
+    private static func validateTaskTarget(
+        snapshot: ControlTargetSnapshot,
+        target: TaskTargetIdentity?
+    ) throws {
+        guard let target else { return }
+        if let application = target.application,
+           snapshot.application.name.caseInsensitiveCompare(application) != .orderedSame,
+           snapshot.application.bundleID != application {
+            throw ControlTargetInspectionError.targetChanged
+        }
+        if let bundleID = target.bundleID, snapshot.application.bundleID != bundleID {
+            throw ControlTargetInspectionError.targetChanged
+        }
+        if let processID = target.processID,
+           snapshot.application.processID != processID {
+            throw ControlTargetInspectionError.targetChanged
+        }
+        if let windowFingerprint = target.windowFingerprint,
+           snapshot.fingerprint.window != windowFingerprint {
+            throw ControlTargetInspectionError.targetChanged
+        }
+        if let focusedElementFingerprint = target.focusedElementFingerprint,
+           snapshot.fingerprint.focusedElement != focusedElementFingerprint {
+            throw ControlTargetInspectionError.targetChanged
+        }
+    }
+
+    private static func actionRequiresReadableFocus(
+        _ action: ActionSpec,
+        adapterRegistry: AppAdapterRegistry
+    ) -> Bool {
+        switch action.kind {
+        case .click, .type, .key, .scroll, .activateWindow, .capture, .ocr:
+            return true
+        case .adapter:
+            guard let adapterID = action.parameters["adapter_id"]?.stringValue,
+                  let operationName = action.parameters["operation"]?.stringValue,
+                  let operation = try? adapterRegistry.operation(
+                      adapterID: adapterID,
+                      name: operationName
+                  ) else {
+                return true
+            }
+            return operation.mutating
+        case .launchApp, .waitFor, .assert:
+            return false
+        }
+    }
+
+    private func taskResponse(
+        _ request: RequestEnvelope,
+        report: TaskStatusReport,
+        message: String
+    ) throws -> ResponseEnvelope {
+        var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
+        result["task_id"] = .string(report.taskID)
+        result["plan_digest"] = .string(report.planDigest)
+        result["lifecycle_state"] = .string(report.state.rawValue)
+        if let lastStepID = report.lastStepID {
+            result["last_step_id"] = .string(lastStepID)
+        }
+        result["message"] = .string(message)
+        return try success(
+            request,
+            status: taskOperationStatus(report.state),
+            result: result,
+            evidence: [Evidence(
+                kind: "task_checkpoint",
+                message: "Task status was derived from a redacted durable checkpoint",
+                source: "macctld",
+                metadata: ["lifecycle_state": .string(report.state.rawValue)]
+            )]
+        )
+    }
+
+    private func taskOperationStatus(_ state: TaskLifecycleState) -> OperationStatus {
+        switch state {
+        case .prepared: return .prepared
+        case .completed, .cancelled: return .succeeded
+        case .expired: return .expired
+        case .running, .paused, .blocked, .indeterminate: return .blocked
+        }
     }
 
     private func prepareWorkflow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -182,17 +974,21 @@ public final class MacCtlService {
             "risk": validation.risk.rawValue,
             "operation_id": prepared.record.operationID
         ])
+        var result: [String: JSONValue] = [
+            "approval": try JSONValue.fromEncodable(prepared.record),
+            "plan_digest": .string(prepared.planDigest),
+            "risk": .string(validation.risk.rawValue),
+            "focus_policy": .string(workflow.focusPolicy.rawValue),
+            "expires_at": try JSONValue.fromEncodable(prepared.record.expiresAt)
+        ]
+        if requiresIPhoneMirroringDrivingLease(workflow) {
+            result["mirroring_driving_lease_required"] = .bool(true)
+        }
         return try success(
             request,
             status: .prepared,
             operationID: prepared.record.operationID,
-            result: [
-                "approval": try JSONValue.fromEncodable(prepared.record),
-                "plan_digest": .string(prepared.planDigest),
-                "risk": .string(validation.risk.rawValue),
-                "focus_policy": .string(workflow.focusPolicy.rawValue),
-                "expires_at": try JSONValue.fromEncodable(prepared.record.expiresAt)
-            ],
+            result: result,
             evidence: [Evidence(
                 kind: "approval",
                 message: "Exact workflow plan prepared; approval is required before execution",
@@ -218,6 +1014,7 @@ public final class MacCtlService {
                 details: ["errors": .array(validation.errors.map(JSONValue.string))]
             )
         }
+        let drivingLease = try requestedIPhoneMirroringDrivingLease(for: workflow, request: request)
         let suppliedInputs = try ephemeralInputs(from: request)
         if validation.risk == .sensitive {
             guard let token = request.params["approval_token"]?.stringValue else {
@@ -274,9 +1071,13 @@ public final class MacCtlService {
             guard suppliedInputs.isEmpty || suppliedInputs == prepared.ephemeralInputs else {
                 throw WorkflowExecutionError.unsafeInput("ephemeral inputs did not match the prepared plan")
             }
-            return try executePrepared(request, prepared: prepared)
+            return try executePrepared(request, prepared: prepared, drivingLease: drivingLease)
         }
-        let report = try executeWorkflow(workflow, ephemeralInputs: suppliedInputs)
+        let report = try executeWorkflow(
+            workflow,
+            ephemeralInputs: suppliedInputs,
+            drivingLease: drivingLease
+        )
         logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["workflow_id"] = .string(workflow.id)
@@ -293,15 +1094,52 @@ public final class MacCtlService {
 
     private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
+        if token.hasPrefix("mct_") {
+            do {
+                let prepared = try taskApprovalStore.approve(token: token)
+                logger.record(event: "task_approval_approved", metadata: [
+                    "task_id": prepared.plan.id,
+                    "operation_id": prepared.record.operationID
+                ])
+                return try success(
+                    request,
+                    operationID: prepared.record.operationID,
+                    result: [
+                        "approved": .bool(true),
+                        "task_id": .string(prepared.plan.id),
+                        "plan_digest": .string(prepared.planDigest),
+                        "approval": try JSONValue.fromEncodable(prepared.record)
+                    ],
+                    evidence: [Evidence(
+                        kind: "task_approval",
+                        message: "Task approval was bound to the exact serialized plan",
+                        source: "macctld"
+                    )]
+                )
+            } catch let error as TaskApprovalStoreError {
+                return taskApprovalFailure(request, token: token, error: error)
+            }
+        }
         do {
+            let drivingLease: IPhoneMirroringDrivingLease?
+            if let record = approvalStore.record(for: token),
+               let workflow = workflowRegistry.workflow(id: record.workflowID) {
+                drivingLease = try requestedIPhoneMirroringDrivingLease(for: workflow, request: request)
+            } else {
+                drivingLease = nil
+            }
             let prepared = try approvalStore.approve(token: token)
-            return try executePrepared(request, prepared: prepared)
+            return try executePrepared(request, prepared: prepared, drivingLease: drivingLease)
         } catch let error as ApprovalStoreError {
             return approvalFailure(request, token: token, error: error)
         }
     }
 
-    private func executePrepared(_ request: RequestEnvelope, prepared: PreparedApproval) throws -> ResponseEnvelope {
+    private func executePrepared(
+        _ request: RequestEnvelope,
+        prepared: PreparedApproval,
+        drivingLease: IPhoneMirroringDrivingLease? = nil
+    ) throws -> ResponseEnvelope {
         let digest = ApprovalStore.digest(
             prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs
@@ -337,9 +1175,12 @@ public final class MacCtlService {
                 operationID: prepared.record.operationID
             )
         }
+        let resolvedDrivingLease = try drivingLease
+            ?? requestedIPhoneMirroringDrivingLease(for: prepared.workflow, request: request)
         let report = try executeWorkflow(
             prepared.workflow,
-            ephemeralInputs: prepared.ephemeralInputs
+            ephemeralInputs: prepared.ephemeralInputs,
+            drivingLease: resolvedDrivingLease
         )
         let source = request.params["source"]?.stringValue ?? "cli"
         logger.record(event: "approved_workflow_succeeded", metadata: [
@@ -363,6 +1204,26 @@ public final class MacCtlService {
 
     private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
+        if token.hasPrefix("mct_") {
+            do {
+                let record = try taskApprovalStore.deny(token: token)
+                return try success(
+                    request,
+                    operationID: record.operationID,
+                    result: [
+                        "denied": .bool(true),
+                        "task_id": .string(record.workflowID)
+                    ],
+                    evidence: [Evidence(
+                        kind: "task_approval",
+                        message: "Task approval was denied",
+                        source: "macctld"
+                    )]
+                )
+            } catch let error as TaskApprovalStoreError {
+                return taskApprovalFailure(request, token: token, error: error)
+            }
+        }
         let record: ApprovalRecord
         do {
             record = try approvalStore.deny(token: token)
@@ -391,9 +1252,16 @@ public final class MacCtlService {
         #endif
         let permissions = PermissionDiagnostics.report()
         let runtimeIdentity = RuntimeIdentity.current()
+        let keyboardAccess = keyboardAccessController.status(
+            permissionContext: permissionContext,
+            activeLease: keyboardDriveStore.activeLease()
+        )
         var warnings = permissions
             .filter { $0.state == "missing" || $0.state == "unknown" }
             .map { "\($0.name) permission is missing" }
+        if keyboardAccess.fullKeyboardAccessEnabled != true {
+            warnings.append("Full Keyboard Access is disabled or could not be verified")
+        }
         if runtimeIdentity.signatureValid == false {
             warnings.append("The daemon bundle code signature is missing or invalid")
         }
@@ -411,7 +1279,10 @@ public final class MacCtlService {
             warnings: warnings,
             permissionContext: permissionContext,
             runtimeIdentity: runtimeIdentity,
-            launchAgent: launchAgentManager.status()
+            launchAgent: launchAgentManager.status(),
+            keyboardAccess: keyboardAccess,
+            taskCapabilities: TaskCapabilityReport(),
+            checkpointStore: taskCheckpointStore.status()
         )
     }
 
@@ -420,7 +1291,11 @@ public final class MacCtlService {
             capabilities: [
                 "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key",
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
-                "workflow.background", "approval.approve", "approval.deny", "iphoneMirroring"
+                "workflow.background", "approval.approve", "approval.deny", "iphoneMirroring",
+                "keyboard.status", "keyboard.setup", "keyboard.enable", "keyboard.inspect",
+                "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.navigate", "keyboard.send",
+                "control.status", "control.perform", "task.prepare", "task.run", "task.status",
+                "task.resume", "task.cancel", "adapter.capabilities"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
             permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
@@ -429,9 +1304,30 @@ public final class MacCtlService {
                 "raw coordinates require an explicit coordinate_mode=raw marker",
                 "background workflows require named macOS app targets and preserve foreground focus",
                 "background input is sent to target processes; global mouse, desktop, and foreground paths are rejected",
+                "Full Keyboard Access is explicit, AppKit-verified, and never enabled at daemon startup",
+                "direct keyboard navigation requires one short-lived, user-confirmed lease with per-key focus checks",
+                "bare printable keys are rejected from keyboard.send; text remains ephemeral-input plus approval gated",
+                "keyboard focus inspection returns only role, subrole, identifier, title, and target application",
+                "semantic control prefers Accessibility actions, then keyboard navigation, then explicit visual fallback",
+                "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
+                "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
+                "task recovery is capped at three safe, two reversible, and one sensitive attempt",
+                "sensitive uncertainty is indeterminate and is never retried automatically",
+                "adapter operations are typed and allowlisted; arbitrary AppleScript and JXA are rejected",
+                "task checkpoints contain only redacted identity hashes and verification state",
+                "raw coordinate semantic fallback requires an explicit allow_raw_coordinate flag",
+                "browser DOM automation and iPhone Mirroring remain separate surfaces",
                 "screenshots and OCR frames are discarded after an operation",
                 "no TCP or network listener is created"
-            ]
+            ],
+            keyboardAccess: keyboardAccessController.status(
+                permissionContext: permissionContext,
+                activeLease: keyboardDriveStore.activeLease()
+            ),
+            taskCapabilities: TaskCapabilityReport(),
+            adapterManifests: adapterRegistry.manifests(),
+            automationPermissions: adapterRegistry.automationPermissions(),
+            checkpointStore: taskCheckpointStore.status()
         )
     }
 
@@ -470,7 +1366,8 @@ public final class MacCtlService {
             warnings: ["Daemon-authoritative permission context is unavailable"],
             permissionContext: "unknown",
             runtimeIdentity: .current(),
-            launchAgent: launchAgentManager.status()
+            launchAgent: launchAgentManager.status(),
+            keyboardAccess: .unknown()
         )
         return ResponseEnvelope(
             requestID: request.requestID,
@@ -564,11 +1461,51 @@ public final class MacCtlService {
 
     private func executeWorkflow(
         _ workflow: WorkflowSpec,
-        ephemeralInputs: [String: String]
+        ephemeralInputs: [String: String],
+        drivingLease: IPhoneMirroringDrivingLease? = nil
     ) throws -> ExecutionReport {
         try withExecutionLock {
-            try workflowExecutor.execute(workflow, ephemeralInputs: ephemeralInputs)
+            try workflowExecutor.execute(
+                workflow,
+                ephemeralInputs: ephemeralInputs,
+                mirroringDrivingLease: drivingLease
+            )
         }
+    }
+
+    private func requestedIPhoneMirroringDrivingLease(
+        for workflow: WorkflowSpec,
+        request: RequestEnvelope
+    ) throws -> IPhoneMirroringDrivingLease? {
+        guard requiresIPhoneMirroringDrivingLease(workflow) else { return nil }
+        return try requiredIPhoneDrivingLease(from: request)
+    }
+
+    private func requiredIPhoneDrivingLease(
+        from request: RequestEnvelope
+    ) throws -> IPhoneMirroringDrivingLease {
+        guard let rawToken = request.params["driving_lease_token"] else {
+            throw IPhoneMirroringDrivingLeaseError.required
+        }
+        guard let token = rawToken.stringValue, !token.isEmpty,
+              let lease = iphoneDrivingLeaseStore.lease(for: token) else {
+            throw IPhoneMirroringDrivingLeaseError.invalidOrExpired
+        }
+        try lease.requireHeld()
+        return lease
+    }
+
+    private func requiresIPhoneMirroringDrivingLease(_ workflow: WorkflowSpec) -> Bool {
+        workflow.recipe == "iphone-open-tinder"
+            || workflow.actions.contains { action in
+                guard action.surface == .iphoneMirroring else { return false }
+                switch action.kind {
+                case .click, .type, .key, .scroll:
+                    return true
+                default:
+                    return false
+                }
+            }
     }
 
     private func withExecutionLock<T>(_ operation: () throws -> T) rethrows -> T {
@@ -589,6 +1526,43 @@ public final class MacCtlService {
             ?? response.result["approval"]?.objectValue?["workflow_id"]?.stringValue
             ?? response.error?.details["workflow_id"]?.stringValue
         let workflow = workflowID.flatMap { workflowRegistry.workflow(id: $0) }
+        let taskPlan = decodeTaskPlan(request.params["plan"])
+        let taskID = request.params["task_id"]?.stringValue
+            ?? response.result["task_id"]?.stringValue
+            ?? response.result["taskID"]?.stringValue
+            ?? taskPlan?.id
+        let checkpoint: TaskCheckpoint?
+        if let taskID {
+            do {
+                checkpoint = try taskCheckpointStore.load(taskID: taskID)
+            } catch {
+                checkpoint = nil
+            }
+        } else {
+            checkpoint = nil
+        }
+        let taskLifecycleState = response.result["lifecycle_state"]?.stringValue
+            ?? response.result["state"]?.stringValue
+            ?? checkpoint?.state.rawValue
+        let currentTaskStepID = response.result["current_step_id"]?.stringValue
+            ?? response.result["currentStepID"]?.stringValue
+            ?? checkpoint?.currentStepID
+        let lastTaskStepID = response.result["last_step_id"]?.stringValue
+            ?? response.result["lastStepID"]?.stringValue
+            ?? checkpoint?.lastStepID
+        let terminalTaskState = [
+            TaskLifecycleState.completed.rawValue,
+            TaskLifecycleState.cancelled.rawValue,
+            TaskLifecycleState.expired.rawValue
+        ]
+        let taskStepID = terminalTaskState.contains(taskLifecycleState ?? "")
+            ? (lastTaskStepID ?? currentTaskStepID)
+            : (currentTaskStepID ?? lastTaskStepID)
+        let taskStep = taskPlan?.steps.first { $0.id == taskStepID }
+            ?? taskPlan?.steps.first
+        let taskRisk = taskStep?.risk
+        let taskTargetSurface = taskPlan?.surface
+        let taskFocusPolicy = taskPlan?.focusPolicy
         let focusPolicy = response.result["focus_policy"]?.stringValue
             .flatMap(FocusPolicy.init(rawValue:))
             ?? response.result["focusPolicy"]?.stringValue
@@ -602,6 +1576,7 @@ public final class MacCtlService {
             ?? request.params["focus_policy"]?.stringValue
                 .flatMap(FocusPolicy.init(rawValue:))
             ?? workflow?.focusPolicy
+            ?? taskFocusPolicy
         let permissions = permissionContext == "daemon"
             ? PermissionDiagnostics.report()
             : PermissionDiagnostics.unknownReport()
@@ -624,11 +1599,23 @@ public final class MacCtlService {
                     approvalState = response.status == .succeeded ? "approved" : "required"
                 }
             }
+        } else if taskID != nil {
+            switch request.method {
+            case "task.prepare": approvalState = response.status == .prepared ? "prepared" : "required"
+            case "approval.approve": approvalState = response.status == .succeeded ? "approved" : "required"
+            case "approval.deny": approvalState = response.status == .succeeded ? "denied" : "required"
+            case "task.run", "task.resume": approvalState = response.status == .succeeded ? "approved" : "required"
+            default: approvalState = "not_required"
+            }
         } else {
             approvalState = "not_required"
         }
         let verificationResult: String
-        if response.evidence.contains(where: { $0.kind == "assertion" }) {
+        if taskLifecycleState == TaskLifecycleState.completed.rawValue {
+            verificationResult = "passed"
+        } else if taskLifecycleState == TaskLifecycleState.indeterminate.rawValue {
+            verificationResult = "indeterminate"
+        } else if response.evidence.contains(where: { $0.kind == "assertion" }) {
             verificationResult = "passed"
         } else if response.status == .blocked || response.status == .failed {
             verificationResult = "blocked"
@@ -643,19 +1630,39 @@ public final class MacCtlService {
             method: request.method,
             source: receiptSource,
             workflowID: workflowID,
-            targetSurface: workflow?.surface,
+            targetSurface: workflow?.surface ?? taskTargetSurface,
             focusPolicy: focusPolicy,
-            risk: workflow.map { workflowRegistry.validate($0).risk },
+            risk: workflow.map { workflowRegistry.validate($0).risk } ?? taskRisk,
             approvalState: approvalState,
             executionResult: response.status.rawValue,
             verificationResult: verificationResult,
-            planDigest: response.result["plan_digest"]?.stringValue,
+            planDigest: response.result["plan_digest"]?.stringValue
+                ?? response.result["planDigest"]?.stringValue
+                ?? checkpoint?.planDigest,
+            taskID: taskID,
+            stepID: taskStepID,
+            route: response.result["last_route"]?.stringValue
+                ?? response.result["lastRoute"]?.stringValue
+                ?? checkpoint?.route,
+            adapterID: taskStep?.action.parameters["adapter_id"]?.stringValue,
+            recoveryClassification: taskStep?.recovery.mode,
+            preconditionResult: checkpoint?.verificationResult == "precondition_failed"
+                ? "blocked"
+                : taskLifecycleState == TaskLifecycleState.completed.rawValue ? "passed" : nil,
+            postconditionResult: checkpoint?.verificationResult == "postcondition_failed"
+                ? "failed"
+                : taskLifecycleState == TaskLifecycleState.completed.rawValue ? "passed" : nil,
+            lifecycleState: taskLifecycleState,
             runtimeIdentity: .current(),
             permissionContext: permissionContext,
             permissions: permissions,
             status: response.status,
             errorCode: response.error?.code,
-            evidence: response.evidence.map { ReceiptEvidence(kind: $0.kind, source: $0.source) },
+            evidence: receiptEvidence(
+                response: response,
+                taskID: taskID,
+                checkpoint: checkpoint
+            ),
             startedAt: startedAt,
             completedAt: Date()
         )
@@ -677,6 +1684,26 @@ public final class MacCtlService {
         #else
         return "unknown"
         #endif
+    }
+
+    private func decodeTaskPlan(_ value: JSONValue?) -> TaskPlan? {
+        guard let value, let data = try? JSONCodec.encode(value) else { return nil }
+        return try? JSONCodec.decode(TaskPlan.self, from: data)
+    }
+
+    private func receiptEvidence(
+        response: ResponseEnvelope,
+        taskID: String?,
+        checkpoint: TaskCheckpoint?
+    ) -> [ReceiptEvidence] {
+        var evidence = response.evidence.map { ReceiptEvidence(kind: $0.kind, source: $0.source) }
+        guard taskID != nil,
+              checkpoint != nil,
+              !evidence.contains(where: { $0.kind == "task_checkpoint" }) else {
+            return evidence
+        }
+        evidence.append(ReceiptEvidence(kind: "task_checkpoint", source: "macctld"))
+        return evidence
     }
 
     private func success<T: Encodable>(
@@ -756,12 +1783,110 @@ public final class MacCtlService {
         )
     }
 
+    private func taskApprovalFailure(
+        _ request: RequestEnvelope,
+        token: String,
+        error: TaskApprovalStoreError
+    ) -> ResponseEnvelope {
+        let code: MacCtlErrorCode
+        switch error {
+        case .notFound: code = .taskApprovalRequired
+        case .expired: code = .taskExpired
+        case .alreadyUsed: code = .taskApprovalRequired
+        case .mismatch: code = .taskApprovalMismatch
+        }
+        return failure(
+            request,
+            status: .blocked,
+            code: code,
+            message: error.localizedDescription,
+            details: ["token_present": .bool(!token.isEmpty)]
+        )
+    }
+
     private func errorResponse(_ request: RequestEnvelope, error: Error) -> ResponseEnvelope {
         let status: OperationStatus
         let code: MacCtlErrorCode
         var details: [String: JSONValue] = [:]
         var evidence: [Evidence] = []
         switch error {
+        case let error as TaskControlError:
+            switch error {
+            case .invalidPlan(let errors):
+                status = .failed
+                code = .taskInvalidPlan
+                details["errors"] = .array(errors.map(JSONValue.string))
+            case .notFound:
+                status = .blocked
+                code = .taskNotFound
+            case .approvalRequired:
+                status = .blocked
+                code = .taskApprovalRequired
+            case .approvalMismatch:
+                status = .blocked
+                code = .taskApprovalMismatch
+            case .invalidState(let state):
+                status = .blocked
+                code = .taskStateInvalid
+                details["state"] = .string(state.rawValue)
+            case .leaseRequired:
+                status = .blocked
+                code = .taskLeaseRequired
+            case .leaseExpired:
+                status = .expired
+                code = .taskExpired
+            case .cancelled:
+                status = .blocked
+                code = .taskCancelled
+            case .timedOut:
+                status = .expired
+                code = .taskTimeout
+            case .actionBudgetExceeded:
+                status = .blocked
+                code = .taskActionBudgetExceeded
+            case .preconditionFailed:
+                status = .blocked
+                code = .taskPreconditionFailed
+            case .postconditionFailed:
+                status = .blocked
+                code = .taskPostconditionFailed
+            case .indeterminate:
+                status = .blocked
+                code = .taskIndeterminate
+            case .checkpointUnavailable:
+                status = .blocked
+                code = .taskCheckpointUnavailable
+            case .blocked:
+                status = .blocked
+                code = .taskBlocked
+            }
+        case let error as TaskActionExecutionError:
+            switch error {
+            case .permissionMissing(let permission):
+                status = .blocked
+                code = .adapterPermissionMissing
+                details["permission"] = .string(permission)
+            case .unsupported:
+                status = .blocked
+                code = .adapterUnsupported
+            case .uncertain:
+                status = .blocked
+                code = .taskIndeterminate
+            case .blocked:
+                status = .blocked
+                code = .taskBlocked
+            }
+        case let error as AppAdapterError:
+            status = .blocked
+            switch error {
+            case .permissionMissing(let permission):
+                code = .adapterPermissionMissing
+                details["permission"] = .string(permission)
+            case .unsupportedAdapter, .unsupportedOperation, .arbitraryScriptRejected:
+                code = .adapterUnsupported
+            case .ambiguousTarget, .targetUnavailable, .operationFailed:
+                code = .taskBlocked
+            }
         case let error as InputControllerError:
             switch error {
             case .permissionDenied:
@@ -776,6 +1901,9 @@ public final class MacCtlService {
             case .permissionDenied:
                 status = .blocked
                 code = .permissionDenied
+            case .ambiguousMatch, .unreadableFocus:
+                status = .blocked
+                code = .taskBlocked
             default:
                 status = .failed
                 code = .operationFailed
@@ -811,9 +1939,99 @@ public final class MacCtlService {
                 status = .failed
                 code = .operationFailed
             }
-        case is IPhoneMirroringError:
+        case let error as KeyboardControlError:
+            switch error {
+            case .confirmationRequired:
+                status = .blocked
+                code = .keyboardConfirmationRequired
+            case .leaseRequired:
+                status = .blocked
+                code = .keyboardLeaseRequired
+            case .fullKeyboardAccessDisabled:
+                status = .blocked
+                code = .keyboardAccessDisabled
+            case .enableVerificationFailed:
+                status = .blocked
+                code = .keyboardEnableVerificationFailed
+            case .permissionDenied(let permission):
+                status = .blocked
+                code = .permissionDenied
+                details["permission"] = .string(permission)
+            case .foregroundUnavailable:
+                status = .blocked
+                code = .keyboardFocusUnavailable
+                evidence = [Evidence(
+                    kind: "keyboard_focus_guard",
+                    message: "Foreground state could not be read; keyboard input was blocked",
+                    source: "macctld"
+                )]
+            case .appScopeMismatch(let expected, let actual):
+                status = .blocked
+                code = .keyboardFocusChanged
+                details["expected_foreground"] = .string(expected)
+                details["actual_foreground"] = .string(actual)
+                evidence = [Evidence(
+                    kind: "keyboard_focus_guard",
+                    message: "App-scoped keyboard lease did not match the foreground process",
+                    source: "macctld"
+                )]
+            case .invalidCommand:
+                status = .failed
+                code = .keyboardCommandInvalid
+            case .invalidSequence, .sequenceTooLong, .repetitionLimitExceeded, .invalidInterKeyDelay:
+                status = .failed
+                code = .keyboardSequenceInvalid
+            case .printableKeyRejected:
+                status = .blocked
+                code = .keyboardPrintableKeyRejected
+            }
+        case let error as KeyboardDriveStoreError:
+            status = .blocked
+            switch error {
+            case .confirmationRequired:
+                code = .keyboardConfirmationRequired
+            case .duplicateLease:
+                code = .keyboardLeaseConflict
+            case .invalidLifetime, .applicationRequired:
+                code = .keyboardLeaseInvalid
+            case .notFound:
+                code = .keyboardLeaseNotFound
+            case .expired:
+                code = .keyboardLeaseExpired
+            }
+        case let error as SemanticActionRouterError:
+            switch error {
+            case .invalidSelector:
+                status = .failed
+                code = .invalidSelector
+            case .selectorRequiresActivate:
+                status = .failed
+                code = .invalidSelector
+            case .rawCoordinateRequiresExplicitOptIn:
+                status = .blocked
+                code = .unsafeInput
+            }
+        case is ControlStateVerifierError:
             status = .blocked
             code = .operationFailed
+        case let error as IPhoneMirroringError:
+            status = .blocked
+            switch error {
+            case .drivingLeaseRequired:
+                code = .mirroringDrivingLeaseRequired
+            default:
+                code = .operationFailed
+            }
+        case let error as IPhoneMirroringDrivingLeaseError:
+            status = .blocked
+            switch error {
+            case .alreadyHeld:
+                code = .mirroringDrivingLeaseHeld
+            case .required:
+                code = .mirroringDrivingLeaseRequired
+            case .invalidOrExpired:
+                code = .mirroringDrivingLeaseInvalid
+            }
         case let error as ApprovalStoreError:
             status = .blocked
             switch error {
@@ -821,6 +2039,24 @@ public final class MacCtlService {
             case .expired: code = .approvalExpired
             case .alreadyUsed: code = .approvalAlreadyUsed
             }
+        case let error as TaskApprovalStoreError:
+            status = .blocked
+            switch error {
+            case .notFound, .alreadyUsed: code = .taskApprovalRequired
+            case .expired: code = .taskExpired
+            case .mismatch: code = .taskApprovalMismatch
+            }
+        case is TaskCheckpointStoreError:
+            status = .blocked
+            code = .taskCheckpointUnavailable
+        case is ControlTargetInspectionError:
+            status = .blocked
+            code = .taskBlocked
+            evidence = [Evidence(
+                kind: "task_target_guard",
+                message: "Task target observation was unreadable or unsafe; execution paused",
+                source: "macctld"
+            )]
         case let error as WorkflowExecutionError:
             status = .blocked
             switch error {
@@ -852,6 +2088,8 @@ public final class MacCtlService {
                         "actual": .string(actual)
                     ]
                 )]
+            case .mirroringDrivingLeaseRequired:
+                code = .mirroringDrivingLeaseRequired
             default:
                 code = .operationFailed
             }

@@ -7,6 +7,7 @@ public enum IPhoneMirroringError: Error, LocalizedError {
     case connectionRequired(String)
     case appNotFound(String)
     case appNotVisible(String)
+    case drivingLeaseRequired
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +19,8 @@ public enum IPhoneMirroringError: Error, LocalizedError {
             return "The mirrored iPhone app was not visible through OCR: \(name)"
         case .appNotVisible(let name):
             return "The mirrored iPhone app could not be verified as foreground: \(name)"
+        case .drivingLeaseRequired:
+            return "An explicit user-held iPhone Mirroring driving lease is required before synthetic navigation"
         }
     }
 }
@@ -94,16 +97,24 @@ public final class IPhoneMirroringController {
         return state()
     }
 
-    public func openMirroredApp(_ name: String) throws -> OCRMatch {
+    public func openMirroredApp(
+        _ name: String,
+        drivingLease: IPhoneMirroringDrivingLease? = nil
+    ) throws -> OCRMatch {
+        try requireDrivingLease(drivingLease)
         _ = try activate()
         if let recoveryReason = mirroringRecoveryReason() {
             throw IPhoneMirroringError.connectionRequired(recoveryReason)
         }
+        try requireDrivingLease(drivingLease)
         try inputController.key("cmd+1")
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        try requireDrivingLease(drivingLease)
         try inputController.key("cmd+3")
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        try requireDrivingLease(drivingLease)
         try inputController.key("cmd+a")
+        try requireDrivingLease(drivingLease)
         try inputController.type(name)
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
 
@@ -117,8 +128,10 @@ public final class IPhoneMirroringController {
         // Spotlight's result bounds are in the captured image's coordinate space,
         // while CGEvent coordinates are in global display space. Move focus from
         // the search field to the matched result, then open it with Return.
+        try requireDrivingLease(drivingLease)
         try inputController.key("down")
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        try requireDrivingLease(drivingLease)
         try inputController.key("return")
         RunLoop.current.run(until: Date().addingTimeInterval(1.0))
         return spotlightMatch
@@ -167,6 +180,17 @@ public final class IPhoneMirroringController {
         guard let result, result.status == 0 else { return "unavailable" }
         let lines = result.stdout.split(separator: "\n", omittingEmptySubsequences: true)
         return lines.isEmpty ? "available_no_devices" : "available"
+    }
+
+    private func requireDrivingLease(_ lease: IPhoneMirroringDrivingLease?) throws {
+        guard let lease else {
+            throw IPhoneMirroringError.drivingLeaseRequired
+        }
+        do {
+            try lease.requireHeld()
+        } catch {
+            throw IPhoneMirroringError.drivingLeaseRequired
+        }
     }
 
     private func mirroringRecoveryReason(pid: pid_t? = nil) -> String? {

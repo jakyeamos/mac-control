@@ -10,6 +10,7 @@ public enum WorkflowExecutionError: Error, LocalizedError {
     case unsafeInput(String)
     case backgroundUnsupported(String)
     case focusChanged(expected: String, actual: String)
+    case mirroringDrivingLeaseRequired
 
     public var errorDescription: String? {
         switch self {
@@ -29,6 +30,8 @@ public enum WorkflowExecutionError: Error, LocalizedError {
             return "Background workflow is unsupported: \(message)"
         case .focusChanged(let expected, let actual):
             return "Background workflow changed foreground focus from \(expected) to \(actual)"
+        case .mirroringDrivingLeaseRequired:
+            return "An explicit user-held iPhone Mirroring driving lease is required before synthetic navigation"
         }
     }
 }
@@ -60,10 +63,14 @@ public final class WorkflowExecutor {
 
     public func execute(
         _ workflow: WorkflowSpec,
-        ephemeralInputs: [String: String] = [:]
+        ephemeralInputs: [String: String] = [:],
+        mirroringDrivingLease: IPhoneMirroringDrivingLease? = nil
     ) throws -> ExecutionReport {
         let validation = WorkflowRegistry().validate(workflow)
         guard validation.valid else { throw WorkflowExecutionError.invalidWorkflow(validation.errors) }
+        if requiresMirroringDrivingLease(workflow) {
+            try requireDrivingLease(mirroringDrivingLease)
+        }
 
         let runID = UUID().uuidString
         let initialForeground = workflow.focusPolicy == .background
@@ -78,7 +85,8 @@ public final class WorkflowExecutor {
             let actionResult = try execute(
                 action,
                 ephemeralInputs: ephemeralInputs,
-                focusPolicy: workflow.focusPolicy
+                focusPolicy: workflow.focusPolicy,
+                mirroringDrivingLease: mirroringDrivingLease
             )
             evidence.append(contentsOf: actionResult.evidence)
             for (key, value) in actionResult.result {
@@ -92,8 +100,16 @@ public final class WorkflowExecutor {
         }
 
         if workflow.recipe == "iphone-open-tinder" {
-            let match = try iphoneController.openMirroredApp("Tinder")
+            let match = try iphoneController.openMirroredApp(
+                "Tinder",
+                drivingLease: mirroringDrivingLease
+            )
             result["mirrored_app"] = .string("Tinder")
+            evidence.append(Evidence(
+                kind: "mirroring_driving_lease",
+                message: "Synthetic Mirroring navigation ran under an active user-held exclusive driving lease",
+                source: "macctld"
+            ))
             evidence.append(Evidence(
                 kind: "ocr_anchor",
                 message: "Located the requested mirrored app using an on-demand OCR anchor",
@@ -181,8 +197,10 @@ public final class WorkflowExecutor {
     private func execute(
         _ action: ActionSpec,
         ephemeralInputs: [String: String],
-        focusPolicy: FocusPolicy
+        focusPolicy: FocusPolicy,
+        mirroringDrivingLease: IPhoneMirroringDrivingLease?
     ) throws -> ActionResult {
+        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
         switch action.kind {
         case .launchApp:
             let app = try parameter(action, name: "app")
@@ -203,7 +221,11 @@ public final class WorkflowExecutor {
                 result: ["app": .string(info.name)]
             )
         case .click:
-            return try executeClick(action, focusPolicy: focusPolicy)
+            return try executeClick(
+                action,
+                focusPolicy: focusPolicy,
+                mirroringDrivingLease: mirroringDrivingLease
+            )
         case .type:
             let text = try ephemeralText(action, inputs: ephemeralInputs)
             if focusPolicy == .background {
@@ -229,6 +251,7 @@ public final class WorkflowExecutor {
                     targetProcessIDs: [pid]
                 )
             }
+            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.type(text)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Ephemeral text was typed")],
@@ -238,6 +261,7 @@ public final class WorkflowExecutor {
             let key = try parameter(action, name: "key")
             if focusPolicy == .background {
                 let pid = try requiredTargetPID(for: action)
+                try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
                 try inputController.key(key, toProcess: pid)
                 return ActionResult(
                     evidence: [Evidence(
@@ -249,6 +273,7 @@ public final class WorkflowExecutor {
                     targetProcessIDs: [pid]
                 )
             }
+            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.key(key)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Keyboard key was sent")],
@@ -260,6 +285,7 @@ public final class WorkflowExecutor {
             }
             let direction = try parameter(action, name: "direction")
             let amount = action.parameters["amount"]?.intValue ?? 3
+            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.scroll(amount: Int32(amount), direction: direction)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Scroll event was sent")],
@@ -320,10 +346,17 @@ public final class WorkflowExecutor {
                 evidence: [Evidence(kind: "assertion", message: "Inline assertion passed")],
                 result: ["assertion": .bool(true)]
             )
+        case .adapter:
+            throw WorkflowExecutionError.unsupportedAction(.adapter)
         }
     }
 
-    private func executeClick(_ action: ActionSpec, focusPolicy: FocusPolicy) throws -> ActionResult {
+    private func executeClick(
+        _ action: ActionSpec,
+        focusPolicy: FocusPolicy,
+        mirroringDrivingLease: IPhoneMirroringDrivingLease?
+    ) throws -> ActionResult {
+        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
         if focusPolicy == .background {
             guard action.surface == .macApp,
                   let selector = action.selector,
@@ -333,6 +366,7 @@ public final class WorkflowExecutor {
                 )
             }
             let pid = try requiredTargetPID(for: action)
+            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             let bounds = try accessibilityController.press(pid: pid, selector: selector)
             return ActionResult(
                 evidence: [Evidence(
@@ -353,6 +387,7 @@ public final class WorkflowExecutor {
         if let selector = action.selector {
             if selector.tier == .accessibility,
                let pid = try targetPID(for: action) {
+                try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
                 let bounds = try accessibilityController.press(pid: pid, selector: selector)
                 return ActionResult(
                     evidence: [Evidence(
@@ -374,7 +409,11 @@ public final class WorkflowExecutor {
                 if let text = selector.containsText {
                     let ocr = try captureController.ocr(frame)
                     if let match = ocr.matches.first(where: { $0.text.localizedCaseInsensitiveContains(text) }) {
-                        try inputController.click(at: CGPoint(x: match.bounds.midX, y: match.bounds.midY))
+                        try click(
+                            at: CGPoint(x: match.bounds.midX, y: match.bounds.midY),
+                            action: action,
+                            mirroringDrivingLease: mirroringDrivingLease
+                        )
                         return ActionResult(
                             evidence: [Evidence(
                                 kind: "click",
@@ -388,7 +427,11 @@ public final class WorkflowExecutor {
                 }
                 if let anchorPath = selector.imageAnchor {
                     let match = try captureController.findImageAnchor(in: frame, path: anchorPath)
-                    try inputController.click(at: CGPoint(x: match.bounds.midX, y: match.bounds.midY))
+                    try click(
+                        at: CGPoint(x: match.bounds.midX, y: match.bounds.midY),
+                        action: action,
+                        mirroringDrivingLease: mirroringDrivingLease
+                    )
                     return ActionResult(
                         evidence: [Evidence(
                             kind: "click",
@@ -408,7 +451,7 @@ public final class WorkflowExecutor {
                let x = selector.normalizedX,
                let y = selector.normalizedY {
                 let point = try normalizedPoint(for: action, x: x, y: y)
-                try inputController.click(at: point)
+                try click(at: point, action: action, mirroringDrivingLease: mirroringDrivingLease)
                 return ActionResult(
                     evidence: [Evidence(
                         kind: "click",
@@ -422,7 +465,11 @@ public final class WorkflowExecutor {
                let x = selector.rawX,
                let y = selector.rawY,
                action.parameters["coordinate_mode"]?.stringValue == "raw" {
-                try inputController.click(at: CGPoint(x: x, y: y))
+                try click(
+                    at: CGPoint(x: x, y: y),
+                    action: action,
+                    mirroringDrivingLease: mirroringDrivingLease
+                )
                 return ActionResult(
                     evidence: [Evidence(
                         kind: "click",
@@ -437,7 +484,7 @@ public final class WorkflowExecutor {
            let y = action.parameters["y"]?.doubleValue,
            action.parameters["coordinate_mode"]?.stringValue == "normalized" {
             let point = try normalizedPoint(for: action, x: x, y: y)
-            try inputController.click(at: point)
+            try click(at: point, action: action, mirroringDrivingLease: mirroringDrivingLease)
             return ActionResult(
                 evidence: [Evidence(
                     kind: "click",
@@ -448,6 +495,51 @@ public final class WorkflowExecutor {
             )
         }
         throw WorkflowExecutionError.blocked("click has no usable selector")
+    }
+
+    private func click(
+        at point: CGPoint,
+        action: ActionSpec,
+        mirroringDrivingLease: IPhoneMirroringDrivingLease?
+    ) throws {
+        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
+        try inputController.click(at: point)
+    }
+
+    private func requiresMirroringDrivingLease(_ workflow: WorkflowSpec) -> Bool {
+        workflow.recipe == "iphone-open-tinder"
+            || workflow.actions.contains { action in
+                action.surface == .iphoneMirroring && isSyntheticMirroringInput(action.kind)
+            }
+    }
+
+    private func requireDrivingLeaseIfNeeded(
+        for action: ActionSpec,
+        lease: IPhoneMirroringDrivingLease?
+    ) throws {
+        guard action.surface == .iphoneMirroring,
+              isSyntheticMirroringInput(action.kind) else { return }
+        try requireDrivingLease(lease)
+    }
+
+    private func requireDrivingLease(_ lease: IPhoneMirroringDrivingLease?) throws {
+        guard let lease else {
+            throw WorkflowExecutionError.mirroringDrivingLeaseRequired
+        }
+        do {
+            try lease.requireHeld()
+        } catch {
+            throw WorkflowExecutionError.mirroringDrivingLeaseRequired
+        }
+    }
+
+    private func isSyntheticMirroringInput(_ kind: ActionKind) -> Bool {
+        switch kind {
+        case .click, .type, .key, .scroll:
+            return true
+        default:
+            return false
+        }
     }
 
     private func verify(_ assertion: AssertionSpec, focusPolicy: FocusPolicy) throws {

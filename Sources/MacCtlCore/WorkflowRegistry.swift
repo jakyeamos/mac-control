@@ -20,7 +20,7 @@ public enum ActionRiskClassifier {
         switch action.kind {
         case .launchApp, .activateWindow, .waitFor, .capture, .ocr, .assert:
             inferred = .safe
-        case .click, .key:
+        case .click, .key, .adapter:
             inferred = .sensitive
         case .scroll:
             inferred = .reversible
@@ -183,6 +183,8 @@ public final class WorkflowRegistry {
                             errors.append("Background element assert action \(index) requires an Accessibility selector")
                         }
                     }
+                case .adapter:
+                    errors.append("Background adapter action \(index) must declare an isolated typed operation")
                 }
             }
             for (index, assertion) in workflow.assertions.enumerated() {
@@ -290,7 +292,7 @@ public final class WorkflowRegistry {
         let iPhoneWorkflow = WorkflowSpec(
             id: "iphone.open-tinder",
             name: "Open Tinder in iPhone Mirroring",
-            summary: "Bring iPhone Mirroring forward and locate Tinder without swiping, messaging, purchasing, or submitting",
+            summary: "With a user-held driving lease, bring iPhone Mirroring forward and locate Tinder without swiping, messaging, purchasing, or submitting",
             surface: .iphoneMirroring,
             actions: [
                 ActionSpec(

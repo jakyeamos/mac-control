@@ -24,6 +24,14 @@ public struct OperationReceipt: Codable, Equatable {
     public let executionResult: String
     public let verificationResult: String
     public let planDigest: String?
+    public let taskID: String?
+    public let stepID: String?
+    public let route: String?
+    public let adapterID: String?
+    public let recoveryClassification: String?
+    public let preconditionResult: String?
+    public let postconditionResult: String?
+    public let lifecycleState: String?
     public let runtimeIdentity: RuntimeIdentity
     public let permissionContext: String
     public let permissions: [PermissionStatus]
@@ -47,6 +55,14 @@ public struct OperationReceipt: Codable, Equatable {
         case executionResult
         case verificationResult
         case planDigest
+        case taskID
+        case stepID
+        case route
+        case adapterID
+        case recoveryClassification
+        case preconditionResult
+        case postconditionResult
+        case lifecycleState
         case runtimeIdentity
         case permissionContext
         case permissions
@@ -70,6 +86,14 @@ public struct OperationReceipt: Codable, Equatable {
         executionResult: String = "not_run",
         verificationResult: String = "not_run",
         planDigest: String?,
+        taskID: String? = nil,
+        stepID: String? = nil,
+        route: String? = nil,
+        adapterID: String? = nil,
+        recoveryClassification: String? = nil,
+        preconditionResult: String? = nil,
+        postconditionResult: String? = nil,
+        lifecycleState: String? = nil,
         runtimeIdentity: RuntimeIdentity,
         permissionContext: String,
         permissions: [PermissionStatus],
@@ -93,6 +117,14 @@ public struct OperationReceipt: Codable, Equatable {
         self.executionResult = executionResult
         self.verificationResult = verificationResult
         self.planDigest = planDigest
+        self.taskID = taskID
+        self.stepID = stepID
+        self.route = route
+        self.adapterID = adapterID
+        self.recoveryClassification = recoveryClassification
+        self.preconditionResult = preconditionResult
+        self.postconditionResult = postconditionResult
+        self.lifecycleState = lifecycleState
         self.runtimeIdentity = runtimeIdentity
         self.permissionContext = permissionContext
         self.permissions = permissions
@@ -118,6 +150,14 @@ public struct OperationReceipt: Codable, Equatable {
         self.executionResult = try container.decodeIfPresent(String.self, forKey: .executionResult) ?? "not_run"
         self.verificationResult = try container.decodeIfPresent(String.self, forKey: .verificationResult) ?? "not_run"
         self.planDigest = try container.decodeIfPresent(String.self, forKey: .planDigest)
+        self.taskID = try container.decodeIfPresent(String.self, forKey: .taskID)
+        self.stepID = try container.decodeIfPresent(String.self, forKey: .stepID)
+        self.route = try container.decodeIfPresent(String.self, forKey: .route)
+        self.adapterID = try container.decodeIfPresent(String.self, forKey: .adapterID)
+        self.recoveryClassification = try container.decodeIfPresent(String.self, forKey: .recoveryClassification)
+        self.preconditionResult = try container.decodeIfPresent(String.self, forKey: .preconditionResult)
+        self.postconditionResult = try container.decodeIfPresent(String.self, forKey: .postconditionResult)
+        self.lifecycleState = try container.decodeIfPresent(String.self, forKey: .lifecycleState)
         self.runtimeIdentity = try container.decode(RuntimeIdentity.self, forKey: .runtimeIdentity)
         self.permissionContext = try container.decodeIfPresent(String.self, forKey: .permissionContext) ?? "unknown"
         self.permissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .permissions) ?? []

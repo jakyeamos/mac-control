@@ -95,6 +95,11 @@ public final class UnixSocketClient {
 public final class UnixSocketServer {
     private let path: String
     private let queue = DispatchQueue(label: "com.jakyeamos.macctl.unix-socket", qos: .userInitiated)
+    private let clientQueue = DispatchQueue(
+        label: "com.jakyeamos.macctl.unix-socket.clients",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private var fileDescriptor: Int32 = -1
     private var running = false
 
@@ -164,7 +169,12 @@ public final class UnixSocketServer {
                 if running { SafeLog().record(event: "socket_accept_failed") }
                 continue
             }
-            handle(client: client, handler: handler)
+            // Keep accepting connections while a bounded task action is in
+            // flight.  The service serializes ordinary mutations separately;
+            // cancellation must still reach TaskRunner's cooperative flag.
+            clientQueue.async { [weak self] in
+                self?.handle(client: client, handler: handler)
+            }
         }
     }
 
