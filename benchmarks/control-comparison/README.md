@@ -38,6 +38,10 @@ Control focus runner holds its lease token in memory, suppresses release output,
 and releases in a `finally` block. It also re-establishes the requested
 foreground app through `macctl app open` immediately before lease acquisition;
 that provider-handoff setup is excluded from the measured action interval.
+After activation, it performs one unmeasured navigation precondition check. If
+the window has no readable focused control, that action establishes one. If
+focus was already present and moved, the runner restores it before timing. A
+trial never passes unless both the before and after focus states are observed.
 
 Mac Control samples require live `macctld` evidence and never accept a local
 fallback as a valid result. Generic GUI samples must use the Computer Use

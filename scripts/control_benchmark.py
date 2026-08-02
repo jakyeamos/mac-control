@@ -203,6 +203,17 @@ def focus_verified(payload: dict[str, Any]) -> bool:
     )
 
 
+def focus_established(payload: dict[str, Any]) -> bool:
+    result = result_object(payload)
+    verification = result.get("verification")
+    return (
+        daemon_provenance(payload)
+        and result.get("route") == "keyboard"
+        and isinstance(verification, dict)
+        and isinstance(verification.get("focusAfter"), dict)
+    )
+
+
 def run_mac_focus(args: argparse.Namespace) -> int:
     # Computer-control providers commonly restore their own app to the foreground
     # when a tool call returns. Re-establish the benchmark app inside this same
@@ -231,6 +242,38 @@ def run_mac_focus(args: argparse.Namespace) -> int:
     )
     lease_token = extract_lease_token(acquire)
     try:
+        # An app activation can legitimately restore the window without an AX
+        # focused control. Prime that precondition outside the timer. If focus
+        # was already established and moved, restore it; if the first Tab only
+        # established focus, keep that known control as the trial start state.
+        primed, _ = run_json(
+            [
+                args.macctl,
+                "keyboard",
+                "navigate",
+                "next-control",
+                "--lease-token",
+                lease_token,
+                "--json",
+            ]
+        )
+        if focus_verified(primed):
+            restored, _ = run_json(
+                [
+                    args.macctl,
+                    "keyboard",
+                    "navigate",
+                    "previous-control",
+                    "--lease-token",
+                    lease_token,
+                    "--json",
+                ]
+            )
+            if not focus_verified(restored):
+                raise RuntimeError("precondition focus reset did not verify")
+        elif not focus_established(primed):
+            raise RuntimeError("Mac Control could not establish a readable focus precondition")
+
         for phase, count in (("warmup", args.warmups), ("measured", args.samples)):
             for sample in range(1, count + 1):
                 payload, duration_ms = run_json(

@@ -111,6 +111,22 @@ class ControlBenchmarkTests(unittest.TestCase):
                 return ({"status": "succeeded", "result": {"name": "System Settings", "isRunning": True}}, 1.0)
             if command[1:4] == ["keyboard", "lease", "acquire"]:
                 return ({"status": "succeeded", "result": {"lease": {"token": "memory-only"}}}, 1.0)
+            if command[1:4] == ["keyboard", "navigate", "next-control"]:
+                return (
+                    {
+                        "status": "succeeded",
+                        "evidence": [{"source": "macctld"}],
+                        "result": {
+                            "route": "keyboard",
+                            "verification": {
+                                "state": "foreground_only",
+                                "focusChanged": False,
+                                "focusAfter": {"role": "AXTextField"},
+                            },
+                        },
+                    },
+                    1.0,
+                )
             raise AssertionError(f"unexpected measured command: {command}")
 
         args = SimpleNamespace(
@@ -128,7 +144,21 @@ class ControlBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(calls[0][1:4], ["app", "open", "System Settings"])
         self.assertEqual(calls[1][1:4], ["keyboard", "lease", "acquire"])
+        self.assertEqual(calls[2][1:4], ["keyboard", "navigate", "next-control"])
         release.assert_called_once()
+
+    def test_focus_precondition_requires_observed_focus_after(self):
+        payload = {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {
+                "route": "keyboard",
+                "verification": {"state": "foreground_only", "focusChanged": False},
+            },
+        }
+        self.assertFalse(benchmark.focus_established(payload))
+        payload["result"]["verification"]["focusAfter"] = {"role": "AXTextField"}
+        self.assertTrue(benchmark.focus_established(payload))
 
 
 if __name__ == "__main__":
