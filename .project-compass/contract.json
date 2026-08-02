@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "project": {
+    "name": "mac-control",
+    "identity": "macctl, a command-first owner-only macOS control plane with a guarded local daemon, socket, and explicit Apple permission boundaries.",
+    "audience": "The owner and local automation that need inspectable, permission-aware control of supported macOS capabilities.",
+    "core_loop": "Discover a supported capability, request it through the guarded local control plane, inspect permission and execution evidence, and recover or stop when the boundary is not satisfied.",
+    "north_star": "Local macOS control is explicit, owner-scoped, inspectable, and recoverable rather than hidden behind unsafe automation.",
+    "not_this": ["A remote administration service", "A permission bypass or stealth automation tool", "A daemon that treats unverified effects as success"]
+  },
+  "targets": {
+    "mvp": {"definition": "The owner can discover and invoke supported local capabilities through macctl with explicit permission checks and machine-readable outcomes."},
+    "complete_product": {"definition": "The control plane safely covers its supported macOS capability set with stable command, daemon, socket, permission, audit, and recovery behavior."}
+  },
+  "pillars": [
+    {"id": "owner-scoped-control", "name": "Owner-scoped control", "outcomes": [{"id": "guarded-local-invocation", "name": "A local capability invocation is bounded by owner scope, explicit permissions, and an inspectable result.", "targets": ["mvp", "complete_product"], "maturity": 50, "confidence": "medium", "layers": {"intended": "The owner retains control over which macOS effects are requested and trusted.", "planned": "The project defines macctl, a daemon, local socket, and Apple framework boundaries.", "implemented": "The repository contains the command-first control-plane implementation.", "verified": "Repository documentation establishes the security boundary; no fresh TCC or daemon invocation was run here."}, "evidence": [{"ref": "README.md", "note": "Defines macctl, owner-only scope, daemon, socket, and permission boundary.", "observed_at": "2026-08-02T13:25:04Z"}, {"ref": ".agents/context/README.md", "note": "Provides repository context and local ownership constraints.", "observed_at": "2026-08-02T13:25:04Z"}], "blockers": [{"kind": "external", "summary": "macOS TCC permissions and live daemon/device behavior require owner-controlled verification."}]}]},
+    {"id": "inspectable-effects", "name": "Inspectable effects", "outcomes": [{"id": "permission-aware-result", "name": "A command result distinguishes permitted, denied, unavailable, attempted, and verified local effects.", "targets": ["complete_product"], "maturity": 25, "confidence": "medium", "layers": {"intended": "The control plane never turns a request into an unsupported success claim.", "planned": "The command-first surface and local socket are intended to make outcomes inspectable.", "implemented": "The repository contains the control-plane surfaces and documented permission handling.", "verified": "No live permission matrix or effect verification was performed in this bootstrap."}, "evidence": [{"ref": "README.md", "note": "Documents command-first and permission-aware scope.", "observed_at": "2026-08-02T13:25:04Z"}], "blockers": [{"kind": "verification", "summary": "Capability-by-capability positive, negative, and ambiguous trigger evidence remains incomplete."}]}]}
+  ],
+  "source_layers": {"intended": [{"ref": "README.md", "note": "Product identity and owner boundary.", "observed_at": "2026-08-02T13:25:04Z"}], "planned": [{"ref": ".agents/context/README.md", "note": "Repository scope and local constraints.", "observed_at": "2026-08-02T13:25:04Z"}], "implemented": [{"ref": "README.md", "note": "Current macctl and daemon architecture.", "observed_at": "2026-08-02T13:25:04Z"}], "verified": [{"ref": "README.md", "note": "Documented claims only; no live permission or effect run here.", "observed_at": "2026-08-02T13:25:04Z"}]},
+  "drift": [{"kind": "verification-gap", "summary": "The owner-scoped control outcome depends on live macOS permission and effect evidence that documentation alone cannot establish.", "status": "open", "observed_at": "2026-08-02T13:25:04Z", "evidence": [{"ref": "README.md", "note": "Documents the control boundary without live TCC proof.", "observed_at": "2026-08-02T13:25:04Z"}]}],
+  "updated_at": "2026-08-02T13:25:04Z"
+}
