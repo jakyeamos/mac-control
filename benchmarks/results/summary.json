@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-02T14:33:17.932920Z",
+  "generated_at": "2026-08-02T15:08:41.383068Z",
   "groups": [
     {
       "expand_to_seven": false,
@@ -18,18 +18,18 @@
     },
     {
       "expand_to_seven": false,
-      "interpretation": "blocked before measurement: macctl app open succeeded but the immediate app-scoped lease was blocked with keyboard_focus_changed",
+      "interpretation": "passed",
       "lane": "mac-control",
-      "mean_tool_calls": null,
-      "median_ms": null,
-      "p95_ms": null,
-      "range_ms": null,
-      "recoveries": 2,
-      "samples": 0,
-      "status": "blocked",
+      "mean_tool_calls": 1,
+      "median_ms": 255.726,
+      "p95_ms": 350.018,
+      "range_ms": 166.383,
+      "recoveries": 0,
+      "samples": 7,
+      "status": "passed",
       "task": "focus-next-control",
       "user_help": 0,
-      "verified": 0
+      "verified": 7
     },
     {
       "expand_to_seven": false,
