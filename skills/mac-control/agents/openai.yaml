@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mac Control"
+  short_description: "Route and execute fast, verified macOS control"
+  default_prompt: "Use $mac-control to choose and execute the fastest safe route for this macOS task."

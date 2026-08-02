@@ -41,6 +41,20 @@ loads the user LaunchAgent, which executes the bundle's
 `Contents/MacOS/macctld` binary. Use `~/.local/bin/macctl daemon restart` after
 rebuilding and reinstalling.
 
+Install the provider-neutral agent skill and its Codex projection separately:
+
+```sh
+python3 scripts/install_mac_control_skill.py install
+python3 scripts/install_mac_control_skill.py check
+```
+
+The repository copy under `skills/mac-control/` is the distribution source.
+The installer writes the live provider-neutral skill to
+`~/.agents/skills/mac-control` and creates the Codex discovery symlink at
+`~/.codex/skills/mac-control`. It preserves replaced payloads under
+`~/.agents/rollback/` and verifies source identity plus projection after every
+install.
+
 ## Daemon lifecycle
 
 ```sh

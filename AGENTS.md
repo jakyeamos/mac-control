@@ -4,6 +4,9 @@ Read this router before repository work.
 
 - Read `.agents/context/README.md` before searching broadly.
 - Load only the routed packet needed for the task; do not dump the repository.
+- For agent-facing macOS control routing or live `macctl` use, load
+  `skills/mac-control/SKILL.md`; a mature direct CLI, API, typed connector, or browser DOM
+  route remains preferred when it covers the exact task.
 - Use documented commands and repository-local quality gates.
 - Preserve unrelated dirty work and use a disposable worktree for risky changes.
 - Keep credentials, secrets, deployments, merges, and destructive operations behind explicit approval.
