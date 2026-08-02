@@ -1,0 +1,81 @@
+{
+  "generated_at": "2026-08-02T14:33:17.932920Z",
+  "groups": [
+    {
+      "expand_to_seven": false,
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 2,
+      "median_ms": 782.932,
+      "p95_ms": 898.054,
+      "range_ms": 175.91,
+      "recoveries": 0,
+      "samples": 3,
+      "status": "passed",
+      "task": "focus-next-control",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "expand_to_seven": false,
+      "interpretation": "blocked before measurement: macctl app open succeeded but the immediate app-scoped lease was blocked with keyboard_focus_changed",
+      "lane": "mac-control",
+      "mean_tool_calls": null,
+      "median_ms": null,
+      "p95_ms": null,
+      "range_ms": null,
+      "recoveries": 2,
+      "samples": 0,
+      "status": "blocked",
+      "task": "focus-next-control",
+      "user_help": 0,
+      "verified": 0
+    },
+    {
+      "expand_to_seven": false,
+      "interpretation": "passed",
+      "lane": "agent-baseline",
+      "mean_tool_calls": 1,
+      "median_ms": 12.51,
+      "p95_ms": 14.752,
+      "range_ms": 3.658,
+      "recoveries": 0,
+      "samples": 3,
+      "status": "passed",
+      "task": "inspect-full-keyboard-access",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "expand_to_seven": false,
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 4,
+      "median_ms": 1978.639,
+      "p95_ms": 2164.041,
+      "range_ms": 296.167,
+      "recoveries": 0,
+      "samples": 3,
+      "status": "passed",
+      "task": "inspect-full-keyboard-access",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "expand_to_seven": false,
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 71.241,
+      "p95_ms": 73.144,
+      "range_ms": 7.861,
+      "recoveries": 0,
+      "samples": 3,
+      "status": "passed",
+      "task": "inspect-full-keyboard-access",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 1
+}
