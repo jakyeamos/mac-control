@@ -323,6 +323,11 @@ public struct Selector: Codable, Equatable {
     public let rawX: Double?
     public let rawY: Double?
     public let imageAnchor: String?
+    /// Optional Accessibility window scope. When either value is supplied,
+    /// the control resolver must first select one unique matching window and
+    /// then search only that window's subtree.
+    public let windowTitle: String?
+    public let windowIdentifier: String?
 
     public init(
         role: String? = nil,
@@ -334,7 +339,9 @@ public struct Selector: Codable, Equatable {
         normalizedY: Double? = nil,
         rawX: Double? = nil,
         rawY: Double? = nil,
-        imageAnchor: String? = nil
+        imageAnchor: String? = nil,
+        windowTitle: String? = nil,
+        windowIdentifier: String? = nil
     ) {
         self.role = role
         self.identifier = identifier
@@ -346,10 +353,13 @@ public struct Selector: Codable, Equatable {
         self.rawX = rawX
         self.rawY = rawY
         self.imageAnchor = imageAnchor
+        self.windowTitle = windowTitle
+        self.windowIdentifier = windowIdentifier
     }
 
     public var addressability: SelectorAddressability {
-        if role != nil || identifier != nil || title != nil || subrole != nil {
+        if role != nil || identifier != nil || title != nil || subrole != nil
+            || windowTitle != nil || windowIdentifier != nil {
             return .accessibility
         }
         if containsText != nil || imageAnchor != nil {
@@ -942,6 +952,7 @@ public enum MacCtlErrorCode: String {
     case approvalExpired = "approval_expired"
     case approvalAlreadyUsed = "approval_already_used"
     case operationFailed = "operation_failed"
+    case controlVerificationUnavailable = "control_verification_unavailable"
     case invalidSelector = "invalid_selector"
     case unsafeInput = "unsafe_input"
     case backgroundUnsupported = "background_unsupported"

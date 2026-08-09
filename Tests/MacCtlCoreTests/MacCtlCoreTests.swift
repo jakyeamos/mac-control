@@ -79,6 +79,23 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(Selector(rawX: 100, rawY: 200).addressability, .rawCoordinate)
     }
 
+    func testWindowScopedSelectorRoundTripsAndRemainsAccessibilityAddressable() throws {
+        let selector = Selector(
+            role: "AXButton",
+            identifier: "tab-group",
+            title: "Group tabs",
+            windowTitle: "Project - Google Chrome",
+            windowIdentifier: "main-window"
+        )
+
+        XCTAssertEqual(selector.addressability, .accessibility)
+        XCTAssertTrue(selector.hasTarget)
+        XCTAssertEqual(
+            try JSONCodec.decode(Selector.self, from: JSONCodec.encode(selector)),
+            selector
+        )
+    }
+
     func testWarmPathSelectionChoosesFreshMeasuredWinnerAndDeclaredFallbacks() {
         let now = Date(timeIntervalSince1970: 1_000)
         let identity = WarmPathApplicationIdentity(
@@ -573,6 +590,7 @@ final class MacCtlCoreTests: XCTestCase {
             .nextControl: ["tab"],
             .previousControl: ["shift+tab"],
             .activate: ["space"],
+            .contextMenu: ["shift+f10"],
             .nextItem: ["ctrl+tab"],
             .previousItem: ["ctrl+shift+tab"],
             .search: ["tab", "f"],
@@ -593,6 +611,67 @@ final class MacCtlCoreTests: XCTestCase {
                 XCTAssertNoThrow(try KeySpecification.parse(key))
             }
         }
+    }
+
+    func testContextMenuUsesVerifiedPostconditionWhenFocusDoesNotChange() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let focus = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "tab",
+            title: "Example"
+        )
+        let store = KeyboardDriveStore()
+        let session = ControlSession(
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { app },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true },
+            postActionTimeout: 0
+        )
+        let contextMenu = TestContextMenuActionPerformer(report: ContextMenuReport(
+            state: .passed,
+            targetResolved: true,
+            menuVisible: true,
+            expectedItemCount: 1,
+            matchedItemCount: 1,
+            visibleItemCount: 8
+        ))
+        let router = SemanticActionRouter(
+            session: session,
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: RecordingKeyboardEventSender(),
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            accessibilityActionController: TestAccessibilityActionPerformer(),
+            visualActionController: TestVisualActionPerformer(),
+            contextMenuActionController: contextMenu
+        )
+        let lease = try store.acquire(scope: .session, application: nil, seconds: 30, confirm: true)
+
+        let report = try router.perform(
+            command: .contextMenu,
+            selector: Selector(
+                role: "AXButton",
+                identifier: "tab",
+                windowTitle: "Project - Google Chrome"
+            ),
+            leaseToken: lease.token,
+            count: 1,
+            interKeyDelay: 0,
+            allowRawCoordinate: false,
+            expectedMenuItems: ["Add tab to new group"]
+        )
+
+        XCTAssertEqual(contextMenu.callCount, 1)
+        XCTAssertEqual(contextMenu.lastExpectedMenuItems, ["Add tab to new group"])
+        XCTAssertEqual(report.route, .accessibility)
+        XCTAssertEqual(report.verification.state, .passed)
+        XCTAssertFalse(report.verification.focusChanged)
+        XCTAssertEqual(report.verification.postcondition?.kind, "context_menu")
+        XCTAssertEqual(report.verification.postcondition?.verified, true)
     }
 
     func testKeyboardRawSequenceValidationRejectsTypingAndBoundsRepetition() {
@@ -1067,6 +1146,29 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(auditResponse.evidence.contains { $0.kind == "accessibility_audit" })
     }
 
+    func testSemanticScrollPrefersPageActionAndSupportsLegacyAlias() {
+        XCTAssertEqual(
+            AccessibilityScrollDirection.down.actionName(matching: ["AXScrollDownByPage", "AXScrollDown"]),
+            "AXScrollDownByPage"
+        )
+        XCTAssertEqual(
+            AccessibilityScrollDirection.down.actionName(matching: ["AXScrollDown"]),
+            "AXScrollDown"
+        )
+        XCTAssertNil(
+            AccessibilityScrollDirection.down.actionName(matching: ["AXPress"])
+        )
+    }
+
+    func testSemanticScrollMapsDirectionsToDirectionalPageButtons() {
+        XCTAssertEqual(AccessibilityScrollDirection.up.pageButtonSubrole, "AXDecrementPage")
+        XCTAssertEqual(AccessibilityScrollDirection.down.pageButtonSubrole, "AXIncrementPage")
+        XCTAssertEqual(AccessibilityScrollDirection.left.pageButtonSubrole, "AXDecrementPage")
+        XCTAssertEqual(AccessibilityScrollDirection.right.pageButtonSubrole, "AXIncrementPage")
+        XCTAssertTrue(AccessibilityScrollDirection.up.usesVerticalScrollBar)
+        XCTAssertFalse(AccessibilityScrollDirection.right.usesVerticalScrollBar)
+    }
+
     func testSemanticScrollServiceUsesUniqueSemanticTargetAndReportsLeaseRelease() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-scroll-receipts-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
@@ -1100,6 +1202,38 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(performer.lastAmount, 2)
         XCTAssertEqual(response.result["route"]?.stringValue, "scroll")
         XCTAssertEqual(response.evidence.first(where: { $0.kind == "semantic_scroll" })?.metadata["lease_released"]?.boolValue, true)
+    }
+
+    func testSemanticScrollServiceAllowsUniqueRoleOnlyTarget() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-scroll-role-only-receipts-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let app = testApp(name: "System Settings", processID: 42)
+        let performer = RecordingAccessibilityScrollPerformer()
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "test",
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            accessibilityScrollPerformer: performer
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("scroll"),
+                "app": .string("System Settings"),
+                "confirm": .bool(true),
+                "role": .string("AXScrollArea"),
+                "direction": .string("down"),
+                "amount": .number(1)
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(performer.lastSelector?.role, "AXScrollArea")
+        XCTAssertNil(performer.lastSelector?.identifier)
+        XCTAssertEqual(response.result["route"]?.stringValue, "scroll")
+        XCTAssertEqual(response.result["targetIdentifier"]?.stringValue, "role:AXScrollArea")
     }
 
     func testSemanticScrollFailureRecommendsComputerUseWithFreshState() throws {
@@ -1521,6 +1655,60 @@ final class MacCtlCoreTests: XCTestCase {
 
         XCTAssertEqual(observation.foregroundApplication, app)
         XCTAssertTrue(reads.isEmpty)
+    }
+
+    func testControlStateVerifierSkipsEventMonitorForImmediateVerification() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let monitor = RecordingControlEventMonitor()
+        var reads = 0
+        let verifier = ControlStateVerifier(eventMonitor: monitor)
+
+        let observation = try verifier.waitUntil(
+            timeout: 1,
+            read: {
+                reads += 1
+                return ControlObservation(
+                    foregroundApplication: app,
+                    focusedElement: nil
+                )
+            },
+            predicate: { $0.foregroundApplication == app }
+        )
+
+        XCTAssertEqual(observation.foregroundApplication, app)
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(monitor.startCount, 0)
+        XCTAssertEqual(monitor.stopCount, 0)
+    }
+
+    func testControlStateVerifierUsesEventMonitorPathAfterImmediateMiss() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let monitor = RecordingControlEventMonitor()
+        var reads = 0
+        var now = Date(timeIntervalSince1970: 100)
+        let verifier = ControlStateVerifier(
+            now: { now },
+            sleep: { interval in now = now.addingTimeInterval(interval) },
+            eventMonitor: monitor
+        )
+
+        let observation = try verifier.waitUntil(
+            timeout: 1,
+            pollInterval: 0.1,
+            read: {
+                reads += 1
+                return ControlObservation(
+                    foregroundApplication: reads >= 2 ? app : nil,
+                    focusedElement: nil
+                )
+            },
+            predicate: { $0.foregroundApplication == app }
+        )
+
+        XCTAssertEqual(observation.foregroundApplication, app)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(monitor.startCount, 1)
+        XCTAssertEqual(monitor.stopCount, 1)
     }
 
     func testSemanticRouterPrefersAccessibilityAndReturnsRedactedVerification() throws {
@@ -2896,6 +3084,50 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(scroll.calls.map { $0.amount }, [1, 1, 1, 1, 1, 1])
     }
 
+    func testSemanticScrollRouteBenchmarkAllowsRoleOnlySelector() throws {
+        let app = testApp(name: "System Settings", processID: 42, bundleVersion: "1")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-role-only-\(UUID().uuidString)")
+        let warmPathStore = WarmPathStore(directory: directory)
+        let scroll = RecordingAccessibilityScrollPerformer()
+        let service = MacCtlService(
+            permissionContext: "test",
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(sleep: { _ in }),
+            hasPostEventAccess: { true },
+            warmPathStore: warmPathStore,
+            accessibilityScrollPerformer: scroll
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "route.benchmark",
+            params: [
+                "app": .string("System Settings"),
+                "task": .string("scroll-sidebar"),
+                "target_fingerprint": .string("system-settings-sidebar-v1"),
+                "verification_oracle": .string("viewport changed"),
+                "action": .string("scroll"),
+                "route": .string("scroll"),
+                "selector": .object([
+                    "role": .string("AXScrollArea")
+                ]),
+                "direction": .string("down"),
+                "amount": .number(1),
+                "samples": .number(1),
+                "warmups": .number(0),
+                "confirm": .bool(true)
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(response.result["measurement_source"]?.stringValue, "daemon_executed")
+        XCTAssertEqual(response.result["route"]?.stringValue, "scroll")
+        XCTAssertNil(scroll.lastSelector?.identifier)
+        XCTAssertEqual(warmPathStore.list().first?.candidates.first?.route, .scroll)
+        XCTAssertEqual(warmPathStore.list().first?.candidates.first?.measurementSource, .daemonExecuted)
+    }
+
     func testSemanticScrollRouteBenchmarkRejectsUnverifiedSampleBeforePersistence() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-unverified-\(UUID().uuidString)")
@@ -3163,7 +3395,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertNil(store.activeLease())
     }
 
-    func testAtomicControlKeepsUnchangedReadableFocusAsForegroundOnly() throws {
+    func testAtomicControlBlocksUnchangedReadableFocusAsUnverified() throws {
         let app = testApp(name: "Chrome", processID: 42)
         let focus = FocusedElementSnapshot(
             targetApplication: app,
@@ -3201,12 +3433,34 @@ final class MacCtlCoreTests: XCTestCase {
             ]
         ))
 
-        XCTAssertEqual(action.status, .succeeded)
+        XCTAssertEqual(action.status, .blocked)
         XCTAssertEqual(
-            action.result["verification"]?.objectValue?["state"]?.stringValue,
-            "foreground_only"
+            action.error?.code,
+            MacCtlErrorCode.controlVerificationUnavailable.rawValue
         )
+        XCTAssertEqual(action.outcome?.state, .verificationUnavailable)
+        XCTAssertEqual(action.error?.details["failure_class"]?.stringValue, "verification_unavailable")
+        XCTAssertEqual(action.error?.details["verification"]?.stringValue, "foreground_only")
+        XCTAssertEqual(action.error?.details["fresh_state_required"]?.boolValue, true)
         XCTAssertNil(store.activeLease())
+    }
+
+    func testChromeCapabilitiesDeclareProviderBoundaryForTabGroupMutation() {
+        let chrome = ControlCapabilityProfile(application: WarmPathApplicationIdentity(
+            name: "Google Chrome",
+            bundleID: "com.google.Chrome",
+            path: "/Applications/Google Chrome.app"
+        ))
+        let safari = ControlCapabilityProfile(application: WarmPathApplicationIdentity(
+            name: "Safari",
+            bundleID: "com.apple.Safari",
+            path: "/Applications/Safari.app"
+        ))
+
+        XCTAssertTrue(chrome.contractCapabilities.contains("window_scoped_accessibility_selector"))
+        XCTAssertTrue(chrome.contractCapabilities.contains("verified_context_menu"))
+        XCTAssertEqual(chrome.unsupportedCapabilities, ["chrome_tab_group_mutation"])
+        XCTAssertTrue(safari.unsupportedCapabilities.isEmpty)
     }
 
     func testLegacyDoctorAndCapabilityReportsDecodeWithoutKeyboardFields() throws {
@@ -4796,6 +5050,26 @@ private final class TestAccessibilityActionPerformer: AccessibilityActionPerform
     }
 }
 
+private final class TestContextMenuActionPerformer: AccessibilityContextMenuPerforming {
+    let report: ContextMenuReport
+    private(set) var callCount = 0
+    private(set) var lastExpectedMenuItems: [String] = []
+
+    init(report: ContextMenuReport) {
+        self.report = report
+    }
+
+    func showContextMenu(
+        pid: pid_t,
+        selector: MacCtlCore.Selector,
+        expectedMenuItems: [String]
+    ) throws -> ContextMenuReport {
+        callCount += 1
+        lastExpectedMenuItems = expectedMenuItems
+        return report
+    }
+}
+
 private final class RecordingAccessibilityTreeInspector: AccessibilityTreeInspecting {
     let treeReport: AccessibilityTreeReport
     private(set) var lastMaxNodes: Int?
@@ -4953,11 +5227,24 @@ private final class RecordingAccessibilityScrollPerformer: AccessibilityScrollPe
         }
         return AccessibilityScrollReport(
             application: application,
-            targetIdentifier: selector.identifier ?? "",
+            targetIdentifier: selector.identifier ?? "role:AXScrollArea",
             direction: direction,
             amount: amount,
             verification: verification
         )
+    }
+}
+
+private final class RecordingControlEventMonitor: ControlEventMonitoring {
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    func start(handler: @escaping () -> Void) {
+        startCount += 1
+    }
+
+    func stop() {
+        stopCount += 1
     }
 }
 

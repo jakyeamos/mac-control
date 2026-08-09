@@ -278,6 +278,26 @@ fail closed with `keyboard_focus_changed`.
   --app "System Settings" --confirm --json
 ```
 
+Accessibility selectors can be scoped to one uniquely titled or identified
+window. This prevents a duplicate control in another Chrome window from being
+treated as the target. A native context menu can be opened and verified by
+requiring the expected menu labels:
+
+```sh
+~/.local/bin/macctl control perform context-menu \
+  --app "Google Chrome" --confirm \
+  --role AXButton --identifier tab-group \
+  --window-title "Project - Google Chrome" \
+  --expected-menu-items "Add tab to new group" --json
+```
+
+`foreground_only` is evidence that the app remained foreground, not proof that
+the action completed; the service returns it as blocked with
+`control_verification_unavailable`. The provider exposes verified native
+context-menu capability, but it does not implement Chrome tab/group mutation.
+`control capabilities --app "Google Chrome" --json` reports that boundary as
+`unsupportedCapabilities: ["chrome_tab_group_mutation"]`.
+
 Mac Control does not assume one route is fastest for every app. For a known
 task, execute bounded daemon samples for the exact app version, target
 fingerprint, action, route, and verification oracle, then inspect the selected
@@ -404,8 +424,9 @@ redacted measurements as `mac-control-task-evidence/v1` sidecars and keeps the
 static, live structural, and task-execution evidence distinct.
 
 When a target lives inside a readable scroll container, use semantic scrolling
-with a unique `AXScrollArea` identifier and verify that the container can still
-be resolved after the action:
+with a unique `AXScrollArea` selector. An identifier is preferred, but optional
+when role-only resolution returns exactly one container; Mac Control verifies
+that the container can still be resolved after the action:
 
 ```sh
 ~/.local/bin/macctl control perform scroll --app "System Settings" \

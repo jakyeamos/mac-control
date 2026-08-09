@@ -8,7 +8,10 @@ public enum AccessibilityControllerError: Error, LocalizedError {
     case applicationNotRunning
     case elementNotFound
     case ambiguousMatch(Int)
+    case windowNotFound
+    case ambiguousWindowMatch(Int)
     case unreadableFocus
+    case actionUnavailable(String)
     case actionFailed(String)
     case boundsUnavailable
     case scrollTargetRequired
@@ -24,14 +27,20 @@ public enum AccessibilityControllerError: Error, LocalizedError {
             return "No Accessibility element matched the selector"
         case .ambiguousMatch(let count):
             return "Accessibility selector matched \(count) elements; the target was not unique"
+        case .windowNotFound:
+            return "No Accessibility window matched the selector's window scope"
+        case .ambiguousWindowMatch(let count):
+            return "Accessibility window scope matched \(count) windows; the window was not unique"
         case .unreadableFocus:
             return "The focused Accessibility element could not be read"
+        case .actionUnavailable(let action):
+            return "Accessibility action is not exposed by the target: \(action)"
         case .actionFailed(let action):
             return "Accessibility action failed: \(action)"
         case .boundsUnavailable:
             return "Accessibility element has no usable screen bounds"
         case .scrollTargetRequired:
-            return "Semantic scrolling requires one uniquely identified AXScrollArea target"
+            return "Semantic scrolling requires an AXScrollArea selector that resolves to one unique target"
         case .scrollUnavailable(let direction):
             return "Accessibility scrolling is not available in direction: \(direction)"
         }
@@ -78,6 +87,12 @@ enum AccessibilitySelectorLabel {
     }
 }
 
+private struct ContextMenuObservation {
+    let visible: Bool
+    let visibleItemCount: Int
+    let labels: [String]
+}
+
 public final class AccessibilityController: FocusedElementInspecting {
     public init() {}
 
@@ -113,14 +128,17 @@ public final class AccessibilityController: FocusedElementInspecting {
             guard identities.insert(identity).inserted else { return }
             found.append(element)
         }
-        if let focused = elementAttribute(application, kAXFocusedUIElementAttribute),
-           self.matches(focused, selector: selector) {
-            append(focused)
-        }
         var visited = 0
         var truncated = false
         let windows = (attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
-        for window in windows {
+        let hasWindowScope = selector.windowTitle != nil || selector.windowIdentifier != nil
+        let scopedWindows = try scopedWindows(windows, selector: selector)
+        if !hasWindowScope,
+           let focused = elementAttribute(application, kAXFocusedUIElementAttribute),
+           self.matches(focused, selector: selector) {
+            append(focused)
+        }
+        for window in scopedWindows {
             search(
                 window,
                 selector: selector,
@@ -136,21 +154,23 @@ public final class AccessibilityController: FocusedElementInspecting {
         // rather than descendants of AXWindows. Walk both surfaces while
         // de-duplicating handles so a structurally unique result remains
         // addressable without coordinates.
-        let applicationChildren = (attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? []
-        for child in applicationChildren {
-            search(
-                child,
-                selector: selector,
-                maxNodes: nodeLimit,
-                found: &found,
-                identities: &identities,
-                visitedElements: &visitedElements,
-                visited: &visited,
-                truncated: &truncated
-            )
-        }
-        if self.matches(application, selector: selector) {
-            append(application)
+        if !hasWindowScope {
+            let applicationChildren = (attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+            for child in applicationChildren {
+                search(
+                    child,
+                    selector: selector,
+                    maxNodes: nodeLimit,
+                    found: &found,
+                    identities: &identities,
+                    visitedElements: &visitedElements,
+                    visited: &visited,
+                    truncated: &truncated
+                )
+            }
+            if self.matches(application, selector: selector) {
+                append(application)
+            }
         }
         guard !truncated else {
             throw AccessibilityControllerError.ambiguousMatch(max(found.count + 1, 2))
@@ -165,6 +185,22 @@ public final class AccessibilityController: FocusedElementInspecting {
             return try bounds(of: element)
         }
         throw AccessibilityControllerError.actionFailed(kAXPressAction as String)
+    }
+
+    public func showContextMenu(
+        pid: pid_t,
+        selector: Selector,
+        expectedMenuItems: [String]
+    ) throws -> ContextMenuReport {
+        let element = try findElement(pid: pid, selector: selector)
+        let availableActions = actionNames(of: element)
+        guard availableActions.contains(kAXShowMenuAction as String) else {
+            throw AccessibilityControllerError.actionUnavailable(kAXShowMenuAction as String)
+        }
+        guard AXUIElementPerformAction(element, kAXShowMenuAction as CFString) == .success else {
+            throw AccessibilityControllerError.actionFailed(kAXShowMenuAction as String)
+        }
+        return waitForContextMenu(pid: pid, expectedMenuItems: expectedMenuItems)
     }
 
     @discardableResult
@@ -325,6 +361,122 @@ public final class AccessibilityController: FocusedElementInspecting {
                 visited: &visited,
                 truncated: &truncated
             )
+        }
+    }
+
+    private func scopedWindows(
+        _ windows: [AXUIElement],
+        selector: Selector
+    ) throws -> [AXUIElement] {
+        guard selector.windowTitle != nil || selector.windowIdentifier != nil else {
+            return windows
+        }
+        let matches = windows.filter { window in
+            if let expectedTitle = selector.windowTitle,
+               expectedTitle != (attribute(window, kAXTitleAttribute) as? String) {
+                return false
+            }
+            if let expectedIdentifier = selector.windowIdentifier,
+               expectedIdentifier != (attribute(window, kAXIdentifierAttribute) as? String) {
+                return false
+            }
+            return true
+        }
+        guard !matches.isEmpty else { throw AccessibilityControllerError.windowNotFound }
+        guard matches.count == 1 else {
+            throw AccessibilityControllerError.ambiguousWindowMatch(matches.count)
+        }
+        return matches
+    }
+
+    private func actionNames(of element: AXUIElement) -> [String] {
+        var raw: CFArray?
+        guard AXUIElementCopyActionNames(element, &raw) == .success,
+              let raw,
+              let names = raw as? [String] else { return [] }
+        return names
+    }
+
+    private func waitForContextMenu(
+        pid: pid_t,
+        expectedMenuItems: [String]
+    ) -> ContextMenuReport {
+        let expected = Set(expectedMenuItems.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }.filter { !$0.isEmpty })
+        let deadline = Date().addingTimeInterval(1.0)
+        var latest = ContextMenuObservation(visible: false, visibleItemCount: 0, labels: [])
+        while true {
+            latest = inspectContextMenu(pid: pid)
+            let matched = matchedMenuItemCount(expected: expected, labels: latest.labels)
+            if latest.visible && (expected.isEmpty || matched == expected.count) {
+                return ContextMenuReport(
+                    state: .passed,
+                    targetResolved: true,
+                    menuVisible: true,
+                    expectedItemCount: expected.count,
+                    matchedItemCount: matched,
+                    visibleItemCount: latest.visibleItemCount
+                )
+            }
+            guard Date() < deadline else { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        }
+        let matched = matchedMenuItemCount(expected: expected, labels: latest.labels)
+        return ContextMenuReport(
+            state: .verificationUnavailable,
+            targetResolved: true,
+            menuVisible: latest.visible,
+            expectedItemCount: expected.count,
+            matchedItemCount: matched,
+            visibleItemCount: latest.visibleItemCount
+        )
+    }
+
+    private func inspectContextMenu(pid: pid_t) -> ContextMenuObservation {
+        let application = AXUIElementCreateApplication(pid)
+        let roots = ((attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? [])
+            + ((attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? [])
+        var visited = Set<UInt64>()
+        var visible = false
+        var visibleItemCount = 0
+        var labels: [String] = []
+
+        func walk(_ element: AXUIElement, insideVisibleMenu: Bool, depth: Int) {
+            guard depth < 32, visited.insert(UInt64(CFHash(element))).inserted else { return }
+            let role = attribute(element, kAXRoleAttribute) as? String
+            let hidden = (attribute(element, kAXHiddenAttribute) as? Bool) ?? false
+            let isVisibleMenu = insideVisibleMenu || (role == "AXMenu" && !hidden)
+            if role == "AXMenu" && !hidden { visible = true }
+            if role == "AXMenuItem" && isVisibleMenu && !hidden {
+                visibleItemCount += 1
+                if let label = AccessibilitySelectorLabel.preferred(
+                    title: attribute(element, kAXTitleAttribute) as? String,
+                    description: attribute(element, kAXDescriptionAttribute) as? String,
+                    help: attribute(element, kAXHelpAttribute) as? String
+                ) {
+                    labels.append(label.lowercased())
+                }
+            }
+            let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+            for child in children {
+                walk(child, insideVisibleMenu: isVisibleMenu, depth: depth + 1)
+            }
+        }
+
+        for root in roots {
+            walk(root, insideVisibleMenu: false, depth: 0)
+        }
+        return ContextMenuObservation(
+            visible: visible,
+            visibleItemCount: visibleItemCount,
+            labels: labels
+        )
+    }
+
+    private func matchedMenuItemCount(expected: Set<String>, labels: [String]) -> Int {
+        expected.reduce(into: 0) { count, item in
+            if labels.contains(where: { $0 == item }) { count += 1 }
         }
     }
 

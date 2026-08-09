@@ -16,6 +16,67 @@ public enum ControlVerificationState: String, Codable, Equatable {
     case foregroundOnly = "foreground_only"
 }
 
+public enum ContextMenuVerificationState: String, Codable, Equatable {
+    case passed
+    case verificationUnavailable = "verification_unavailable"
+}
+
+public struct ContextMenuReport: Codable, Equatable {
+    public let state: ContextMenuVerificationState
+    public let targetResolved: Bool
+    public let menuVisible: Bool
+    public let expectedItemCount: Int
+    public let matchedItemCount: Int
+    public let visibleItemCount: Int
+
+    public init(
+        state: ContextMenuVerificationState,
+        targetResolved: Bool,
+        menuVisible: Bool,
+        expectedItemCount: Int,
+        matchedItemCount: Int,
+        visibleItemCount: Int
+    ) {
+        self.state = state
+        self.targetResolved = targetResolved
+        self.menuVisible = menuVisible
+        self.expectedItemCount = expectedItemCount
+        self.matchedItemCount = matchedItemCount
+        self.visibleItemCount = visibleItemCount
+    }
+
+    public var actionPostcondition: ControlActionPostcondition {
+        ControlActionPostcondition(
+            kind: "context_menu",
+            verified: state == .passed,
+            details: [
+                "target_resolved": .bool(targetResolved),
+                "menu_visible": .bool(menuVisible),
+                "expected_item_count": .number(Double(expectedItemCount)),
+                "matched_item_count": .number(Double(matchedItemCount)),
+                "visible_item_count": .number(Double(visibleItemCount)),
+                "verification_state": .string(state.rawValue)
+            ]
+        )
+    }
+}
+
+public struct ControlActionPostcondition: Codable, Equatable {
+    public let kind: String
+    public let verified: Bool
+    public let details: [String: JSONValue]
+
+    public init(
+        kind: String,
+        verified: Bool,
+        details: [String: JSONValue] = [:]
+    ) {
+        self.kind = kind
+        self.verified = verified
+        self.details = details
+    }
+}
+
 public struct ControlObservation: Equatable {
     public let foregroundApplication: AppInfo?
     public let focusedElement: FocusedElementSnapshot?
@@ -76,6 +137,20 @@ public final class ControlStateVerifier {
         }
 
         let deadline = now().addingTimeInterval(timeout)
+        var matchingReads = 0
+
+        // Most native actions publish their postcondition synchronously. Read
+        // once before installing observers so the common case does not pay
+        // for AX observer creation, run-loop registration, and workspace
+        // notification setup. A delayed state change still takes the
+        // observer-plus-bounded-polling path below.
+        if let observation = try? read(), predicate(observation) {
+            matchingReads = 1
+            if matchingReads >= consecutiveMatches {
+                return observation
+            }
+        }
+
         let eventLock = NSLock()
         var eventSignaled = false
         eventMonitor?.start {
@@ -84,7 +159,6 @@ public final class ControlStateVerifier {
             eventLock.unlock()
         }
         defer { eventMonitor?.stop() }
-        var matchingReads = 0
         while true {
             if let observation = try? read() {
                 if predicate(observation) {
@@ -117,6 +191,7 @@ public struct ControlActionVerification: Codable, Equatable {
     public let focusBefore: FocusedElementSnapshot?
     public let focusAfter: FocusedElementSnapshot?
     public let focusChanged: Bool
+    public let postcondition: ControlActionPostcondition?
 
     public init(
         state: ControlVerificationState,
@@ -125,7 +200,8 @@ public struct ControlActionVerification: Codable, Equatable {
         foregroundChanged: Bool,
         focusBefore: FocusedElementSnapshot?,
         focusAfter: FocusedElementSnapshot?,
-        focusChanged: Bool
+        focusChanged: Bool,
+        postcondition: ControlActionPostcondition? = nil
     ) {
         self.state = state
         self.foregroundBefore = foregroundBefore
@@ -134,6 +210,44 @@ public struct ControlActionVerification: Codable, Equatable {
         self.focusBefore = focusBefore
         self.focusAfter = focusAfter
         self.focusChanged = focusChanged
+        self.postcondition = postcondition
+    }
+}
+
+public struct ControlVerificationFailure: Error, LocalizedError {
+    public let route: ControlActionRoute
+    public let state: ControlVerificationState
+    public let postcondition: ControlActionPostcondition?
+
+    public init(
+        route: ControlActionRoute,
+        state: ControlVerificationState,
+        postcondition: ControlActionPostcondition? = nil
+    ) {
+        self.route = route
+        self.state = state
+        self.postcondition = postcondition
+    }
+
+    public var errorDescription: String? {
+        "Control action on \(route.rawValue) reached \(state.rawValue), but its declared postcondition was not verified"
+    }
+
+    public var details: [String: JSONValue] {
+        var result: [String: JSONValue] = [
+            "failure_class": .string("verification_unavailable"),
+            "route": .string(route.rawValue),
+            "verification": .string(state.rawValue),
+            "fresh_state_required": .bool(true)
+        ]
+        if let postcondition {
+            result["postcondition"] = .object([
+                "kind": .string(postcondition.kind),
+                "verified": .bool(postcondition.verified),
+                "details": .object(postcondition.details)
+            ])
+        }
+        return result
     }
 }
 
@@ -331,7 +445,8 @@ public final class ControlSession {
         _ context: ControlActionContext,
         action: String,
         route: ControlActionRoute,
-        requireFocusChange: Bool = false
+        requireFocusChange: Bool = false,
+        postcondition: ControlActionPostcondition? = nil
     ) throws -> ControlActionVerification {
         _ = try revalidate(context)
         let readObservation = { [self] in
@@ -361,13 +476,14 @@ public final class ControlSession {
         try validateScope(context.lease, against: after)
         let focusChanged = context.focusedElement != observation.focusedElement
         let verification = ControlActionVerification(
-            state: focusChanged ? .passed : .foregroundOnly,
+            state: focusChanged || postcondition?.verified == true ? .passed : .foregroundOnly,
             foregroundBefore: context.foregroundApplication,
             foregroundAfter: after,
             foregroundChanged: !sameApplication(context.foregroundApplication, after),
             focusBefore: context.focusedElement,
             focusAfter: observation.focusedElement,
-            focusChanged: focusChanged
+            focusChanged: focusChanged,
+            postcondition: postcondition
         )
         lock.lock()
         lastAction = action
@@ -420,6 +536,16 @@ public protocol AccessibilityActionPerforming {
 }
 
 extension AccessibilityController: AccessibilityActionPerforming {}
+
+public protocol AccessibilityContextMenuPerforming {
+    func showContextMenu(
+        pid: pid_t,
+        selector: Selector,
+        expectedMenuItems: [String]
+    ) throws -> ContextMenuReport
+}
+
+extension AccessibilityController: AccessibilityContextMenuPerforming {}
 
 public protocol VisualActionPerforming {
     @discardableResult
@@ -504,17 +630,20 @@ public final class SemanticActionRouter {
     private let session: ControlSession
     private let keyboardAccessController: KeyboardAccessController
     private let accessibilityActionController: AccessibilityActionPerforming
+    private let contextMenuActionController: AccessibilityContextMenuPerforming
     private let visualActionController: VisualActionPerforming
 
     public init(
         session: ControlSession,
         keyboardAccessController: KeyboardAccessController,
         accessibilityActionController: AccessibilityActionPerforming,
-        visualActionController: VisualActionPerforming
+        visualActionController: VisualActionPerforming,
+        contextMenuActionController: AccessibilityContextMenuPerforming = AccessibilityController()
     ) {
         self.session = session
         self.keyboardAccessController = keyboardAccessController
         self.accessibilityActionController = accessibilityActionController
+        self.contextMenuActionController = contextMenuActionController
         self.visualActionController = visualActionController
     }
 
@@ -527,9 +656,13 @@ public final class SemanticActionRouter {
         allowRawCoordinate: Bool,
         requestedRoute: ControlActionRoute? = nil,
         fallbackChain: [ControlActionRoute] = [],
-        routeSelection: RouteSelectionReport? = nil
+        routeSelection: RouteSelectionReport? = nil,
+        expectedMenuItems: [String] = []
     ) throws -> SemanticActionReport {
         if let selector, !selector.hasTarget {
+            throw SemanticActionRouterError.invalidSelector
+        }
+        if command == .contextMenu, selector?.addressability != .accessibility {
             throw SemanticActionRouterError.invalidSelector
         }
         let initialRoute = requestedRoute ?? routeForSelector(selector)
@@ -547,7 +680,8 @@ public final class SemanticActionRouter {
                     allowRawCoordinate: allowRawCoordinate,
                     fallbackUsed: index > 0,
                     fallbackChain: Array(routes.dropFirst()),
-                    routeSelection: routeSelection
+                    routeSelection: routeSelection,
+                    expectedMenuItems: expectedMenuItems
                 )
             } catch let error as AccessibilityControllerError {
                 // A missing target is the only pre-action failure that can
@@ -574,11 +708,12 @@ public final class SemanticActionRouter {
         allowRawCoordinate: Bool,
         fallbackUsed: Bool,
         fallbackChain: [ControlActionRoute],
-        routeSelection: RouteSelectionReport?
+        routeSelection: RouteSelectionReport?,
+        expectedMenuItems: [String]
     ) throws -> SemanticActionReport {
         switch route {
         case .accessibility:
-            guard command == .activate, let selector,
+            guard (command == .activate || command == .contextMenu), let selector,
                   selector.addressability == .accessibility else {
                 throw SemanticActionRouterError.invalidSelector
             }
@@ -590,11 +725,22 @@ public final class SemanticActionRouter {
                 throw KeyboardControlError.foregroundUnavailable
             }
             _ = try session.revalidate(context)
-            _ = try accessibilityActionController.press(pid: pid, selector: selector)
+            let postcondition: ControlActionPostcondition?
+            if command == .contextMenu {
+                postcondition = try contextMenuActionController.showContextMenu(
+                    pid: pid,
+                    selector: selector,
+                    expectedMenuItems: expectedMenuItems
+                ).actionPostcondition
+            } else {
+                _ = try accessibilityActionController.press(pid: pid, selector: selector)
+                postcondition = nil
+            }
             let verification = try session.completeAction(
                 context,
                 action: command.rawValue,
-                route: .accessibility
+                route: .accessibility,
+                postcondition: postcondition
             )
             return SemanticActionReport(
                 action: command.rawValue,
@@ -607,6 +753,9 @@ public final class SemanticActionRouter {
                 routeSelection: routeSelection
             )
         case .keyboard:
+            guard command != .contextMenu else {
+                throw SemanticActionRouterError.invalidSelector
+            }
             return try keyboard(
                 command: command,
                 leaseToken: leaseToken,

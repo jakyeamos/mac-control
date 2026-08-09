@@ -278,7 +278,9 @@ struct CLI {
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
-                ("--image-anchor", "imageAnchor")
+                ("--image-anchor", "imageAnchor"),
+                ("--window-title", "windowTitle"),
+                ("--window-identifier", "windowIdentifier")
             ]
             for (option, key) in stringOptions {
                 if let value = try optionalOption(option, from: args) {
@@ -663,6 +665,18 @@ struct CLI {
                 }
                 params["inter_key_ms"] = .number(value)
             }
+            if let rawExpectedItems = try optionalOption("--expected-menu-items", from: args) {
+                guard action.lowercased().replacingOccurrences(of: "_", with: "-") == "context-menu" else {
+                    throw CLIError.usage("--expected-menu-items is only valid for context-menu")
+                }
+                let items = rawExpectedItems.split(separator: ",").map {
+                    String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+                guard !items.isEmpty else {
+                    throw CLIError.usage("--expected-menu-items must contain at least one item")
+                }
+                params["expected_menu_items"] = .array(items.map(JSONValue.string))
+            }
             var selector: [String: JSONValue] = [:]
             let stringOptions: [(String, String)] = [
                 ("--role", "role"),
@@ -670,7 +684,9 @@ struct CLI {
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
-                ("--image-anchor", "imageAnchor")
+                ("--image-anchor", "imageAnchor"),
+                ("--window-title", "windowTitle"),
+                ("--window-identifier", "windowIdentifier")
             ]
             for (option, key) in stringOptions {
                 if let value = try optionalOption(option, from: args) {
@@ -1020,8 +1036,9 @@ struct CLI {
         macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
         macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
         macctl control batch --app <app> --actions-stdin --confirm [--task <id> --target-fingerprint <fingerprint>]
-        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--task <id>] [--route <route>]
-        macctl control perform scroll --app <app> --role AXScrollArea --identifier <id> --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
+        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--task <id>] [--route <route>] [selector options]
+        macctl control perform context-menu --app <app> --confirm --role <role> [--identifier <id>] [--title <title>] [--window-title <title> | --window-identifier <id>] [--expected-menu-items "Item A,Item B"]
+        macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
         macctl route list|inspect --app <app> --task <task>
         macctl route benchmark --app <app> --task <task> --action <action> --route <route> --confirm
         macctl route benchmark ... --action scroll --route scroll --direction up|down|left|right --amount N [--reset-direction <opposite> --reset-amount N]

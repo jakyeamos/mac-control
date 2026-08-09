@@ -312,12 +312,34 @@ public enum AccessibilityScrollDirection: String, Codable, Equatable, CaseIterab
     case left
     case right
 
-    var actionName: String {
+    /// AppKit commonly exposes page-scroll actions while older providers may
+    /// expose the shorter direction-only aliases. Prefer the page action so
+    /// the semantic amount remains expressed in bounded pages, but accept the
+    /// legacy alias when it is the only action advertised by the target.
+    var actionCandidates: [String] {
         switch self {
-        case .up: return "AXScrollUp"
-        case .down: return "AXScrollDown"
-        case .left: return "AXScrollLeft"
-        case .right: return "AXScrollRight"
+        case .up: return ["AXScrollUpByPage", "AXScrollUp"]
+        case .down: return ["AXScrollDownByPage", "AXScrollDown"]
+        case .left: return ["AXScrollLeftByPage", "AXScrollLeft"]
+        case .right: return ["AXScrollRightByPage", "AXScrollRight"]
+        }
+    }
+
+    func actionName(matching availableActions: [String]) -> String? {
+        actionCandidates.first { availableActions.contains($0) }
+    }
+
+    var pageButtonSubrole: String {
+        switch self {
+        case .up, .left: return "AXDecrementPage"
+        case .down, .right: return "AXIncrementPage"
+        }
+    }
+
+    var usesVerticalScrollBar: Bool {
+        switch self {
+        case .up, .down: return true
+        case .left, .right: return false
         }
     }
 }
@@ -665,10 +687,16 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         }
         guard amount > 0, amount <= 20,
               selector.role == "AXScrollArea",
-              let identifier = selector.identifier,
-              !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              selector.identifier.map({
+                  !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) ?? true else {
             throw AccessibilityControllerError.scrollTargetRequired
         }
+        // Native/AppKit and SwiftUI containers are often uniquely addressable
+        // by role while exposing no AXIdentifier. Keep the persisted
+        // descriptor stable and redacted; uniqueness is still enforced by
+        // findElements before and after the action.
+        let targetIdentifier = selector.identifier ?? "role:AXScrollArea"
         let matches = try findElements(pid: pid, selector: selector, maxNodes: 2_000)
         guard let element = matches.first else {
             throw AccessibilityControllerError.elementNotFound
@@ -677,13 +705,32 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
             throw AccessibilityControllerError.ambiguousMatch(matches.count)
         }
         let beforeFingerprint = scrollObservationFingerprint(of: element)
-        let actions = actionNames(of: element)
-        guard actions.contains(direction.actionName) else {
-            throw AccessibilityControllerError.scrollUnavailable(direction.rawValue)
-        }
-        for _ in 0..<amount {
-            guard AXUIElementPerformAction(element, direction.actionName as CFString) == .success else {
-                throw AccessibilityControllerError.actionFailed(direction.actionName)
+        let availableActions = actionNames(of: element)
+        let pageButtons = pageScrollButtonCandidates(in: element, direction: direction)
+        if pageButtons.count == 1 {
+            let pressAction = kAXPressAction as String
+            guard AXUIElementPerformAction(pageButtons[0], pressAction as CFString) == .success else {
+                throw AccessibilityControllerError.actionFailed(
+                    "\(pressAction):\(direction.pageButtonSubrole)"
+                )
+            }
+            if amount > 1 {
+                for _ in 1..<amount {
+                    guard AXUIElementPerformAction(pageButtons[0], pressAction as CFString) == .success else {
+                        throw AccessibilityControllerError.actionFailed(
+                            "\(pressAction):\(direction.pageButtonSubrole)"
+                        )
+                    }
+                }
+            }
+        } else {
+            guard let actionName = direction.actionName(matching: availableActions) else {
+                throw AccessibilityControllerError.scrollUnavailable(direction.rawValue)
+            }
+            for _ in 0..<amount {
+                guard AXUIElementPerformAction(element, actionName as CFString) == .success else {
+                    throw AccessibilityControllerError.actionFailed(actionName)
+                }
             }
         }
         // Re-resolve the target after the action. This proves that the
@@ -706,11 +753,68 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         }
         return AccessibilityScrollReport(
             application: application,
-            targetIdentifier: identifier,
+            targetIdentifier: targetIdentifier,
             direction: direction,
             amount: amount,
             verification: verification
         )
+    }
+
+    /// AppKit may advertise AXScroll*ByPage on a scroll area while rejecting
+    /// that action at runtime. Its scrollbar's directional page button is a
+    /// more concrete semantic route on those providers. Search only a bounded
+    /// target subtree and require one axis-matching, enabled AXPress target;
+    /// never guess when the provider exposes more than one candidate.
+    private func pageScrollButtonCandidates(
+        in element: AXUIElement,
+        direction: AccessibilityScrollDirection
+    ) -> [AXUIElement] {
+        var pending: [(element: AXUIElement, axis: Bool?)] = [(element, nil)]
+        var visited = Set<UInt64>()
+        var candidateIdentities = Set<UInt64>()
+        var candidates: [AXUIElement] = []
+        let maximumVisited = 512
+        let pressAction = kAXPressAction as String
+
+        while !pending.isEmpty, visited.count < maximumVisited {
+            let current = pending.removeFirst()
+            let currentIdentity = UInt64(CFHash(current.element))
+            guard visited.insert(currentIdentity).inserted else { continue }
+            let currentRole = attribute(current.element, kAXRoleAttribute) as? String
+            let children = (attribute(current.element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+            for child in children {
+                let childRole = attribute(child, kAXRoleAttribute) as? String
+                let childSubrole = attribute(child, kAXSubroleAttribute) as? String
+                if childRole == "AXButton",
+                   childSubrole == direction.pageButtonSubrole,
+                   actionNames(of: child).contains(pressAction),
+                   (attribute(child, kAXEnabledAttribute) as? Bool) ?? true,
+                   current.axis.map({ $0 == direction.usesVerticalScrollBar }) ?? true {
+                    let identity = UInt64(CFHash(child))
+                    if candidateIdentities.insert(identity).inserted {
+                        candidates.append(child)
+                    }
+                }
+
+                let nextAxis: Bool?
+                if childRole == "AXScrollArea" {
+                    nextAxis = nil
+                } else if childRole == "AXScrollBar" {
+                    nextAxis = scrollBarIsVertical(child)
+                } else {
+                    nextAxis = currentRole == "AXScrollBar" ? current.axis : nil
+                }
+                pending.append((child, nextAxis))
+            }
+        }
+        return candidates
+    }
+
+    private func scrollBarIsVertical(_ element: AXUIElement) -> Bool? {
+        guard let frame = try? bounds(of: element), frame.width > 0 || frame.height > 0 else {
+            return nil
+        }
+        return frame.height >= frame.width
     }
 
     /// Capture only bounded structural metadata from visible descendants. This

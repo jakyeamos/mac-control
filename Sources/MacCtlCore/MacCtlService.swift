@@ -323,9 +323,11 @@ public final class MacCtlService {
                    let pid = application.processID {
                     do {
                         _ = try defaultAccessibilityController.findElement(pid: pid, selector: selector)
-                    } catch AccessibilityControllerError.ambiguousMatch {
+                    } catch AccessibilityControllerError.ambiguousMatch,
+                            AccessibilityControllerError.ambiguousWindowMatch {
                         throw ControlTargetInspectionError.ambiguousTarget
-                    } catch AccessibilityControllerError.elementNotFound {
+                    } catch AccessibilityControllerError.elementNotFound,
+                            AccessibilityControllerError.windowNotFound {
                         throw ControlTargetInspectionError.targetChanged
                     } catch AccessibilityControllerError.permissionDenied {
                         throw ControlTargetInspectionError.unreadableFocus
@@ -782,6 +784,7 @@ public final class MacCtlService {
         let command = try KeyboardCommand.resolve(try requiredString(request, key: "command"))
         let count = try requestedKeyboardCount(from: request)
         let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let expectedMenuItems = try requestedStringArray(from: request, key: "expected_menu_items")
         let report = try withExecutionLock {
             try semanticActionRouter.perform(
                 command: command,
@@ -789,7 +792,18 @@ public final class MacCtlService {
                 leaseToken: token,
                 count: count,
                 interKeyDelay: interKeyDelay,
-                allowRawCoordinate: false
+                allowRawCoordinate: false,
+                expectedMenuItems: expectedMenuItems
+            )
+        }
+        // Navigation commands without a declared postcondition preserve their
+        // dispatch result even when focus cannot be observed. Commands with a
+        // concrete postcondition must fail closed.
+        guard report.verification.postcondition == nil || report.verification.state == .passed else {
+            throw ControlVerificationFailure(
+                route: report.route,
+                state: report.verification.state,
+                postcondition: report.verification.postcondition
             )
         }
         return try success(
@@ -1395,7 +1409,8 @@ public final class MacCtlService {
                         requestedRoute: try requestedControlRoute(from: stepRequest),
                         application: foregroundApplication(),
                         leaseToken: lease.token,
-                        foregroundFastPathUsed: activation.foregroundFastPathUsed
+                        foregroundFastPathUsed: activation.foregroundFastPathUsed,
+                        expectedMenuItems: try requestedStringArray(from: stepRequest, key: "expected_menu_items")
                     )
                     guard execution.report.verification.state == .passed else {
                         throw WorkflowExecutionError.unsafeInput(
@@ -1475,6 +1490,7 @@ public final class MacCtlService {
         let selector = try requestedControlSelector(from: request)
         let count = try requestedKeyboardCount(from: request)
         let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let expectedMenuItems = try requestedStringArray(from: request, key: "expected_menu_items")
         let allowRawCoordinate = request.params["allow_raw_coordinate"]?.boolValue == true
         let requestedRoute = try requestedControlRoute(from: request)
         let taskID = request.params["task"]?.stringValue
@@ -1494,7 +1510,8 @@ public final class MacCtlService {
                     allowRawCoordinate: allowRawCoordinate,
                     taskID: taskID,
                     targetFingerprint: targetFingerprint,
-                    requestedRoute: requestedRoute
+                    requestedRoute: requestedRoute,
+                    expectedMenuItems: expectedMenuItems
                 )
             }
             guard let token, !token.isEmpty else { throw KeyboardControlError.leaseRequired }
@@ -1509,7 +1526,19 @@ public final class MacCtlService {
                 requestedRoute: requestedRoute,
                 application: foregroundApplication(),
                 leaseToken: token,
-                foregroundFastPathUsed: false
+                foregroundFastPathUsed: false,
+                expectedMenuItems: expectedMenuItems
+            )
+        }
+        // Existing-lease callers retain the lower-level dispatch report. The
+        // atomic app-scoped surface and commands with concrete postconditions
+        // must fail closed when the result cannot be observed.
+        guard (!usesEphemeralLease && execution.report.verification.postcondition == nil)
+                || execution.report.verification.state == .passed else {
+            throw ControlVerificationFailure(
+                route: execution.report.route,
+                state: execution.report.verification.state,
+                postcondition: execution.report.verification.postcondition
             )
         }
         return try success(
@@ -1561,7 +1590,8 @@ public final class MacCtlService {
         requestedRoute: ControlActionRoute?,
         application: AppInfo?,
         leaseToken: String,
-        foregroundFastPathUsed: Bool
+        foregroundFastPathUsed: Bool,
+        expectedMenuItems: [String] = []
     ) throws -> ControlActionExecution {
         do {
             let selection = try routeSelection(
@@ -1579,7 +1609,8 @@ public final class MacCtlService {
                 allowRawCoordinate: allowRawCoordinate,
                 requestedRoute: selection.report?.selectedRoute ?? requestedRoute,
                 fallbackChain: selection.report?.fallbackChain ?? [],
-                routeSelection: selection.report
+                routeSelection: selection.report,
+                expectedMenuItems: expectedMenuItems
             )
             let kind: CapabilityEvidenceKind = report.verification.state == .passed
                 ? .positive
@@ -1674,7 +1705,8 @@ public final class MacCtlService {
         allowRawCoordinate: Bool,
         taskID: String?,
         targetFingerprint: String?,
-        requestedRoute: ControlActionRoute?
+        requestedRoute: ControlActionRoute?,
+        expectedMenuItems: [String] = []
     ) throws -> ControlActionExecution {
         let activation = try activateAndStabilizeApplication(applicationName)
         let stableForeground = activation.application
@@ -1701,7 +1733,8 @@ public final class MacCtlService {
             requestedRoute: requestedRoute,
             application: stableForeground,
             leaseToken: lease.token,
-            foregroundFastPathUsed: foregroundFastPathUsed
+            foregroundFastPathUsed: foregroundFastPathUsed,
+            expectedMenuItems: expectedMenuItems
         )
     }
 
@@ -2095,10 +2128,11 @@ public final class MacCtlService {
         let amount = try requestedScrollAmount(from: request, key: "amount", defaultValue: nil)
         guard let selector,
               selector.role == "AXScrollArea",
-              let identifier = selector.identifier,
-              !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              selector.identifier.map({
+                  !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) ?? true else {
             throw WorkflowExecutionError.unsafeInput(
-                "semantic scroll benchmarks require a selector with role AXScrollArea and a non-empty identifier"
+                "semantic scroll benchmarks require a selector with role AXScrollArea; identifier is optional when role-only resolution is unique"
             )
         }
 
@@ -2581,7 +2615,7 @@ public final class MacCtlService {
                 value: report,
                 evidence: [Evidence(
                     kind: "semantic_scroll",
-                    message: "A uniquely identified semantic scroll container was acted on and re-resolved after scrolling",
+                    message: "A uniquely addressable semantic scroll container was acted on and re-resolved after scrolling",
                     source: "macctld",
                     metadata: [
                         "route": .string(ControlActionRoute.scroll.rawValue),
@@ -2652,7 +2686,7 @@ public final class MacCtlService {
         localFallbackVerification: ScrollVerificationState? = nil
     ) -> SemanticScrollFailure {
         switch error {
-        case .elementNotFound, .scrollTargetRequired:
+        case .elementNotFound, .windowNotFound, .scrollTargetRequired:
             return semanticScrollFailure(
                 for: .targetMissing,
                 requestedFallback: requestedFallback,
@@ -2668,9 +2702,17 @@ public final class MacCtlService {
                 localFallbackDispatched: localFallbackDispatched,
                 localFallbackVerification: localFallbackVerification
             )
-        case .ambiguousMatch:
+        case .ambiguousMatch, .ambiguousWindowMatch:
             return semanticScrollFailure(
                 for: .targetAmbiguous,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .actionUnavailable:
+            return semanticScrollFailure(
+                for: .actionUnavailable,
                 requestedFallback: requestedFallback,
                 message: error.localizedDescription,
                 localFallbackDispatched: localFallbackDispatched,
@@ -3603,7 +3645,7 @@ public final class MacCtlService {
                 "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
                 "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
-                "semantic scroll targets a unique AXScrollArea identifier, re-resolves it, and compares bounded structural viewport metadata",
+                "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique), re-resolves it, and compares bounded structural viewport metadata",
                 "semantic scroll failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
                 "accessibility trees are bounded and redacted; AX values, private text, screenshots, and OCR are excluded",
                 "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
@@ -4095,6 +4137,16 @@ public final class MacCtlService {
                 source: "macctld",
                 metadata: error.details
             )]
+        case let error as ControlVerificationFailure:
+            status = .blocked
+            code = .controlVerificationUnavailable
+            details = error.details
+            evidence = [Evidence(
+                kind: "control_verification",
+                message: "The control action may have been dispatched, but its declared postcondition was not verified; no completion was reported",
+                source: "macctld",
+                metadata: error.details
+            )]
         case let error as ControlBatchExecutionError:
             status = .blocked
             code = .operationFailed
@@ -4199,7 +4251,9 @@ public final class MacCtlService {
             case .applicationNotRunning:
                 status = .blocked
                 code = .accessibilityTreeUnavailable
-            case .ambiguousMatch, .unreadableFocus, .elementNotFound, .scrollTargetRequired, .scrollUnavailable:
+            case .ambiguousMatch, .windowNotFound, .ambiguousWindowMatch,
+                 .unreadableFocus, .elementNotFound, .scrollTargetRequired, .scrollUnavailable,
+                 .actionUnavailable:
                 status = .blocked
                 code = .taskBlocked
             default:

@@ -93,6 +93,22 @@ macctl control perform activate \
   --app "TextEdit" --confirm --role AXButton --title "Save" --json
 ```
 
+When a native control is repeated across windows, add `--window-title` or
+`--window-identifier`; the resolver selects exactly one window before walking
+that window's Accessibility subtree. For a native context menu, use the
+typed `context-menu` action and require menu labels when they are known:
+
+```sh
+macctl control perform context-menu \
+  --app "Google Chrome" --confirm --role AXButton --identifier tab-group \
+  --window-title "Project - Google Chrome" \
+  --expected-menu-items "Add tab to new group" --json
+```
+
+This opens and verifies the native menu only. It is not a Chrome tab/group
+mutation provider; Chrome capability discovery reports
+`chrome_tab_group_mutation` as unsupported.
+
 Require a succeeded response and `result.verification.state` equal to `passed`. For atomic
 app-scoped actions, also require evidence that `lease_released` is true. A response with
 `foreground_only`, unchanged readable focus, an ambiguous target, or an error is not task
@@ -182,7 +198,8 @@ caller-supplied metadata path and is not equivalent to a live benchmark.
 The benchmark response also reports `foreground_fast_path_samples`; its timings cover daemon
 route execution rather than CLI process or socket startup.
 For semantic scrolling, benchmark with `--action scroll --route scroll`, a unique `AXScrollArea`
-selector, `--direction`, and `--amount`. Repeated warmups or samples must declare the exact
+selector, `--direction`, and `--amount`. An identifier is preferred but optional when role-only
+resolution returns exactly one container. Repeated warmups or samples must declare the exact
 opposite `--reset-direction` and bounded `--reset-amount`, so each measured scroll starts from a
 known viewport state. The daemon measures the AX scroll route itself and persists no manifest when
 any reset or measured invocation fails verification.

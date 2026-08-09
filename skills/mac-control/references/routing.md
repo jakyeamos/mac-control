@@ -17,6 +17,7 @@ task.
 | A bounded inventory is needed across installed applicable apps | `control capability-audit-batch` | Audit up to 24 already-running apps, persist resumable per-app receipts, and never launch or dispatch input. |
 | Several verified actions target one foreground app | `control batch` | Hold one bounded app lease, cache only the route lookup, and revalidate every step. |
 | A native control has stable role, title, or identifier addressability | The explicitly requested semantic route | Use the stable address, without assuming it outranks another route globally. |
+| A native context menu must be opened and observed | Accessibility `context-menu` | Resolve one target, expose `AXShowMenu`, and require the menu plus expected labels before reporting success. |
 | A redacted tree or manifest exposes one unique `AXTextField`/`AXSearchField` beside a repeated list | Atomic `search` with `search_shortcut` and the `keyboard` route | Resolve the structural field, use the named search shortcut once, replace ephemeral query text, and verify focus before completing query entry. |
 | The task is a shortcut, menu, focus move, or repeated navigation | The declared named keyboard candidate | Use bounded named input with foreground and focus verification when that candidate is selected. |
 | A target requires generic Accessibility observation | The declared Accessibility candidate | Preserve semantic targeting with bounded observation and post-action verification. |
@@ -36,6 +37,8 @@ task.
   `search_field_focused`; selecting or opening a result is a separate declared step.
 - Trigger a native menu shortcut repeatedly: use a bounded named keyboard route under an
   app-scoped lease.
+- Open a native context menu with a known target: use `control perform context-menu` with a
+  window-scoped selector when needed; do not infer that this mutates browser tabs or groups.
 - Click a webpage button when a healthy browser DOM connector can identify it: use the browser
   connector, not Mac Control.
 - Enter a password or other private text: do not use raw keyboard send; use an approval-gated
@@ -56,6 +59,9 @@ task.
   declared checkpointed task. Do not weaken `keyboard_focus_changed`.
 - A command succeeds but verification reports `foreground_only`: classify the action as
   unverified and do not claim task completion.
+- A Chrome context menu is visible but the requested tab/group mutation is not exposed as a
+  typed provider capability: report `chrome_tab_group_mutation` unsupported and hand the task to
+  an authorized browser/UI provider; do not synthesize completion from menu visibility.
 - A control response includes `outcome`: use its state, provider, verification, and
   `recommended_provider` fields as the machine contract. `verified_success` requires a
   passed verification state; all other states remain incomplete or blocked until the
@@ -129,7 +135,8 @@ macctl route benchmark --app "System Settings" \
 The response reports `foreground_fast_path_samples` so activation avoidance is observable;
 latencies cover daemon route execution, not CLI process or socket startup.
 
-For semantic scroll, benchmark the exact AX route rather than registering caller-supplied timing:
+For semantic scroll, benchmark the exact AX route rather than registering caller-supplied timing.
+The identifier is optional when role-only resolution returns exactly one scroll area:
 
 ```sh
 macctl route benchmark --app "Chrome" \

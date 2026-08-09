@@ -17,6 +17,7 @@ public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
     case nextControl = "next-control"
     case previousControl = "previous-control"
     case activate
+    case contextMenu = "context-menu"
     case nextItem = "next-item"
     case previousItem = "previous-item"
     case search
@@ -38,6 +39,8 @@ public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
             return ["shift+tab"]
         case .activate:
             return ["space"]
+        case .contextMenu:
+            return ["shift+f10"]
         case .nextItem:
             return ["ctrl+tab"]
         case .previousItem:
@@ -67,7 +70,7 @@ public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
 
     public var expectsFocusChange: Bool {
         switch self {
-        case .activate, .passThrough:
+        case .activate, .contextMenu, .passThrough:
             return false
         default:
             return true

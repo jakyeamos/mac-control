@@ -78,6 +78,10 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     public let staleOrUnprovenRoutes: [ControlActionRoute]
     public let callerSuppliedRoutes: [ControlActionRoute]
     public let contractCapabilities: [String]
+    /// Capabilities intentionally not exposed by this provider. This is
+    /// explicit truthfulness for callers that might otherwise infer that a
+    /// browser's native context menu is a supported tab/group mutation API.
+    public let unsupportedCapabilities: [String]
     public let handoffProviders: [String]
     public let routeSelectionPolicy: String
     public let deepAuditAvailable: Bool
@@ -110,15 +114,22 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         self.callerSuppliedRoutes = candidates
             .filter { $0.measurementSource == .callerSupplied }
             .map(\.route)
+        let isGoogleChrome = application.bundleID?.lowercased() == "com.google.chrome"
+            || ["chrome", "google chrome"].contains(application.name.lowercased())
         self.contractCapabilities = [
             "control.outcome",
             "control.batch",
             "control.capabilities",
             "control.capability_audit",
             "control.capability_audit_batch",
+            "window_scoped_accessibility_selector",
+            "verified_context_menu",
             "semantic_scroll",
             "computer_use_handoff"
         ]
+        self.unsupportedCapabilities = isGoogleChrome
+            ? ["chrome_tab_group_mutation"]
+            : []
         self.handoffProviders = ["computer_use"]
         self.routeSelectionPolicy = "fresh_daemon_executed_measurement_only"
         self.deepAuditAvailable = deepAuditAvailable

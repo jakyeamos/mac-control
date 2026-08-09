@@ -1606,11 +1606,11 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             return .permissionMissing("Accessibility")
         case .applicationNotRunning:
             return .blocked("application_not_running")
-        case .ambiguousMatch:
+        case .ambiguousMatch, .ambiguousWindowMatch:
             return .blocked("ambiguous_target")
-        case .elementNotFound, .unreadableFocus:
+        case .elementNotFound, .windowNotFound, .unreadableFocus:
             return .blocked("focus_unreadable")
-        case .actionFailed, .boundsUnavailable, .scrollTargetRequired, .scrollUnavailable:
+        case .actionUnavailable, .actionFailed, .boundsUnavailable, .scrollTargetRequired, .scrollUnavailable:
             return .blocked("accessibility_observation_failed")
         }
     }
