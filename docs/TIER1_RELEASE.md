@@ -33,6 +33,14 @@ capability report. Passing it proves contract exposure only; it does not replace
 the separate live GUI, task-control, keyboard, or approval-HUD evidence
 dimensions below.
 
+`live.shortcut-control` is a separate gate. It requires owner-only binding
+storage, at least one binding with a currently passing declared postcondition,
+and fresh successful receipts for both Accessibility menu activation and
+app-scoped keyboard dispatch. Verified runs are also admitted to the warm-path
+store only at a 100% observed postcondition rate. A configured chord alone is
+not behavioral evidence. App version, exact menu path, chord, command ID, or
+postcondition changes invalidate the corresponding route fingerprint.
+
 ## Stable daemon identity
 
 The packaged daemon is installed at
@@ -117,6 +125,40 @@ Source XCTest results, daemon receipt evidence, and manual GUI response are
 reported as distinct proof layers. The release check is read-only and never
 manufactures keyboard evidence. Browser DOM automation remains outside this
 surface.
+
+## Shortcut capability evidence
+
+Run the bounded inventory first. It inspects running apps and does not launch
+or mutate them:
+
+```sh
+scripts/shortcut-smoke.sh
+```
+
+The live matrix is Finder, Google Chrome, Cursor, and Xcode. In each available
+app, choose a static reversible toggle whose menu item exposes an AX checked or
+visible state. Do not use save, export, delete, account, or network commands.
+For each accepted binding:
+
+1. Record the original menu state and chord.
+2. Propose the exact path and review the suggested chord.
+3. Prepare, approve, and run the Accessibility route once; verify the declared
+   postcondition, then repeat once to restore the original state.
+4. If a shortcut is configured, prepare, approve, and run the keyboard route
+   once; verify and restore the original state.
+5. If Mac Control created or changed the shortcut, prepare, approve, and remove
+   it, then verify the original chord was restored.
+
+Every setup, run, restore, and removal uses its own binding-and-operation scoped
+approval token. Indeterminate execution is never retried. Report source tests,
+installed/reloaded daemon state, direct Accessibility behavior, keyboard
+behavior, restored state, and unavailable apps separately.
+
+Chrome extension evidence additionally requires an already-installed extension
+with a declared command and a caller-supplied structural postcondition. If no
+such command exists, record `blocked_no_installed_command`; do not install an
+extension to manufacture evidence. If the extension shortcut page lacks one
+unique semantic field, record `handoff_required` and stop instead of tabbing.
 
 The standard Tier-1 smoke intentionally uses the default `shared` physical
 input mode. Physical keyboard suppression is an opt-in, session-only event-tap

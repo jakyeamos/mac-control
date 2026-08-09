@@ -128,6 +128,7 @@ public final class ReleaseGate {
             macWorkflowCheck(snapshot),
             keyboardAccessCheck(snapshot),
             taskControlCheck(snapshot),
+            shortcutCapabilityCheck(snapshot),
             agentContractCheck(snapshot),
             approvalSafetyCheck(snapshot)
         ]
@@ -577,6 +578,50 @@ public final class ReleaseGate {
         )
     }
 
+    private func shortcutCapabilityCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        guard let capabilities = snapshot.capabilityReport?.shortcutCapabilities else {
+            return ReleaseGateCheck(
+                id: "live.shortcut-control",
+                state: .blocked,
+                message: "Shortcut capability and binding-state evidence is unavailable",
+                details: ["missing": .array([.string("capability_report")])]
+            )
+        }
+        let requiredMethods = [
+            "shortcut.audit", "shortcut.propose", "shortcut.inspect",
+            "shortcut.setup", "shortcut.run", "shortcut.remove"
+        ]
+        var missing = requiredMethods.filter { !capabilities.methods.contains($0) }
+        if !capabilities.ownerOnlyStorage { missing.append("owner_only_storage") }
+        if capabilities.statusCounts[ShortcutStatus.behaviorVerified.rawValue, default: 0] == 0 {
+            missing.append("behavior_verified_binding")
+        }
+        for route in ShortcutRunRoute.allCases {
+            let hasEvidence = snapshot.receipts.contains {
+                $0.method == "shortcut.run"
+                    && $0.status == .succeeded
+                    && $0.verificationResult == "passed"
+                    && $0.route == route.rawValue
+                    && $0.evidence.contains { $0.kind == "shortcut_behavior" }
+                    && isFresh($0)
+            }
+            if !hasEvidence { missing.append("fresh_\(route.rawValue)_run") }
+        }
+        let counts = capabilities.statusCounts.mapValues { JSONValue.number(Double($0)) }
+        return ReleaseGateCheck(
+            id: "live.shortcut-control",
+            state: missing.isEmpty ? .passed : .blocked,
+            message: missing.isEmpty
+                ? "Owner-only shortcut bindings and fresh verified Accessibility and keyboard routes are present"
+                : "Shortcut capability or live route evidence is missing",
+            details: [
+                "missing": .array(missing.map(JSONValue.string)),
+                "owner_only_storage": .bool(capabilities.ownerOnlyStorage),
+                "status_counts": .object(counts)
+            ]
+        )
+    }
+
     private func agentContractCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
         guard let capabilities = snapshot.capabilityReport else {
             return ReleaseGateCheck(
@@ -592,14 +637,18 @@ public final class ReleaseGate {
             "control.capabilities",
             "control.capability_audit",
             "control.capability_audit_batch",
-            "route.benchmark"
+            "route.benchmark",
+            "shortcut.audit",
+            "shortcut.run"
         ]
         let requiredSafetyMarkers = [
             "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
             "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
             "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
             "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
-            "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions"
+            "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+            "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
+            "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
         ]
         let missingCapabilities = requiredCapabilities.filter { !capabilities.capabilities.contains($0) }
         let missingSafetyMarkers = requiredSafetyMarkers.filter { !capabilities.safety.contains($0) }

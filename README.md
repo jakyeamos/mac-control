@@ -169,6 +169,65 @@ macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
 available and returns instructions; it does not attempt to bypass TCC.
 
+## Menu commands and app shortcuts
+
+`macctl shortcut` turns exact macOS menu paths into reusable, app-scoped
+command bindings. Discovery is read-only and inspects only applications that
+are already running:
+
+```sh
+~/.local/bin/macctl shortcut audit --app "Finder" --json
+~/.local/bin/macctl shortcut propose \
+  --app "Finder" --menu-path "View->Show Status Bar" --json
+~/.local/bin/macctl shortcut inspect sc_<digest> --json
+```
+
+Menu paths use Apple's exact `Menu->Submenu->Command` spelling, including
+punctuation and ellipses. Audits reject disabled, hidden, dynamic, or ambiguous
+items and distinguish `eligible`, `needs_postcondition`, `conflict`,
+`unsupported`, and `not_running`. Suggestions avoid enabled macOS system
+shortcuts, the target app's current menu equivalents, and Mac Control's binding
+registry. A suggestion is only a proposal; it is never installed in bulk.
+
+Direct menu activation and shortcut setup, execution, and removal are
+sensitive operations. Calling one without authority prepares a digest-scoped,
+single-use approval:
+
+```sh
+~/.local/bin/macctl shortcut run sc_<digest> --route accessibility --json
+~/.local/bin/macctl approval approve <token> --json
+~/.local/bin/macctl shortcut run sc_<digest> \
+  --route accessibility --approval-token <token> --json
+```
+
+The keyboard route additionally requires a configured chord and an app-scoped
+keyboard lease. Dispatch occurs at most once; if the declared postcondition is
+indeterminate or fails, the binding is not promoted to `behavior_verified` and
+the command is never retried automatically.
+
+For a macOS App Shortcut, `shortcut setup` opens the supported System Settings
+surface and reports the exact menu-path text to enter. Rerun setup after the
+human step so Mac Control can read the resulting menu key equivalent. Chrome
+extension commands use `chrome://extensions/shortcuts` and only target a unique
+semantic command field discovered from an already-installed extension's
+manifest. If Chrome does not expose one unique field, setup stops with
+`handoff_required`; it never traverses the page by blind Tab presses.
+
+Bindings are stored atomically in the owner-only
+`~/Library/Application Support/macctl/shortcut-bindings/bindings.json`. The
+original chord is retained for exact rollback. `proposed`, `setup_required`,
+`configured`, `behavior_verified`, `stale`, and `blocked` remain distinct in
+capability and release reports.
+
+The bounded read-only acceptance inventory is:
+
+```sh
+scripts/shortcut-smoke.sh
+```
+
+It audits Finder, Google Chrome, Cursor, and Xcode only when observable and
+does not launch apps, assign shortcuts, approve operations, or dispatch input.
+
 ## Keyboard-first control
 
 The keyboard surface drives visible macOS applications and browser windows

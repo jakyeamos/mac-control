@@ -20,7 +20,7 @@ public enum ActionRiskClassifier {
         switch action.kind {
         case .launchApp, .activateWindow, .waitFor, .capture, .ocr, .assert:
             inferred = .safe
-        case .click, .key, .search, .adapter:
+        case .click, .key, .search, .command, .adapter:
             inferred = .sensitive
         case .scroll:
             inferred = .reversible
@@ -129,7 +129,7 @@ public final class WorkflowRegistry {
         if workflow.focusPolicy == .background {
             for (index, action) in workflow.actions.enumerated() {
                 switch action.kind {
-                case .activateWindow, .scroll, .search:
+                case .activateWindow, .scroll, .search, .command:
                     errors.append("Background action \(index) cannot use \(action.kind.rawValue)")
                 case .click:
                     if action.surface != .macApp {

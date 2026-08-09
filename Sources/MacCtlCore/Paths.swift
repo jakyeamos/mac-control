@@ -55,6 +55,12 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("capability-audit-batches", isDirectory: true)
     }
 
+    /// Exact shortcut targets are owner-only because provisioning requires
+    /// retaining static menu paths. Receipts expose only binding digests.
+    public static var shortcutBindingsDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("shortcut-bindings", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -97,7 +103,8 @@ public enum MacCtlPaths {
             taskCheckpointsDirectory,
             warmPathsDirectory,
             capabilityProfilesDirectory,
-            capabilityAuditBatchesDirectory
+            capabilityAuditBatchesDirectory,
+            shortcutBindingsDirectory
         ]
         for directory in directories {
             try FileManager.default.createDirectory(

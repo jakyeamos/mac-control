@@ -427,6 +427,8 @@ public final class WorkflowExecutor {
                 focusPolicy: focusPolicy,
                 keyboardLeaseToken: keyboardLeaseToken
             )
+        case .command:
+            throw WorkflowExecutionError.unsupportedAction(.command)
         case .key:
             let key = try parameter(action, name: "key")
             if focusPolicy == .background {

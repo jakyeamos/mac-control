@@ -46,6 +46,8 @@ struct CLI {
                 return try runKeyboard(commandArguments)
             case "control":
                 return try runControl(commandArguments)
+            case "shortcut":
+                return try runShortcut(commandArguments)
             case "task":
                 return try runTask(commandArguments)
             case "adapter":
@@ -922,6 +924,88 @@ struct CLI {
         return value
     }
 
+    private func runShortcut(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl shortcut audit|propose|inspect|setup|run|remove")
+        }
+        switch subcommand {
+        case "audit":
+            var params: [String: JSONValue] = [:]
+            if let app = try optionalOption("--app", from: args) {
+                params["app"] = .string(app)
+            }
+            return render(sendOrLocal(method: "shortcut.audit", params: params, localFallback: false))
+        case "propose":
+            let chord = try optionalOption("--chord", from: args)
+            var params: [String: JSONValue] = [:]
+            if let extensionID = try optionalOption("--extension-id", from: args) {
+                guard !args.contains("--app"), !args.contains("--menu-path") else {
+                    throw CLIError.usage("Choose either --extension-id/--command-id or --app/--menu-path")
+                }
+                params["extension_id"] = .string(extensionID)
+                params["command_id"] = .string(try requiredOption("--command-id", from: args))
+            } else {
+                guard !args.contains("--command-id") else {
+                    throw CLIError.usage("--command-id requires --extension-id")
+                }
+                params["app"] = .string(try requiredOption("--app", from: args))
+                let rawPath = try requiredOption("--menu-path", from: args)
+                let path = rawPath.components(separatedBy: "->").map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                guard path.count >= 2, path.allSatisfy({ !$0.isEmpty }) else {
+                    throw CLIError.usage("--menu-path must use exact Menu->Submenu->Command syntax")
+                }
+                params["menu_path"] = .array(path.map(JSONValue.string))
+            }
+            if let chord { params["chord"] = .string(chord) }
+            if args.contains("--postconditions-stdin") {
+                let data = FileHandle.standardInput.readDataToEndOfFile()
+                guard !data.isEmpty,
+                      let value = try? JSONCodec.decode(JSONValue.self, from: data) else {
+                    throw CLIError.usage("--postconditions-stdin expects a JSON predicate array or {\"postconditions\": [...]} envelope")
+                }
+                let predicates = value.arrayValue.map(JSONValue.array)
+                    ?? value.objectValue?["postconditions"]
+                guard let predicates, predicates.arrayValue != nil else {
+                    throw CLIError.usage("--postconditions-stdin expects a JSON predicate array or {\"postconditions\": [...]} envelope")
+                }
+                params["postconditions"] = predicates
+            }
+            return render(sendOrLocal(method: "shortcut.propose", params: params, localFallback: false))
+        case "inspect":
+            guard let id = args.dropFirst().first, !id.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl shortcut inspect <id>")
+            }
+            return render(sendOrLocal(
+                method: "shortcut.inspect",
+                params: ["id": .string(id)],
+                localFallback: false
+            ))
+        case "setup", "run", "remove":
+            guard let id = args.dropFirst().first, !id.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl shortcut \(subcommand) <id> [--approval-token <token>]")
+            }
+            var params: [String: JSONValue] = ["id": .string(id)]
+            if let token = try optionalOption("--approval-token", from: args) {
+                params["approval_token"] = .string(token)
+            }
+            if let route = try optionalOption("--route", from: args) {
+                guard subcommand == "run", ["accessibility", "keyboard"].contains(route) else {
+                    throw CLIError.usage("--route is supported only by shortcut run and must be accessibility or keyboard")
+                }
+                params["route"] = .string(route)
+            }
+            return render(sendOrLocal(
+                method: "shortcut.\(subcommand)",
+                params: params,
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl shortcut audit|propose|inspect|setup|run|remove")
+        }
+    }
+
     private func runDaemon(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
             throw CLIError.usage("Usage: macctl daemon install|remove|restart|status")
@@ -1039,6 +1123,12 @@ struct CLI {
         macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--task <id>] [--route <route>] [selector options]
         macctl control perform context-menu --app <app> --confirm --role <role> [--identifier <id>] [--title <title>] [--window-title <title> | --window-identifier <id>] [--expected-menu-items "Item A,Item B"]
         macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
+        macctl shortcut audit [--app <app>]
+        macctl shortcut propose --app <app> --menu-path "Menu->Submenu->Command" [--chord <chord>] [--postconditions-stdin]
+        macctl shortcut propose --extension-id <id> --command-id <id> [--chord <chord>] --postconditions-stdin
+        macctl shortcut inspect <id>
+        macctl shortcut setup|remove <id> [--approval-token <token>]
+        macctl shortcut run <id> [--route accessibility|keyboard] [--approval-token <token>]
         macctl route list|inspect --app <app> --task <task>
         macctl route benchmark --app <app> --task <task> --action <action> --route <route> --confirm
         macctl route benchmark ... --action scroll --route scroll --direction up|down|left|right --amount N [--reset-direction <opposite> --reset-amount N]

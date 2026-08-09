@@ -644,7 +644,7 @@ public final class TaskRunner {
 
     private func requiresTargetRevalidation(for action: ActionSpec) -> Bool {
         switch action.kind {
-        case .click, .type, .key, .search, .scroll, .activateWindow, .capture, .ocr, .adapter:
+        case .click, .type, .key, .search, .command, .scroll, .activateWindow, .capture, .ocr, .adapter:
             return true
         case .launchApp, .waitFor, .assert:
             return false
@@ -653,7 +653,7 @@ public final class TaskRunner {
 
     private func requiresTargetRevalidation(for predicate: TaskPredicate) -> Bool {
         switch predicate.kind {
-        case .focusedElement, .elementExists, .windowVisible, .adapterState, .modalAbsent, .focusReadable:
+        case .focusedElement, .elementExists, .windowVisible, .adapterState, .modalAbsent, .focusReadable, .menuItemState:
             return true
         case .foregroundApplication, .applicationRunning:
             return false
@@ -1017,6 +1017,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             return report(route: "keyboard", application: application)
         case .search:
             return try executeSearch(action, context: context)
+        case .command:
+            throw TaskActionExecutionError.unsupported("shortcut commands execute through the digest-bound shortcut service")
         case .key:
             try requireRecoveryRoute(context, allowed: ["keyboard"])
             let key = try requiredParameter(action, key: "key")
@@ -1285,6 +1287,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             if expected == "supported" { return true }
             guard let application = foregroundApplication() else { return false }
             return adapterRegistry.adapterID(for: application) == adapterID
+        case .menuItemState:
+            throw TaskActionExecutionError.unsupported("menu_item_state is evaluated by the shortcut service")
         }
     }
 

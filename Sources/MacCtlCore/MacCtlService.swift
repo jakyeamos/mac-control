@@ -135,6 +135,7 @@ public final class MacCtlService {
     private let warmPathStore: WarmPathStore
     private let capabilityProfileStore: CapabilityProfileStore
     private let capabilityAuditBatchStore: CapabilityAuditBatchStore
+    private let shortcutEngine: ShortcutEngine
     private let controlSession: ControlSession
     private let semanticActionRouter: SemanticActionRouter
     private let foregroundApplication: () -> AppInfo?
@@ -184,7 +185,12 @@ public final class MacCtlService {
         accessibilityTreeInspector: AccessibilityTreeInspecting? = nil,
         accessibilityScrollPerformer: AccessibilityScrollPerforming? = nil,
         inputScrollPerformer: InputScrollPerforming? = nil,
-        capabilityAuditBatchStore: CapabilityAuditBatchStore = CapabilityAuditBatchStore()
+        capabilityAuditBatchStore: CapabilityAuditBatchStore = CapabilityAuditBatchStore(),
+        shortcutBindingStore: ShortcutBindingStore = ShortcutBindingStore(),
+        menuCommandController: MenuCommandControlling? = nil,
+        shortcutProvisioner: ShortcutProvisioning? = nil,
+        shortcutKeyboardDispatcher: ShortcutKeyboardDispatching? = nil,
+        shortcutEngine: ShortcutEngine? = nil
     ) {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
@@ -215,7 +221,8 @@ public final class MacCtlService {
         self.foregroundApplication = resolvedForegroundApplication
         let resolvedApplicationResolver = resolveApplication ?? { try appController.resolve($0) }
         self.resolveApplication = resolvedApplicationResolver
-        self.activateApplication = activateApplication ?? { try appController.activate($0) }
+        let resolvedApplicationActivator = activateApplication ?? { try appController.activate($0) }
+        self.activateApplication = resolvedApplicationActivator
         self.foregroundStabilityVerifier = foregroundStabilityVerifier ?? ControlStateVerifier()
         self.hasPostEventAccess = resolvedPostEventAccess
         let inputController = InputController()
@@ -242,6 +249,34 @@ public final class MacCtlService {
                 )
         )
         self.semanticActionRouter = resolvedSemanticActionRouter
+        let resolvedMenuCommandController = menuCommandController ?? AccessibilityMenuCommandController()
+        let resolvedShortcutKeyboardDispatcher = shortcutKeyboardDispatcher
+            ?? AppScopedShortcutKeyboardDispatcher(
+                keyboard: keyboardAccessController,
+                leases: keyboardDriveStore,
+                foregroundApplication: resolvedForegroundApplication
+            )
+        self.shortcutEngine = shortcutEngine ?? ShortcutEngine(
+            store: shortcutBindingStore,
+            menus: resolvedMenuCommandController,
+            directExecutor: ControlSessionShortcutDirectMenuExecutor(
+                menus: resolvedMenuCommandController,
+                session: resolvedControlSession,
+                leases: keyboardDriveStore
+            ),
+            provisioner: shortcutProvisioner
+                ?? GuidedShortcutProvisioner(
+                    menuController: resolvedMenuCommandController,
+                    chromeController: AccessibilityChromeExtensionShortcutController(
+                        keyboard: resolvedShortcutKeyboardDispatcher
+                    )
+                ),
+            keyboard: resolvedShortcutKeyboardDispatcher,
+            resolveApplication: resolvedApplicationResolver,
+            activateApplication: resolvedApplicationActivator,
+            foregroundApplication: resolvedForegroundApplication,
+            warmPaths: warmPathStore
+        )
         self.workflowExecutor = WorkflowExecutor(
             appController: appController,
             inputController: inputController,
@@ -439,6 +474,14 @@ public final class MacCtlService {
                 return try controlCapabilityAudit(request)
             case "control.capability_audit_batch":
                 return try controlCapabilityAuditBatch(request)
+            case "shortcut.audit":
+                return try shortcutAudit(request)
+            case "shortcut.propose":
+                return try shortcutPropose(request)
+            case "shortcut.inspect":
+                return try shortcutInspect(request)
+            case "shortcut.setup", "shortcut.run", "shortcut.remove":
+                return try shortcutMutatingOperation(request)
             case "route.list":
                 return try routeList(request)
             case "route.inspect":
@@ -516,6 +559,232 @@ public final class MacCtlService {
     public func isApprovalPending(token: String) -> Bool {
         approvalStore.list().contains { $0.token == token }
             || taskApprovalStore.list().contains { $0.token == token }
+    }
+
+    private func shortcutAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let report = try shortcutEngine.audit(app: request.params["app"]?.stringValue)
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "shortcut_audit",
+                message: "Running-app menus and registered shortcut blockers were inspected without launching applications",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func shortcutPropose(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let target: CommandTarget
+        if let extensionID = request.params["extension_id"]?.stringValue {
+            target = .chromeExtension(
+                extensionID: extensionID,
+                commandID: try requiredString(request, key: "command_id")
+            )
+        } else {
+            let appName = try requiredString(request, key: "app")
+            let application = try resolveApplication(appName)
+            let path = try requestedStringArray(from: request, key: "menu_path")
+            target = .appMenu(
+                applicationName: application.name,
+                bundleID: application.bundleID,
+                menuPath: path
+            )
+        }
+        let binding = try shortcutEngine.propose(
+            target: target,
+            requestedChord: request.params["chord"]?.stringValue,
+            postconditions: try shortcutPostconditions(request)
+        )
+        return try success(
+            request,
+            status: .prepared,
+            value: binding,
+            evidence: [Evidence(
+                kind: "shortcut_proposal",
+                message: "A deterministic chord and exact target were previewed; no system shortcut was installed",
+                source: "macctld",
+                metadata: ["binding_digest": .string(binding.digest)]
+            )]
+        )
+    }
+
+    private func shortcutInspect(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let report = try shortcutEngine.inspection(id: try requiredString(request, key: "id"))
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "shortcut_binding",
+                message: "The owner-only shortcut binding and available live target state were inspected without dispatch",
+                source: "macctld",
+                metadata: ["binding_digest": .string(report.binding.digest)]
+            )]
+        )
+    }
+
+    private func shortcutPostconditions(_ request: RequestEnvelope) throws -> [TaskPredicate] {
+        guard let value = request.params["postconditions"] else { return [] }
+        do {
+            return try JSONCodec.decode([TaskPredicate].self, from: JSONCodec.encode(value))
+        } catch {
+            throw ShortcutError.invalidTarget("postconditions must be a JSON array of task predicates")
+        }
+    }
+
+    private func shortcutMutatingOperation(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let operation = String(request.method.dropFirst("shortcut.".count))
+        let id = try requiredString(request, key: "id")
+        let binding = try shortcutEngine.inspect(id: id)
+        let requestedRoute = try request.params["route"]?.stringValue.map { raw -> ShortcutRunRoute in
+            guard let route = ShortcutRunRoute(rawValue: raw) else {
+                throw ShortcutError.unsupported("unknown shortcut route: \(raw)")
+            }
+            return route
+        }
+        let plan = shortcutOperationPlan(binding: binding, operation: operation, route: requestedRoute)
+        guard let token = request.params["approval_token"]?.stringValue else {
+            let prepared = taskApprovalStore.prepare(plan: plan)
+            presentApproval?(prepared.record)
+            return try success(
+                request,
+                status: .prepared,
+                operationID: prepared.record.operationID,
+                result: [
+                    "approval": try JSONValue.fromEncodable(prepared.record),
+                    "plan_digest": .string(prepared.planDigest),
+                    "binding_digest": .string(binding.digest),
+                    "operation": .string(operation)
+                ],
+                evidence: [Evidence(
+                    kind: "shortcut_approval",
+                    message: "The exact binding, operation, route, and postconditions were prepared for approval",
+                    source: "macctld",
+                    metadata: ["binding_digest": .string(binding.digest)]
+                )]
+            )
+        }
+        _ = try taskApprovalStore.consume(token: token, plan: plan, ephemeralInputs: [:])
+        switch operation {
+        case "setup":
+            let report = try withExecutionLock { try shortcutEngine.setup(id: id) }
+            return try success(
+                request,
+                status: report.handoffRequired ? .blocked : .succeeded,
+                value: report,
+                evidence: [Evidence(
+                    kind: "shortcut_setup",
+                    message: report.handoffRequired
+                        ? "Setup reached a semantic checkpoint and stopped for human handoff"
+                        : "The configured shortcut was read back from the target application menu",
+                    source: "macctld",
+                    metadata: ["binding_digest": .string(binding.digest)]
+                )]
+            )
+        case "run":
+            let report = try withExecutionLock {
+                try shortcutEngine.run(id: id, requestedRoute: requestedRoute)
+            }
+            guard report.verification == "passed" else {
+                return failure(
+                    request,
+                    status: .blocked,
+                    code: .controlVerificationUnavailable,
+                    message: "Command was dispatched once, but its declared postcondition did not pass",
+                    details: [
+                        "binding_digest": .string(binding.digest),
+                        "route": .string(report.route.rawValue),
+                        "no_retry": .bool(true),
+                        "verification": .string(report.verification)
+                    ],
+                    outcome: AgentActionOutcome(
+                        state: .verificationUnavailable,
+                        route: report.route.rawValue,
+                        verification: report.verification,
+                        failureClass: "verification_unavailable",
+                        fallbackAllowed: false,
+                        freshStateRequired: true,
+                        nextAction: "inspect current menu state before any new command"
+                    )
+                )
+            }
+            return try success(
+                request,
+                value: report,
+                evidence: [Evidence(
+                    kind: "shortcut_behavior",
+                    message: "The command route ran once and its declared postcondition passed",
+                    source: "macctld",
+                    metadata: ["binding_digest": .string(binding.digest)]
+                )],
+                outcome: AgentActionOutcome(
+                    state: .verifiedSuccess,
+                    route: report.route.rawValue,
+                    verification: report.verification
+                )
+            )
+        case "remove":
+            let report = try withExecutionLock { try shortcutEngine.remove(id: id) }
+            return try success(
+                request,
+                status: report.handoffRequired ? .blocked : .succeeded,
+                value: report,
+                evidence: [Evidence(
+                    kind: "shortcut_rollback",
+                    message: report.handoffRequired
+                        ? "Rollback reached a semantic checkpoint and stopped for human handoff"
+                        : "The prior shortcut state was read back before the binding was removed",
+                    source: "macctld",
+                    metadata: ["binding_digest": .string(binding.digest)]
+                )]
+            )
+        default:
+            throw ShortcutError.unsupported("unknown shortcut operation: \(operation)")
+        }
+    }
+
+    private func shortcutOperationPlan(
+        binding: ShortcutBinding,
+        operation: String,
+        route: ShortcutRunRoute?
+    ) -> TaskPlan {
+        var parameters: [String: JSONValue] = [
+            "binding_id": .string(binding.id),
+            "binding_digest": .string(binding.digest),
+            "operation": .string(operation)
+        ]
+        if let route { parameters["route"] = .string(route.rawValue) }
+        let alternateRoutes = binding.target.kind == .appMenu
+            ? ["accessibility", "keyboard"]
+            : ["keyboard"]
+        let action = ActionSpec(
+            kind: .command,
+            surface: .macApp,
+            parameters: parameters,
+            risk: .sensitive
+        )
+        let step = TaskStep(
+            id: "shortcut-\(operation)",
+            action: action,
+            target: TaskTargetIdentity(
+                application: binding.target.applicationName,
+                bundleID: binding.target.bundleID
+            ),
+            postconditions: operation == "run" ? binding.postconditions : [],
+            risk: .sensitive,
+            approvalReason: "Execute exact shortcut \(operation) for binding digest \(binding.digest)",
+            timeout: 30,
+            recovery: TaskRecoveryPolicy(mode: "strict", alternateRoutes: alternateRoutes, maxAttempts: 1)
+        )
+        return TaskPlan(
+            id: "shortcut.\(operation).\(binding.id)",
+            name: "Shortcut \(operation)",
+            summary: "\(operation.capitalized) exact shortcut binding \(binding.id)",
+            steps: [step],
+            totalTimeout: 30,
+            maxActions: 1,
+            recipe: "shortcut-operation"
+        )
     }
 
     private func keyboardStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -3217,7 +3486,7 @@ public final class MacCtlService {
         adapterRegistry: AppAdapterRegistry
     ) -> Bool {
         switch action.kind {
-        case .click, .type, .key, .search, .scroll, .activateWindow, .capture, .ocr:
+        case .click, .type, .key, .search, .scroll, .activateWindow, .capture, .ocr, .command:
             return true
         case .adapter:
             guard let adapterID = action.parameters["adapter_id"]?.stringValue,
@@ -3619,7 +3888,8 @@ public final class MacCtlService {
                 "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
-                "task.resume", "task.cancel", "adapter.capabilities"
+                "task.resume", "task.cancel", "adapter.capabilities",
+                "shortcut.audit", "shortcut.propose", "shortcut.inspect", "shortcut.setup", "shortcut.run", "shortcut.remove"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
             permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
@@ -3653,6 +3923,8 @@ public final class MacCtlService {
                 "sensitive uncertainty is indeterminate and is never retried automatically",
                 "adapter operations are typed and allowlisted; arbitrary AppleScript and JXA are rejected",
                 "task checkpoints contain only redacted identity hashes and verification state",
+                "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
+                "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry",
                 "raw coordinate semantic fallback requires an explicit allow_raw_coordinate flag",
                 "screenshots and OCR frames are discarded after an operation",
                 "no TCP or network listener is created"
@@ -3664,7 +3936,8 @@ public final class MacCtlService {
             taskCapabilities: TaskCapabilityReport(),
             adapterManifests: adapterRegistry.manifests(),
             automationPermissions: adapterRegistry.automationPermissions(),
-            checkpointStore: taskCheckpointStore.status()
+            checkpointStore: taskCheckpointStore.status(),
+            shortcutCapabilities: shortcutEngine.capabilityReport()
         )
     }
 
@@ -3913,6 +4186,7 @@ public final class MacCtlService {
             approvalState = "not_required"
         }
         let controlVerification = response.result["verification"]?.objectValue?["state"]?.stringValue
+            ?? response.result["verification"]?.stringValue
         let verificationResult: String
         if let controlVerification {
             verificationResult = controlVerification
@@ -4117,7 +4391,7 @@ public final class MacCtlService {
     }
 
     private func errorResponse(_ request: RequestEnvelope, error: Error) -> ResponseEnvelope {
-        let status: OperationStatus
+        var status: OperationStatus
         let code: MacCtlErrorCode
         var details: [String: JSONValue] = [:]
         var evidence: [Evidence] = []
@@ -4157,6 +4431,29 @@ public final class MacCtlService {
                 source: "macctld",
                 metadata: error.details
             )]
+        case let error as ShortcutError:
+            status = .blocked
+            switch error {
+            case .bindingNotFound:
+                code = .shortcutNotFound
+            case .conflict:
+                code = .shortcutConflict
+            case .setupRequired:
+                code = .shortcutSetupRequired
+            case .handoffRequired:
+                code = .shortcutHandoffRequired
+            case .staleBinding, .menuPathDrift:
+                code = .shortcutStale
+            case .verificationUnavailable:
+                code = .controlVerificationUnavailable
+            case .invalidTarget, .invalidChord, .duplicateBinding, .persistence:
+                status = .failed
+                code = .invalidRequest
+            case .appNotRunning, .menuPathNotFound, .ambiguousMenuPath,
+                    .menuItemDisabled, .dynamicMenuItem, .unsupported:
+                code = .taskBlocked
+            }
+            details["failure_class"] = .string(code.rawValue)
         case let error as TaskControlError:
             switch error {
             case .invalidPlan(let errors):

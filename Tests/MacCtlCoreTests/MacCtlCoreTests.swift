@@ -4702,7 +4702,7 @@ final class MacCtlCoreTests: XCTestCase {
         let completedAt = Date(timeIntervalSince1970: 9_999)
         let taskCapabilities = TaskCapabilityReport()
         let capabilityReport = CapabilityReport(
-            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "route.benchmark"],
+            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "route.benchmark", "shortcut.audit", "shortcut.run"],
             optionalBackends: [],
             permissionGates: [],
             safety: [
@@ -4710,8 +4710,25 @@ final class MacCtlCoreTests: XCTestCase {
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
-                "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions"
-            ]
+                "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+                "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
+                "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
+            ],
+            shortcutCapabilities: ShortcutCapabilityReport(
+                bindings: [ShortcutBinding(
+                    id: "sc_release",
+                    target: .appMenu(
+                        applicationName: "Finder",
+                        bundleID: "com.apple.finder",
+                        menuPath: ["View", "Show Status Bar"]
+                    ),
+                    chord: "ctrl+option+cmd+1",
+                    provider: .macOSAppShortcut,
+                    postconditions: [TaskPredicate(kind: .menuItemState, expected: "toggled")],
+                    status: .behaviorVerified
+                )],
+                ownerOnlyStorage: true
+            )
         )
         let checkpointStatus = TaskCheckpointStoreStatus(
             directory: "/private/tmp/macctl-task-checkpoints",
@@ -4775,7 +4792,8 @@ final class MacCtlCoreTests: XCTestCase {
             errorCode: String? = nil,
             evidence: [ReceiptEvidence] = [],
             taskID: String? = nil,
-            lifecycleState: String? = nil
+            lifecycleState: String? = nil,
+            route: String? = nil
         ) -> OperationReceipt {
             OperationReceipt(
                 operationID: UUID().uuidString,
@@ -4790,6 +4808,7 @@ final class MacCtlCoreTests: XCTestCase {
                 verificationResult: verificationResult,
                 planDigest: "digest",
                 taskID: taskID,
+                route: route,
                 lifecycleState: lifecycleState,
                 runtimeIdentity: identity,
                 permissionContext: "daemon",
@@ -4842,7 +4861,13 @@ final class MacCtlCoreTests: XCTestCase {
             ], taskID: "release-task", lifecycleState: "completed"),
             receipt(method: "task.cancel", workflowID: nil, status: .succeeded, evidence: [
                 ReceiptEvidence(kind: "task_checkpoint", source: "macctld")
-            ], taskID: "release-task", lifecycleState: "cancelled")
+            ], taskID: "release-task", lifecycleState: "cancelled"),
+            receipt(method: "shortcut.run", workflowID: nil, status: .succeeded, verificationResult: "passed", evidence: [
+                ReceiptEvidence(kind: "shortcut_behavior", source: "macctld")
+            ], route: ShortcutRunRoute.accessibility.rawValue),
+            receipt(method: "shortcut.run", workflowID: nil, status: .succeeded, verificationResult: "passed", evidence: [
+                ReceiptEvidence(kind: "shortcut_behavior", source: "macctld")
+            ], route: ShortcutRunRoute.keyboard.rawValue)
         ]
         let snapshot = ReleaseGateSnapshot(
             launchAgent: launchAgent,

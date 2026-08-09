@@ -322,17 +322,20 @@ public struct ControlActionContext {
     public let focusedElement: FocusedElementSnapshot?
 
     fileprivate let requiresFullKeyboardAccess: Bool
+    fileprivate let requiresPostEventAccess: Bool
 
     fileprivate init(
         lease: KeyboardDriveLease,
         foregroundApplication: AppInfo,
         focusedElement: FocusedElementSnapshot?,
-        requiresFullKeyboardAccess: Bool
+        requiresFullKeyboardAccess: Bool,
+        requiresPostEventAccess: Bool
     ) {
         self.lease = lease
         self.foregroundApplication = foregroundApplication
         self.focusedElement = focusedElement
         self.requiresFullKeyboardAccess = requiresFullKeyboardAccess
+        self.requiresPostEventAccess = requiresPostEventAccess
     }
 }
 
@@ -403,11 +406,12 @@ public final class ControlSession {
 
     public func beginAction(
         leaseToken: String,
-        requireFullKeyboardAccess: Bool
+        requireFullKeyboardAccess: Bool,
+        requirePostEventAccess: Bool = true
     ) throws -> ControlActionContext {
         guard !leaseToken.isEmpty else { throw KeyboardControlError.leaseRequired }
         let lease = try keyboardDriveStore.lease(for: leaseToken)
-        guard hasPostEventAccess() else {
+        guard !requirePostEventAccess || hasPostEventAccess() else {
             throw KeyboardControlError.permissionDenied("Post Events")
         }
         guard let application = foregroundApplication(), application.processID != nil else {
@@ -421,14 +425,15 @@ public final class ControlSession {
             lease: lease,
             foregroundApplication: application,
             focusedElement: focusedElement(for: application),
-            requiresFullKeyboardAccess: requireFullKeyboardAccess
+            requiresFullKeyboardAccess: requireFullKeyboardAccess,
+            requiresPostEventAccess: requirePostEventAccess
         )
     }
 
     @discardableResult
     public func revalidate(_ context: ControlActionContext) throws -> AppInfo {
         let lease = try keyboardDriveStore.lease(for: context.lease.token)
-        guard hasPostEventAccess() else {
+        guard !context.requiresPostEventAccess || hasPostEventAccess() else {
             throw KeyboardControlError.permissionDenied("Post Events")
         }
         guard let application = foregroundApplication(), application.processID != nil else {

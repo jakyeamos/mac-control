@@ -36,6 +36,7 @@ public enum TaskPredicateKind: String, Codable, Equatable, CaseIterable {
     case adapterState = "adapter_state"
     case modalAbsent = "modal_absent"
     case focusReadable = "focus_readable"
+    case menuItemState = "menu_item_state"
 }
 
 /// A stable identity supplied by the plan.  Runtime fingerprints are derived
@@ -291,7 +292,7 @@ public struct TaskPlan: Codable, Equatable {
     public func requiresInputAuthority(using adapterRegistry: AppAdapterRegistry?) -> Bool {
         steps.contains { step in
             switch step.action.kind {
-            case .click, .type, .key, .search, .scroll, .activateWindow, .adapter:
+            case .click, .type, .key, .search, .command, .scroll, .activateWindow, .adapter:
                 if step.action.kind == .adapter {
                     if let adapterRegistry,
                        let adapterID = step.action.parameters["adapter_id"]?.stringValue,
@@ -470,6 +471,12 @@ public enum TaskPlanValidator {
             } catch {
                 errors.append("Step \(stepID) search is invalid: \(error.localizedDescription)")
             }
+        case .command:
+            if action.parameters["binding_id"]?.stringValue == nil
+                || action.parameters["binding_digest"]?.stringValue == nil
+                || action.parameters["operation"]?.stringValue == nil {
+                errors.append("Step \(stepID) command requires binding_id, binding_digest, and operation")
+            }
         case .key:
             guard let key = action.parameters["key"]?.stringValue else {
                 errors.append("Step \(stepID) key requires a key specification")
@@ -558,6 +565,16 @@ public enum TaskPlanValidator {
                 if predicate.parameters["adapter_id"]?.stringValue == nil
                     || predicate.parameters["state"]?.stringValue == nil {
                     errors.append("Step \(stepID) \(label) adapter_state requires adapter_id and state")
+                }
+            case .menuItemState:
+                guard let path = predicate.parameters["menu_path"]?.arrayValue,
+                      path.count >= 2,
+                      path.allSatisfy({ $0.stringValue?.isEmpty == false }) else {
+                    errors.append("Step \(stepID) \(label) menu_item_state requires an exact menu_path")
+                    continue
+                }
+                if !["checked", "unchecked", "toggled", "enabled", "disabled"].contains(predicate.expected ?? "") {
+                    errors.append("Step \(stepID) \(label) menu_item_state has an unsupported expected state")
                 }
             case .windowVisible, .modalAbsent, .focusReadable:
                 break

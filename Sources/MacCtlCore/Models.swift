@@ -287,6 +287,7 @@ public enum ActionKind: String, Codable, Equatable, CaseIterable {
     case type
     case key
     case search
+    case command
     case scroll
     case waitFor
     case capture
@@ -733,6 +734,7 @@ public struct CapabilityReport: Codable, Equatable {
     public let adapterManifests: [AppAdapterManifest]
     public let automationPermissions: [PermissionStatus]
     public let checkpointStore: TaskCheckpointStoreStatus?
+    public let shortcutCapabilities: ShortcutCapabilityReport?
 
     private enum CodingKeys: String, CodingKey {
         case capabilities
@@ -744,6 +746,7 @@ public struct CapabilityReport: Codable, Equatable {
         case adapterManifests
         case automationPermissions
         case checkpointStore
+        case shortcutCapabilities
     }
 
     public init(
@@ -755,7 +758,8 @@ public struct CapabilityReport: Codable, Equatable {
         taskCapabilities: TaskCapabilityReport? = nil,
         adapterManifests: [AppAdapterManifest] = [],
         automationPermissions: [PermissionStatus] = [],
-        checkpointStore: TaskCheckpointStoreStatus? = nil
+        checkpointStore: TaskCheckpointStoreStatus? = nil,
+        shortcutCapabilities: ShortcutCapabilityReport? = nil
     ) {
         self.capabilities = capabilities
         self.optionalBackends = optionalBackends
@@ -766,6 +770,7 @@ public struct CapabilityReport: Codable, Equatable {
         self.adapterManifests = adapterManifests
         self.automationPermissions = automationPermissions
         self.checkpointStore = checkpointStore
+        self.shortcutCapabilities = shortcutCapabilities
     }
 
     public init(from decoder: Decoder) throws {
@@ -779,6 +784,7 @@ public struct CapabilityReport: Codable, Equatable {
         adapterManifests = try container.decodeIfPresent([AppAdapterManifest].self, forKey: .adapterManifests) ?? []
         automationPermissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .automationPermissions) ?? []
         checkpointStore = try container.decodeIfPresent(TaskCheckpointStoreStatus.self, forKey: .checkpointStore)
+        shortcutCapabilities = try container.decodeIfPresent(ShortcutCapabilityReport.self, forKey: .shortcutCapabilities)
     }
 }
 
@@ -998,6 +1004,11 @@ public enum MacCtlErrorCode: String {
     case scrollVerificationUnavailable = "scroll_verification_unavailable"
     case accessibilityTreeUnavailable = "accessibility_tree_unavailable"
     case accessibilityAuditFailed = "accessibility_audit_failed"
+    case shortcutNotFound = "shortcut_not_found"
+    case shortcutConflict = "shortcut_conflict"
+    case shortcutSetupRequired = "shortcut_setup_required"
+    case shortcutHandoffRequired = "shortcut_handoff_required"
+    case shortcutStale = "shortcut_stale"
 }
 
 struct ApprovalDigestPayload: Codable {
