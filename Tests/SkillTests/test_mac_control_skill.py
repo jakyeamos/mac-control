@@ -57,6 +57,11 @@ class MacControlSkillTests(unittest.TestCase):
             "get_app_state",
             "sky.scroll",
             "agent.contract",
+            "Before declaring browser chrome blocked",
+            "Tab->Group Tab",
+            "browser connector select the tab and read back",
+            "Tab-group title",
+            "menu item's enabled state as the postcondition",
         ):
             self.assertIn(marker, text)
 
@@ -104,6 +109,11 @@ class MacControlSkillTests(unittest.TestCase):
             "get_app_state",
             "sky.scroll",
             "caller-supplied",
+            "tab-strip context menu",
+            "group-label readback",
+            "classify it as contextual",
+            "focused `Tab-group title`",
+            "menu state unchanged",
         ):
             self.assertIn(marker, text)
 

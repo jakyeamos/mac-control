@@ -22,6 +22,7 @@ task.
 | The task is a shortcut, menu, focus move, or repeated navigation | The declared named keyboard candidate | Use bounded named input with foreground and focus verification when that candidate is selected. |
 | A target requires generic Accessibility observation | The declared Accessibility candidate | Preserve semantic targeting with bounded observation and post-action verification. |
 | Only pixels or visual text identify the target | An explicitly opted-in visual or coordinate candidate | Use it only when registered for the task and verify the resulting state. |
+| Browser chrome is blocked at a tab-strip context menu, but the ordinary app menu exposes an exact equivalent command | Exact App Shortcut plus browser-connector target selection/readback | Promote the static menu command to an app-scoped actuator, revalidate contextual enablement, and verify the browser-native result. |
 
 ## Positive and negative examples
 
@@ -37,6 +38,10 @@ task.
   `search_field_focused`; selecting or opening a result is a separate declared step.
 - Trigger a native menu shortcut repeatedly: use a bounded named keyboard route under an
   app-scoped lease.
+- Group a Chrome tab when the tab-strip context menu is unreliable but `Tab->Group Tab` is
+  exposed in Chrome's application menu: select the disposable or intended tab through the
+  browser connector, invoke the exact verified shortcut once, verify the focused
+  `AXTextField` named `Tab-group title`, and require group-label readback after naming it.
 - Open a native context menu with a known target: use `control perform context-menu` with a
   window-scoped selector when needed; do not infer that this mutates browser tabs or groups.
 - Click a webpage button when a healthy browser DOM connector can identify it: use the browser
@@ -59,6 +64,13 @@ task.
   declared checkpointed task. Do not weaken `keyboard_focus_changed`.
 - A command succeeds but verification reports `foreground_only`: classify the action as
   unverified and do not claim task completion.
+- An exact static menu command is disabled in the current state: classify it as contextual,
+  not missing. Require an explicit proposal with a declared postcondition, then execute only
+  after the target state makes the item enabled. Hidden, dynamic, or still-disabled commands
+  remain blocked.
+- Chrome `Tab->Group Tab` opens a semantic group editor but may leave its menu state unchanged.
+  Reject `menu_item_state=disabled` as its postcondition; use the focused `Tab-group title`
+  field for immediate verification and browser-native group-label readback for task completion.
 - A Chrome context menu is visible but the requested tab/group mutation is not exposed as a
   typed provider capability: report `chrome_tab_group_mutation` unsupported and hand the task to
   an authorized browser/UI provider; do not synthesize completion from menu visibility.

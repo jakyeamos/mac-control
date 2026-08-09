@@ -30,7 +30,7 @@ The release report also includes `agent.contract`. That check requires the
 provider-neutral outcome surface, capability discovery, bounded control batch,
 and daemon-executed route-benchmark provenance to be present in the live daemon
 capability report. Passing it proves contract exposure only; it does not replace
-the separate live GUI, task-control, keyboard, or approval-HUD evidence
+the separate live GUI, task-control, keyboard, or menu-bar control-center evidence
 dimensions below.
 
 `live.shortcut-control` is a separate gate. It requires owner-only binding
@@ -81,7 +81,7 @@ permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome
 and Notes workflows. Missing GUI permissions, capture, input, window discovery,
 or verification produces a blocked result.
 
-Approval HUD approve/deny/expiry behavior and Caps Lock double-tap activation
+Menu-bar control-center approve/deny/expiry behavior and Caps Lock double-tap activation
 must be exercised by a user in the GUI session using the built-in
 `approval.smoke` workflow. That workflow waits for 0.2 seconds and performs no
 external input or account change, but is classified as sensitive to exercise
@@ -92,13 +92,14 @@ the approval boundary. The release gate requires fresh receipts for:
 ~/.local/bin/macctl workflow run approval.smoke --json
 ```
 
-The first command must be followed by a HUD approve, a second prepare followed
-by a HUD deny, a third prepare left open until the 120-second token expires and
-then an expiry attempt from the HUD or daemon CLI, and the second command must
-be blocked because no approval token was supplied. Approve and deny receipts
-must identify the HUD as their source; the expiry receipt may identify the HUD
-or CLI because expiry is a backend state transition. Caps Lock only brings the
-HUD forward and never approves an operation.
+The first command must be followed by a mouse-driven control-center approval and
+then a run with the returned token. A second prepare is denied in the control
+center. A third remains pending until its 300-second token expires and then gets
+an expiry attempt from the control center or daemon CLI. The tokenless run must
+be blocked. Approve and deny receipts identify `control_center` as their source;
+the expiry receipt may identify the control center or CLI because expiry is a
+backend state transition. Caps Lock opens the control center only while an
+approval is pending and never approves an operation.
 
 ## Keyboard-first evidence
 

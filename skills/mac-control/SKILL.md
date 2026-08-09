@@ -33,6 +33,20 @@ effects, action failure, or failed verification. Read [references/routing.md](re
 when the route is ambiguous, the task spans applications, or the action carries approval or
 private-input risk.
 
+Before declaring browser chrome blocked because the tab strip or its context menu is not
+addressable, inspect the running browser's ordinary application menus with `macctl shortcut
+audit`. Look for an exact static command that performs the missing operation, such as Chrome's
+`Tab->Group Tab`. Treat a static item that is disabled only in the current app state as a
+contextual candidate, not proof of absence. Provision it only through an exact App Shortcut
+proposal with a declared behavior postcondition; execution must revalidate enablement, app
+focus, and target identity. Let the browser connector select the tab and read back the resulting
+group label when those are its stronger interfaces. A shortcut dispatch without that readback
+does not prove general tab-strip mutation support.
+For Chrome `Tab->Group Tab`, verify the immediate result as a focused `AXTextField` whose
+accessible name is `Tab-group title`, then name the group and require browser-native group-label
+readback. Do not use the menu item's enabled state as the postcondition: Chrome can keep the
+command structurally enabled after opening the group editor.
+
 When a redacted Accessibility tree or ideal-state manifest exposes one unique
 `AXTextField` with subrole `AXSearchField` alongside a repeated list, prefer the atomic
 semantic `search` action with the declared `search_shortcut`/`keyboard` route before serial
@@ -273,5 +287,5 @@ verification, and cleanup against the best non-Mac-Control baseline.
 For release evidence, run `macctl release check --json` after installing and reloading the
 packaged daemon. The `agent.contract` check proves that outcomes, capability discovery,
   bounded batching, and daemon-executed route provenance are exposed. It does not prove that
-  live Finder, browser, task-control, or approval-HUD workflows have been exercised; those
+  live Finder, browser, task-control, or menu-bar control-center workflows have been exercised; those
   remain separate user-controlled evidence dimensions.

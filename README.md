@@ -155,19 +155,20 @@ the process arguments:
 secret-producing-command | ~/.local/bin/macctl workflow prepare my.workflow --ephemeral-stdin
 ```
 
-The stdin body must be a JSON object whose values are strings. After the visible
-approval, execute the exact prepared plan with
-`~/.local/bin/macctl approval approve <token>`; the token is single-use and the
-ephemeral input is never returned by the daemon or written to its log.
+The stdin body must be a JSON object whose values are strings. The menu-bar
+control center commits the visible approval without executing the plan. Run the
+exact prepared workflow afterward with its approval token; the token is consumed
+at first dispatch, and ephemeral input is never returned by the daemon or
+written to its log.
 
 The built-in `approval.smoke` workflow is the release-evidence path for this
 boundary. It only waits for 0.2 seconds, performs no external input, and is
 classified as sensitive solely so the approval lifecycle can be exercised
 without changing an app, device, account, or document. The Tier-1 gate accepts
-fresh HUD-sourced approve and deny receipts, a fresh expiry receipt from the
-HUD or the daemon CLI, and a direct fail-closed run without a token. Expiry is
-a backend state transition; the HUD must remain visible and untouched until
-the token expires.
+fresh control-center approve and deny receipts, a fresh expiry receipt from the
+control center or daemon CLI, and a direct fail-closed run without a token.
+Expiry is a backend state transition; the pending approval must remain untouched
+until the token expires.
 
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
@@ -187,9 +188,21 @@ are already running:
 ```
 
 Menu paths use Apple's exact `Menu->Submenu->Command` spelling, including
-punctuation and ellipses. Audits reject disabled, hidden, dynamic, or ambiguous
-items and distinguish `eligible`, `needs_postcondition`, `conflict`,
-`unsupported`, and `not_running`. Suggestions avoid enabled macOS system
+punctuation and ellipses. Audits reject hidden, dynamic, or ambiguous items.
+A static item that is disabled only in the current app state is reported as
+`needs_postcondition`, because contextual commands such as Chrome's
+`Tab->Group Tab` can become enabled for a valid target. An explicit proposal
+for such a command must declare a behavior postcondition, and execution still
+revalidates that the item is enabled before dispatch. Audits distinguish
+`eligible`, `needs_postcondition`, `conflict`, `unsupported`, and `not_running`.
+For Chrome `Tab->Group Tab`, the immediate structural result is the focused
+group editor field exposed as `AXTextField` with the accessible name
+`Tab-group title`. Use that exact focused-element predicate for shortcut-level
+verification, then require browser-native readback of the expected group label
+before treating the grouping task as complete. Chrome may leave the menu item's
+enabled state unchanged, so `menu_item_state=disabled` is not a valid
+postcondition for this command.
+Suggestions avoid enabled macOS system
 shortcuts, the target app's current menu equivalents, and Mac Control's binding
 registry. A suggestion is only a proposal; it is never installed in bulk.
 
@@ -208,6 +221,13 @@ The keyboard route additionally requires a configured chord and an app-scoped
 keyboard lease. Dispatch occurs at most once; if the declared postcondition is
 indeterminate or fails, the binding is not promoted to `behavior_verified` and
 the command is never retried automatically.
+
+Before declaring browser chrome blocked because a tab-strip context menu is not
+reliably addressable, audit the browser's ordinary application menus for an
+equivalent exact command. A verified app shortcut may serve as the actuator
+while the browser connector supplies target selection and behavior readback.
+This does not imply general tab-strip mutation support: the exact command,
+eligible app state, and task postcondition must each pass independently.
 
 For a macOS App Shortcut, `shortcut setup` opens the supported System Settings
 surface and reports the exact menu-path text to enter. Rerun setup after the
@@ -551,16 +571,26 @@ task text and it cannot invoke arbitrary shell commands or AppleScript/JXA:
 cat plan.json | ~/.local/bin/macctl task prepare --plan-stdin --json
 ~/.local/bin/macctl approval approve "$TASK_APPROVAL_TOKEN" --json
 cat plan.json | ~/.local/bin/macctl task run --plan-stdin \
-  --approval-token "$TASK_APPROVAL_TOKEN" --lease-token "$LEASE_TOKEN" --json
+  --approval-token "$TASK_APPROVAL_TOKEN" --json
 ~/.local/bin/macctl task status "$TASK_ID" --json
 ~/.local/bin/macctl task cancel "$TASK_ID" --json
 ```
 
 `task.prepare` returns an approval bound to the exact serialized plan,
 target, risk, recovery policy, and ephemeral-input digest. Any plan or
-ephemeral-input change invalidates it. Mutating keyboard and adapter steps
-also require the short-lived control lease. Private text is supplied through
-owner-only stdin and is used in memory only.
+ephemeral-input change invalidates it. The daemon automatically grants approved
+foreground work a session-scoped execution lease bounded by the task deadline
+and the 300-second maximum. `--lease-token` remains an exact-mode compatibility
+override and cannot upgrade shared authority into physical-keyboard suppression.
+A `focus_policy: "background"`
+task may instead receive an in-memory input channel without a keyboard lease
+when all input targets name one running application that is not currently in
+the foreground. The channel is bound to the exact task, plan digest, process,
+and expiry; Accessibility-addressed click/type and process-directed key routes
+are the only supported inputs. A target-process or foreground change blocks
+dispatch. This is a logical task authority, not a system-wide virtual HID
+device, and it does not make task execution parallel. Private text is supplied
+through owner-only stdin and is used in memory only.
 
 Checkpoints are separate from receipts, atomic, owner-only, retention-bounded,
 and redacted. They contain task and step identity, hashes, route, attempt
@@ -617,13 +647,15 @@ The approval-evidence path is:
 ~/.local/bin/macctl workflow prepare approval.smoke --json
 ```
 
-Use the HUD to approve one prepared plan and deny a second. For expiry, leave
-a third HUD panel untouched until its 120-second token expires, then attempt
-Approve from the HUD or run `macctl approval approve <token>` and confirm the
-result is `approval_expired`. Finally run
+Use the menu-bar control center to approve one prepared plan and deny a second.
+Approval only commits authority; run the approved workflow separately with its
+token. For expiry, leave a third approval untouched until its 300-second token
+expires, then attempt Approve from the control center or run
+`macctl approval approve <token>` and confirm the result is `approval_expired`.
+Finally run
 `~/.local/bin/macctl workflow run approval.smoke --json` without a token; it
-must be blocked. Double-tapping Caps Lock may bring the HUD forward but never
-approves a plan or changes the Caps Lock state.
+must be blocked. Double-tapping Caps Lock opens the control center only while an
+approval is pending; it never approves a plan or changes the Caps Lock state.
 
 The project does not modify AIOS or career-ops. Career Ops can invoke this
 standalone control plane when a local macOS interaction is required.
