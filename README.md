@@ -97,7 +97,11 @@ Receipts are schema-versioned JSON records in
 newest 1,000 records, writes the directory with mode `0700` and files with
 mode `0600`, and stores execution/verification results plus redacted evidence
 metadata. Credentials, ephemeral text, OCR text, screenshots, image bytes,
-message bodies, and sensitive selector values are not persisted.
+message bodies, and sensitive selector values are not persisted. Version 2
+control receipts additionally retain the provider-neutral outcome, installed
+app identity/version, selector field names, and digests of the app path,
+locator, and optional target fingerprint. This supports recurrence detection
+without retaining raw selector labels or application paths.
 
 ## Safety boundary
 
@@ -415,7 +419,13 @@ printf '%s\n' '[{"action":"next-control"},{"action":"next-control"}]' | \
 
 The fast capability probe reports app archetype plus fresh measured, stale, and
 caller-supplied route inventory and may read a cached broad profile without
-walking AX. The separate `capability-audit` command performs one bounded,
+walking AX. It also reports a bounded `recentBlockers` list aggregated from
+owner-only receipts for the matching app version and, when supplied, the exact
+task and target fingerprint. These observations are advisory: an agent should
+use the explicit `isFresh`/`freshUntil` fields, refresh stale evidence, refine
+an ambiguous locator using stable structural fields, then require normal action
+verification before the resolved route can be promoted. The separate
+`capability-audit` command performs one bounded,
 read-only AX/provider audit and persists a profile keyed by app install
 identity/version, OS/provider state, and UI-tree signature. It stores stable
 redacted locator descriptors rather than raw AX elements. Positive, negative,

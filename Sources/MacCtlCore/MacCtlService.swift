@@ -1161,20 +1161,27 @@ public final class MacCtlService {
             osVersion: currentOSVersion(),
             providerState: providerState
         )
+        let targetFingerprintDigest = targetFingerprint.map(CapabilityProfileDigest.make)
+        let recentBlockers = (try? receiptStore.recentControlBlockers(
+            application: WarmPathApplicationIdentity(application: application),
+            taskID: taskID,
+            targetFingerprintDigest: targetFingerprintDigest
+        )) ?? []
         let profile = ControlCapabilityProfile(
             application: WarmPathApplicationIdentity(application: application),
             taskID: taskID,
             targetFingerprint: targetFingerprint,
             manifest: manifest,
             deepAuditAvailable: application.isRunning && application.processID != nil,
-            cachedBroadProfile: cachedProfile.summary
+            cachedBroadProfile: cachedProfile.summary,
+            recentBlockers: recentBlockers
         )
         return try success(
             request,
             value: profile,
             evidence: [Evidence(
                 kind: "control_capabilities",
-                message: "Fast route and cached broad-profile metadata were reported without walking the Accessibility tree",
+                message: "Fast route, cached broad-profile metadata, and redacted recent blockers were reported without walking the Accessibility tree",
                 source: "macctld",
                 metadata: [
                     "archetype": .string(profile.archetype.rawValue),
@@ -1182,7 +1189,8 @@ public final class MacCtlService {
                     "route_selection_policy": .string(profile.routeSelectionPolicy),
                     "probe_mode": .string(profile.probeMode),
                     "broad_profile_cache_hit": .bool(cachedProfile.cacheHit),
-                    "deep_audit_recommended": .bool(cachedProfile.summary.deepAuditRecommended)
+                    "deep_audit_recommended": .bool(cachedProfile.summary.deepAuditRecommended),
+                    "recent_blocker_count": .number(Double(recentBlockers.count))
                 ]
             )]
         )
@@ -4233,6 +4241,8 @@ public final class MacCtlService {
                 ? "failed"
                 : taskLifecycleState == TaskLifecycleState.completed.rawValue ? "passed" : nil,
             lifecycleState: taskLifecycleState,
+            actionOutcome: response.outcome,
+            controlTarget: controlReceiptTarget(for: request),
             runtimeIdentity: .current(),
             permissionContext: permissionContext,
             permissions: permissions,
@@ -4254,6 +4264,48 @@ public final class MacCtlService {
                 "error": error.localizedDescription
             ])
         }
+    }
+
+    private func controlReceiptTarget(for request: RequestEnvelope) -> ControlReceiptTarget? {
+        guard request.method.hasPrefix("control.") else { return nil }
+        let application: AppInfo?
+        if let requestedApplication = request.params["app"]?.stringValue {
+            application = try? resolveApplication(requestedApplication)
+        } else {
+            application = foregroundApplication()
+        }
+        guard let application else { return nil }
+
+        let selectorKeys = [
+            "role", "identifier", "title", "subrole", "containsText",
+            "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor",
+            "windowTitle", "windowIdentifier"
+        ]
+        let selectorObject = request.params["selector"]?.objectValue ?? [:]
+        var selectorValues: [String: JSONValue] = [:]
+        for key in selectorKeys {
+            if let value = selectorObject[key] ?? request.params[key], value != .null {
+                selectorValues[key] = value
+            }
+        }
+        let selectorFields = selectorValues.keys.sorted()
+        let locatorDigest: String? = if selectorFields.isEmpty {
+            nil
+        } else {
+            CapabilityProfileDigest.make(selectorFields.map { key in
+                let encoded = (try? JSONCodec.encode(selectorValues[key]!)) ?? Data()
+                return "\(key)=\(CapabilityProfileDigest.make(String(decoding: encoded, as: UTF8.self)))"
+            }.joined(separator: "|"))
+        }
+
+        return ControlReceiptTarget(
+            application: ControlReceiptApplication(application: application),
+            action: request.params["action"]?.stringValue ?? request.method,
+            targetFingerprintDigest: request.params["target_fingerprint"]?.stringValue
+                .map(CapabilityProfileDigest.make),
+            locatorDigest: locatorDigest,
+            selectorFields: selectorFields
+        )
     }
 
     private func architectureName() -> String {

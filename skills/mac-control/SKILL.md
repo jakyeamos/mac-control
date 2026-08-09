@@ -130,9 +130,16 @@ macctl control capabilities --app "Chrome" \
 ```
 
 The fast probe reports a descriptive app archetype, fresh daemon-measured routes, stale or
-caller-supplied inventory, and supported contract surfaces. It may read a cached broad profile,
-but never walks the Accessibility tree or dispatches an action. An archetype is a routing hint,
-not evidence that a provider works for that app; only a fresh measured route is eligible.
+caller-supplied inventory, supported contract surfaces, and bounded `recentBlockers` from
+owner-only receipts. It may read a cached broad profile, but never walks the Accessibility tree
+or dispatches an action. Before reusing a locator, inspect matching blocker observations for the
+exact app version and, when available, task and target fingerprint. If the prior state is
+`target_ambiguous`, do not replay the same locator or choose a match by index. Honor `isFresh`
+and `freshUntil`; stale blocker evidence requires fresh inspection before it influences routing.
+Retrieve bounded fresh state and refine with stable structural fields such as window, identifier, role, or subrole;
+then require normal post-action verification. Receipt observations retain selector field names
+and digests, not raw labels or values. An archetype or blocker observation is a routing hint, not
+evidence that a provider works for that app; only a fresh measured route is eligible.
 
 When the cache is missing, stale, truncated, or marked for refresh, request the separate broad
 read-only audit once for planning or a bounded task:

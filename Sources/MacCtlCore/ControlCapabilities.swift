@@ -86,6 +86,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     public let routeSelectionPolicy: String
     public let deepAuditAvailable: Bool
     public let cachedBroadProfile: CapabilityProfileCacheSummary?
+    public let recentBlockers: [ControlBlockerObservation]
 
     public init(
         application: WarmPathApplicationIdentity,
@@ -94,9 +95,10 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         manifest: WarmPathManifest? = nil,
         now: Date = Date(),
         deepAuditAvailable: Bool = false,
-        cachedBroadProfile: CapabilityProfileCacheSummary? = nil
+        cachedBroadProfile: CapabilityProfileCacheSummary? = nil,
+        recentBlockers: [ControlBlockerObservation] = []
     ) {
-        self.schemaVersion = 1
+        self.schemaVersion = 2
         self.probeMode = "fast_route_probe"
         self.application = application
         self.archetype = MacAppArchetypeClassifier.classify(application)
@@ -122,6 +124,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
             "control.capabilities",
             "control.capability_audit",
             "control.capability_audit_batch",
+            "control.blocker_observations",
             "window_scoped_accessibility_selector",
             "verified_context_menu",
             "semantic_scroll",
@@ -134,6 +137,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         self.routeSelectionPolicy = "fresh_daemon_executed_measurement_only"
         self.deepAuditAvailable = deepAuditAvailable
         self.cachedBroadProfile = cachedBroadProfile
+        self.recentBlockers = recentBlockers
     }
 }
 

@@ -1417,12 +1417,13 @@ final class MacCtlCoreTests: XCTestCase {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-scroll-ambiguous-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         let app = testApp(name: "Preview", processID: 42)
+        let receiptStore = OperationReceiptStore(directory: receiptDirectory)
         let performer = RecordingAccessibilityScrollPerformer(
             failure: .ambiguousMatch(2)
         )
         let input = RecordingInputScrollPerformer()
         let service = MacCtlService(
-            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            receiptStore: receiptStore,
             permissionContext: "test",
             resolveApplication: { _ in app },
             activateApplication: { _ in app },
@@ -1430,7 +1431,7 @@ final class MacCtlCoreTests: XCTestCase {
             inputScrollPerformer: input
         )
 
-        let response = service.handle(RequestEnvelope(
+        let request = RequestEnvelope(
             method: "control.perform",
             params: [
                 "action": .string("scroll"),
@@ -1442,13 +1443,58 @@ final class MacCtlCoreTests: XCTestCase {
                 "direction": .string("down"),
                 "amount": .number(2)
             ]
-        ))
+        )
+        let response = service.handle(request)
+        let repeatedResponse = service.handle(request)
 
         XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(repeatedResponse.status, .blocked)
         XCTAssertEqual(response.error?.details["failure_class"]?.stringValue, "target_ambiguous")
         XCTAssertEqual(response.error?.details["fallback_allowed"]?.boolValue, false)
         XCTAssertNil(response.error?.details["recommended_provider"])
         XCTAssertEqual(input.callCount, 0)
+
+        let receipt = try XCTUnwrap(
+            receiptStore.list(limit: 10).first(where: { $0.method == "control.perform" })
+        )
+        XCTAssertEqual(receipt.schemaVersion, 2)
+        XCTAssertEqual(receipt.actionOutcome?.state, .targetAmbiguous)
+        XCTAssertEqual(receipt.actionOutcome?.failureClass, "target_ambiguous")
+        XCTAssertEqual(receipt.controlTarget?.application.bundleID, app.bundleID)
+        XCTAssertEqual(receipt.controlTarget?.selectorFields, ["identifier", "role"])
+        XCTAssertNotNil(receipt.controlTarget?.locatorDigest)
+
+        let encodedReceipt = String(decoding: try JSONCodec.encode(receipt), as: UTF8.self)
+        XCTAssertFalse(encodedReceipt.contains("results"))
+        XCTAssertFalse(encodedReceipt.contains(app.path))
+
+        let capabilities = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: ["app": .string("Preview")]
+        ))
+        XCTAssertEqual(capabilities.status, .succeeded)
+        let blocker = try XCTUnwrap(capabilities.result["recentBlockers"]?.arrayValue?.first?.objectValue)
+        XCTAssertEqual(blocker["state"]?.stringValue, "target_ambiguous")
+        XCTAssertEqual(blocker["failureClass"]?.stringValue, "target_ambiguous")
+        XCTAssertEqual(blocker["count"]?.intValue, 2)
+        XCTAssertEqual(blocker["isFresh"]?.boolValue, true)
+        XCTAssertNotNil(blocker["freshUntil"]?.stringValue)
+        XCTAssertEqual(
+            blocker["target"]?.objectValue?["selectorFields"]?.arrayValue?.compactMap(\.stringValue),
+            ["identifier", "role"]
+        )
+        XCTAssertEqual(
+            capabilities.evidence.first?.metadata["recent_blocker_count"]?.intValue,
+            1
+        )
+
+        let staleBlocker = try XCTUnwrap(receiptStore.recentControlBlockers(
+            application: WarmPathApplicationIdentity(application: app),
+            now: receipt.completedAt.addingTimeInterval(
+                OperationReceiptStore.defaultBlockerFreshnessInterval + 1
+            )
+        ).first)
+        XCTAssertFalse(staleBlocker.isFresh)
     }
 
     func testKeyboardServiceEnforcesAppAndSessionFocusScopes() throws {
@@ -3479,7 +3525,9 @@ final class MacCtlCoreTests: XCTestCase {
         ))
 
         XCTAssertTrue(chrome.contractCapabilities.contains("window_scoped_accessibility_selector"))
+        XCTAssertEqual(chrome.schemaVersion, 2)
         XCTAssertTrue(chrome.contractCapabilities.contains("verified_context_menu"))
+        XCTAssertTrue(chrome.contractCapabilities.contains("control.blocker_observations"))
         XCTAssertEqual(chrome.unsupportedCapabilities, ["chrome_tab_group_mutation"])
         XCTAssertTrue(safari.unsupportedCapabilities.isEmpty)
     }
@@ -4031,6 +4079,8 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(receipt.executionResult, "not_run")
         XCTAssertEqual(receipt.verificationResult, "not_run")
         XCTAssertNil(receipt.focusPolicy)
+        XCTAssertNil(receipt.actionOutcome)
+        XCTAssertNil(receipt.controlTarget)
     }
 
     func testUnavailableDoctorDoesNotReportClientPermissionsAsDaemonPermissions() throws {

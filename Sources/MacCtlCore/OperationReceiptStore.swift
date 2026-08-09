@@ -10,6 +10,105 @@ public struct ReceiptEvidence: Codable, Equatable {
     }
 }
 
+/// Privacy-bounded application identity for durable control observations.
+/// The installed path is represented only by a digest so receipts do not
+/// retain user-specific filesystem locations.
+public struct ControlReceiptApplication: Codable, Equatable {
+    public let name: String
+    public let bundleID: String?
+    public let version: String?
+    public let pathDigest: String
+
+    public init(application: AppInfo) {
+        self.name = application.name
+        self.bundleID = application.bundleID
+        self.version = application.bundleVersion
+        self.pathDigest = CapabilityProfileDigest.make(application.path)
+    }
+
+    public func matches(_ application: WarmPathApplicationIdentity) -> Bool {
+        if let bundleID, let otherBundleID = application.bundleID {
+            return bundleID.caseInsensitiveCompare(otherBundleID) == .orderedSame
+                && version == application.version
+        }
+        return pathDigest == CapabilityProfileDigest.make(application.path)
+            && version == application.version
+    }
+}
+
+/// Redacted target context attached to control receipts. Selector values are
+/// never retained; the digest supports deduplication while selectorFields says
+/// which stable discriminator classes were present.
+public struct ControlReceiptTarget: Codable, Equatable {
+    public let application: ControlReceiptApplication
+    public let action: String?
+    public let targetFingerprintDigest: String?
+    public let locatorDigest: String?
+    public let selectorFields: [String]
+
+    public init(
+        application: ControlReceiptApplication,
+        action: String? = nil,
+        targetFingerprintDigest: String? = nil,
+        locatorDigest: String? = nil,
+        selectorFields: [String] = []
+    ) {
+        self.application = application
+        self.action = action
+        self.targetFingerprintDigest = targetFingerprintDigest
+        self.locatorDigest = locatorDigest
+        self.selectorFields = Array(Set(selectorFields)).sorted()
+    }
+}
+
+/// Aggregated, provider-neutral blocker evidence returned by the fast control
+/// capability probe. It is advisory evidence, never execution authority.
+public struct ControlBlockerObservation: Codable, Equatable {
+    public let schemaVersion: Int
+    public let provider: String
+    public let state: AgentActionOutcomeState
+    public let failureClass: String?
+    public let route: String?
+    public let target: ControlReceiptTarget
+    public let taskID: String?
+    public let count: Int
+    public let firstObservedAt: Date
+    public let lastObservedAt: Date
+    public let freshUntil: Date
+    public let isFresh: Bool
+    public let nextAction: String?
+
+    public init(
+        provider: String,
+        state: AgentActionOutcomeState,
+        failureClass: String?,
+        route: String?,
+        target: ControlReceiptTarget,
+        taskID: String?,
+        count: Int,
+        firstObservedAt: Date,
+        lastObservedAt: Date,
+        freshUntil: Date,
+        isFresh: Bool,
+        nextAction: String?,
+        schemaVersion: Int = 1
+    ) {
+        self.schemaVersion = schemaVersion
+        self.provider = provider
+        self.state = state
+        self.failureClass = failureClass
+        self.route = route
+        self.target = target
+        self.taskID = taskID
+        self.count = max(1, count)
+        self.firstObservedAt = firstObservedAt
+        self.lastObservedAt = lastObservedAt
+        self.freshUntil = freshUntil
+        self.isFresh = isFresh
+        self.nextAction = nextAction
+    }
+}
+
 public struct OperationReceipt: Codable, Equatable {
     public let schemaVersion: Int
     public let operationID: String
@@ -32,6 +131,8 @@ public struct OperationReceipt: Codable, Equatable {
     public let preconditionResult: String?
     public let postconditionResult: String?
     public let lifecycleState: String?
+    public let actionOutcome: AgentActionOutcome?
+    public let controlTarget: ControlReceiptTarget?
     public let runtimeIdentity: RuntimeIdentity
     public let permissionContext: String
     public let permissions: [PermissionStatus]
@@ -63,6 +164,8 @@ public struct OperationReceipt: Codable, Equatable {
         case preconditionResult
         case postconditionResult
         case lifecycleState
+        case actionOutcome
+        case controlTarget
         case runtimeIdentity
         case permissionContext
         case permissions
@@ -94,6 +197,8 @@ public struct OperationReceipt: Codable, Equatable {
         preconditionResult: String? = nil,
         postconditionResult: String? = nil,
         lifecycleState: String? = nil,
+        actionOutcome: AgentActionOutcome? = nil,
+        controlTarget: ControlReceiptTarget? = nil,
         runtimeIdentity: RuntimeIdentity,
         permissionContext: String,
         permissions: [PermissionStatus],
@@ -102,7 +207,7 @@ public struct OperationReceipt: Codable, Equatable {
         evidence: [ReceiptEvidence],
         startedAt: Date,
         completedAt: Date,
-        schemaVersion: Int = 1
+        schemaVersion: Int = 2
     ) {
         self.schemaVersion = schemaVersion
         self.operationID = operationID
@@ -125,6 +230,8 @@ public struct OperationReceipt: Codable, Equatable {
         self.preconditionResult = preconditionResult
         self.postconditionResult = postconditionResult
         self.lifecycleState = lifecycleState
+        self.actionOutcome = actionOutcome
+        self.controlTarget = controlTarget
         self.runtimeIdentity = runtimeIdentity
         self.permissionContext = permissionContext
         self.permissions = permissions
@@ -158,6 +265,8 @@ public struct OperationReceipt: Codable, Equatable {
         self.preconditionResult = try container.decodeIfPresent(String.self, forKey: .preconditionResult)
         self.postconditionResult = try container.decodeIfPresent(String.self, forKey: .postconditionResult)
         self.lifecycleState = try container.decodeIfPresent(String.self, forKey: .lifecycleState)
+        self.actionOutcome = try container.decodeIfPresent(AgentActionOutcome.self, forKey: .actionOutcome)
+        self.controlTarget = try container.decodeIfPresent(ControlReceiptTarget.self, forKey: .controlTarget)
         self.runtimeIdentity = try container.decode(RuntimeIdentity.self, forKey: .runtimeIdentity)
         self.permissionContext = try container.decodeIfPresent(String.self, forKey: .permissionContext) ?? "unknown"
         self.permissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .permissions) ?? []
@@ -255,6 +364,7 @@ public enum ReceiptStoreError: Error, LocalizedError, Equatable {
 
 public final class OperationReceiptStore {
     public static let defaultMaximumRecords = 1_000
+    public static let defaultBlockerFreshnessInterval: TimeInterval = 30 * 24 * 60 * 60
 
     private let directory: URL
     private let maximumRecords: Int
@@ -305,6 +415,95 @@ public final class OperationReceiptStore {
             return receipt
         }
         .sorted { $0.completedAt > $1.completedAt }
+        .prefix(max(0, limit))
+        .map { $0 }
+    }
+
+    /// Returns bounded, deduplicated blocker evidence for one installed app.
+    /// Raw selectors never enter the aggregation key or result.
+    public func recentControlBlockers(
+        application: WarmPathApplicationIdentity,
+        taskID: String? = nil,
+        targetFingerprintDigest: String? = nil,
+        limit: Int = 8,
+        now: Date = Date(),
+        freshnessInterval: TimeInterval = OperationReceiptStore.defaultBlockerFreshnessInterval
+    ) throws -> [ControlBlockerObservation] {
+        struct Aggregate {
+            var receipt: OperationReceipt
+            var count: Int
+            var firstObservedAt: Date
+            var lastObservedAt: Date
+        }
+
+        let candidates = try list(limit: min(maximumRecords, 250)).filter { receipt in
+            guard let outcome = receipt.actionOutcome,
+                  outcome.state != .verifiedSuccess,
+                  let target = receipt.controlTarget,
+                  target.application.matches(application) else {
+                return false
+            }
+            if let taskID, receipt.taskID != taskID { return false }
+            if let targetFingerprintDigest,
+               target.targetFingerprintDigest != targetFingerprintDigest {
+                return false
+            }
+            return true
+        }
+
+        var grouped: [String: Aggregate] = [:]
+        for receipt in candidates {
+            guard let outcome = receipt.actionOutcome,
+                  let target = receipt.controlTarget else { continue }
+            let key = [
+                outcome.provider,
+                outcome.state.rawValue,
+                outcome.failureClass ?? "",
+                outcome.route ?? "",
+                receipt.taskID ?? "",
+                target.action ?? "",
+                target.targetFingerprintDigest ?? "",
+                target.locatorDigest ?? "",
+                target.selectorFields.joined(separator: ",")
+            ].joined(separator: "|")
+            if var aggregate = grouped[key] {
+                aggregate.count += 1
+                aggregate.firstObservedAt = min(aggregate.firstObservedAt, receipt.completedAt)
+                if receipt.completedAt > aggregate.lastObservedAt {
+                    aggregate.receipt = receipt
+                    aggregate.lastObservedAt = receipt.completedAt
+                }
+                grouped[key] = aggregate
+            } else {
+                grouped[key] = Aggregate(
+                    receipt: receipt,
+                    count: 1,
+                    firstObservedAt: receipt.completedAt,
+                    lastObservedAt: receipt.completedAt
+                )
+            }
+        }
+
+        return grouped.values.compactMap { aggregate in
+            guard let outcome = aggregate.receipt.actionOutcome,
+                  let target = aggregate.receipt.controlTarget else { return nil }
+            let freshUntil = aggregate.lastObservedAt.addingTimeInterval(max(0, freshnessInterval))
+            return ControlBlockerObservation(
+                provider: outcome.provider,
+                state: outcome.state,
+                failureClass: outcome.failureClass,
+                route: outcome.route,
+                target: target,
+                taskID: aggregate.receipt.taskID,
+                count: aggregate.count,
+                firstObservedAt: aggregate.firstObservedAt,
+                lastObservedAt: aggregate.lastObservedAt,
+                freshUntil: freshUntil,
+                isFresh: freshUntil >= now,
+                nextAction: outcome.nextAction
+            )
+        }
+        .sorted { $0.lastObservedAt > $1.lastObservedAt }
         .prefix(max(0, limit))
         .map { $0 }
     }
