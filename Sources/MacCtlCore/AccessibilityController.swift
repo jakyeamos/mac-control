@@ -492,6 +492,10 @@ public final class AccessibilityController: FocusedElementInspecting {
            identifier != (attribute(element, kAXIdentifierAttribute) as? String) {
             return false
         }
+        if let locatorDigest = selector.locatorDigest,
+           locatorDigest != liveLocatorDigest(for: element) {
+            return false
+        }
         if let title = selector.title,
            !AccessibilitySelectorLabel.matchesExact(
                title,
@@ -516,8 +520,31 @@ public final class AccessibilityController: FocusedElementInspecting {
                 return false
             }
         }
-        return selector.role != nil || selector.identifier != nil || selector.title != nil
+        return selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil || selector.title != nil
             || selector.subrole != nil || selector.containsText != nil
+    }
+
+    /// Rebuilds the same redacted identity descriptor emitted by capability
+    /// audits. Raw labels and values never leave this process.
+    private func liveLocatorDigest(for element: AXUIElement) -> String {
+        let role = attribute(element, kAXRoleAttribute) as? String
+        let actions = actionNames(of: element)
+        let scrollable = role == "AXScrollArea"
+            || actions.contains(where: { $0.hasPrefix("AXScroll") })
+        let label = AccessibilitySelectorLabel.preferred(
+            title: attribute(element, kAXTitleAttribute) as? String,
+            description: attribute(element, kAXDescriptionAttribute) as? String,
+            help: attribute(element, kAXHelpAttribute) as? String
+        ).map { String($0.prefix(240)) }
+        return CapabilityLocatorDescriptor.fromAccessibilityIdentity(
+            role: role,
+            subrole: attribute(element, kAXSubroleAttribute) as? String,
+            identifier: (attribute(element, kAXIdentifierAttribute) as? String)
+                .map { String($0.prefix(240)) },
+            label: label,
+            actions: actions,
+            scrollable: scrollable
+        ).identityDigest
     }
 
     func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {

@@ -4738,7 +4738,7 @@ public final class MacCtlService {
         guard let application else { return nil }
 
         let selectorKeys = [
-            "role", "identifier", "title", "subrole", "containsText",
+            "role", "identifier", "locatorDigest", "title", "subrole", "containsText",
             "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor",
             "windowTitle", "windowIdentifier"
         ]

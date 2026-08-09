@@ -77,6 +77,46 @@ final class MacCtlCoreTests: XCTestCase {
             .normalizedCoordinate
         )
         XCTAssertEqual(Selector(rawX: 100, rawY: 200).addressability, .rawCoordinate)
+        XCTAssertEqual(Selector(locatorDigest: "audit-locator").addressability, .accessibility)
+        XCTAssertTrue(Selector(locatorDigest: "audit-locator").hasTarget)
+    }
+
+    func testAuditLocatorDigestRoundTripsIntoActionSelectors() throws {
+        let node = AccessibilityTreeNode(
+            path: "0/4",
+            depth: 2,
+            role: "AXPopUpButton",
+            subrole: nil,
+            identifier: nil,
+            label: "Target branch for browser-control",
+            actions: ["AXPress", "AXShowMenu"],
+            state: AccessibilityTreeNodeState(
+                enabled: true,
+                focused: false,
+                selected: false,
+                expanded: nil,
+                visible: true,
+                settable: false,
+                hasValue: true
+            ),
+            bounds: nil,
+            childCount: 0,
+            scrollable: false
+        )
+        let auditLocator = try XCTUnwrap(CapabilityLocatorDescriptor.from(treeNode: node))
+        let selector = Selector(
+            role: auditLocator.role,
+            locatorDigest: auditLocator.identityDigest
+        )
+        let actionLocator = try XCTUnwrap(
+            CapabilityLocatorDescriptor.from(selector: selector, route: .accessibility)
+        )
+
+        XCTAssertEqual(actionLocator.identityDigest, auditLocator.identityDigest)
+        XCTAssertEqual(
+            try JSONCodec.decode(Selector.self, from: JSONCodec.encode(selector)),
+            selector
+        )
     }
 
     func testWindowScopedSelectorRoundTripsAndRemainsAccessibilityAddressable() throws {

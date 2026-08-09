@@ -277,6 +277,7 @@ struct CLI {
             let stringOptions: [(String, String)] = [
                 ("--role", "role"),
                 ("--identifier", "identifier"),
+                ("--locator-digest", "locatorDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -683,6 +684,7 @@ struct CLI {
             let stringOptions: [(String, String)] = [
                 ("--role", "role"),
                 ("--identifier", "identifier"),
+                ("--locator-digest", "locatorDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),

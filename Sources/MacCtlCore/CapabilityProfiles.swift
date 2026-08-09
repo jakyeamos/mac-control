@@ -161,18 +161,37 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         guard treeNode.role != nil || treeNode.identifier != nil || treeNode.label != nil else {
             return nil
         }
-        return CapabilityLocatorDescriptor(
+        return fromAccessibilityIdentity(
             role: treeNode.role,
             subrole: treeNode.subrole,
             identifier: treeNode.identifier,
-            labelDigest: treeNode.label.map(CapabilityProfileDigest.make),
+            label: treeNode.label,
             actions: treeNode.actions,
             scrollable: treeNode.scrollable
         )
     }
 
+    static func fromAccessibilityIdentity(
+        role: String?,
+        subrole: String?,
+        identifier: String?,
+        label: String?,
+        actions: [String],
+        scrollable: Bool
+    ) -> CapabilityLocatorDescriptor {
+        CapabilityLocatorDescriptor(
+            role: role,
+            subrole: subrole,
+            identifier: identifier,
+            labelDigest: label.map(CapabilityProfileDigest.make),
+            actions: actions,
+            scrollable: scrollable
+        )
+    }
+
     public static func from(selector: Selector, route: ControlActionRoute) -> CapabilityLocatorDescriptor? {
-        guard selector.role != nil || selector.identifier != nil || selector.title != nil else {
+        guard selector.role != nil || selector.identifier != nil || selector.title != nil
+            || selector.locatorDigest != nil else {
             return nil
         }
         let actions: [String]
@@ -190,7 +209,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             identifier: selector.identifier,
             labelDigest: selector.title.map(CapabilityProfileDigest.make),
             actions: actions,
-            scrollable: route == .scroll
+            scrollable: route == .scroll,
+            identityDigest: selector.locatorDigest
         )
     }
 }

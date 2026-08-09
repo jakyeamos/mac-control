@@ -316,6 +316,11 @@ public enum SelectorAddressability: String, Codable, Equatable, CaseIterable {
 public struct Selector: Codable, Equatable {
     public let role: String?
     public let identifier: String?
+    /// Exact identity digest emitted by a fresh capability audit. The action
+    /// resolver recomputes this digest from the live AX element before acting,
+    /// so callers can reuse an audit-discovered target without persisting its
+    /// visible label.
+    public let locatorDigest: String?
     public let title: String?
     public let subrole: String?
     public let containsText: String?
@@ -333,6 +338,7 @@ public struct Selector: Codable, Equatable {
     public init(
         role: String? = nil,
         identifier: String? = nil,
+        locatorDigest: String? = nil,
         title: String? = nil,
         subrole: String? = nil,
         containsText: String? = nil,
@@ -346,6 +352,7 @@ public struct Selector: Codable, Equatable {
     ) {
         self.role = role
         self.identifier = identifier
+        self.locatorDigest = locatorDigest
         self.title = title
         self.subrole = subrole
         self.containsText = containsText
@@ -359,7 +366,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var addressability: SelectorAddressability {
-        if role != nil || identifier != nil || title != nil || subrole != nil
+        if role != nil || identifier != nil || locatorDigest != nil || title != nil || subrole != nil
             || windowTitle != nil || windowIdentifier != nil {
             return .accessibility
         }
@@ -386,7 +393,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var hasTarget: Bool {
-        role != nil || identifier != nil || title != nil || subrole != nil
+        role != nil || identifier != nil || locatorDigest != nil || title != nil || subrole != nil
             || containsText != nil || imageAnchor != nil
             || (normalizedX != nil && normalizedY != nil)
             || (rawX != nil && rawY != nil)

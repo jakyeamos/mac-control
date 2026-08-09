@@ -453,9 +453,15 @@ and ambiguous evidence promotes, demotes, or leaves capabilities as candidates;
 task verification can update or invalidate the profile after execution. The
 archetype is descriptive and never grants provider parity. Do not run the deep
 audit before every action. After recursive retries reach the fixed ceiling, a
-    separate bounded window-aware/page traversal may inspect up to 8 windows, 256
+separate bounded window-aware/page traversal may inspect up to 8 windows, 256
 top-level pages, and 16,000 total nodes. Only complete coverage promotes the
 profile; omitted or truncated pages keep it stale and are reported as evidence.
+A fresh locator's `identityDigest` can be passed back through
+`control perform --locator-digest <digest>` (optionally combined with role,
+subrole, identifier, or window scope). The daemon recomputes the complete
+redacted descriptor from the live AX element and fails closed unless exactly
+one current element matches, closing the audit-to-action handoff without
+persisting its visible label.
 A batch holds one bounded app lease, revalidates
 every step, stops on an unverified step, and releases the lease. Scroll is
 intentionally kept on `control perform` so a provider handoff remains explicit.
