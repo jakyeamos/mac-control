@@ -153,7 +153,8 @@ public final class AppController {
             bundleID: app.bundleID,
             path: app.path,
             isRunning: true,
-            processID: running.processIdentifier
+            processID: running.processIdentifier,
+            bundleVersion: app.bundleVersion
         )
     }
 
@@ -213,7 +214,9 @@ public final class AppController {
             bundleID: bundleID,
             path: url.path,
             isRunning: running != nil,
-            processID: running?.processIdentifier
+            processID: running?.processIdentifier,
+            bundleVersion: (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? (bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
         )
     }
 }

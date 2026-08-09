@@ -34,10 +34,14 @@ struct CLI {
                 return try runReceipts(commandArguments)
             case "release":
                 return try runRelease(commandArguments)
+            case "route":
+                return try runRoute(commandArguments)
+            case "accessibility":
+                return try runAccessibility(commandArguments)
+            case "ideal-state":
+                return try runIdealState(commandArguments)
             case "logs":
                 return render(sendOrLocal(method: "logs", params: [:], localFallback: true))
-            case "iphone":
-                return try runIPhone(commandArguments)
             case "keyboard":
                 return try runKeyboard(commandArguments)
             case "control":
@@ -83,7 +87,7 @@ struct CLI {
 
     private func runWorkflow(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--driving-lease <token>]")
+            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow>")
         }
         switch subcommand {
         case "list":
@@ -105,18 +109,17 @@ struct CLI {
             return render(sendOrLocal(method: "workflow.prepare", params: params, localFallback: false))
         case "run":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow run <workflow> [--background] [--approval-token <token>] [--driving-lease <token>] [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow run <workflow> [--background] [--approval-token <token>] [--ephemeral-stdin]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
             try addFocusPolicy(from: args, to: &params)
             if let tokenIndex = args.firstIndex(of: "--approval-token"), args.indices.contains(tokenIndex + 1) {
                 params["approval_token"] = .string(args[tokenIndex + 1])
             }
-            try addDrivingLease(from: args, to: &params)
             try addEphemeralInputs(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.run", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--background] [--driving-lease <token>] [--ephemeral-stdin]")
+            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]")
         }
     }
 
@@ -140,17 +143,6 @@ struct CLI {
             throw CLIError.usage("--ephemeral-stdin expects a JSON object of string values on stdin")
         }
         params["ephemeral_inputs"] = value
-    }
-
-    private func addDrivingLease(
-        from args: [String],
-        to params: inout [String: JSONValue]
-    ) throws {
-        guard let leaseIndex = args.firstIndex(of: "--driving-lease") else { return }
-        guard args.indices.contains(leaseIndex + 1) else {
-            throw CLIError.usage("--driving-lease requires a lease token")
-        }
-        params["driving_lease_token"] = .string(args[leaseIndex + 1])
     }
 
     private func runApproval(_ args: [String]) throws -> Int32 {
@@ -202,47 +194,257 @@ struct CLI {
         return report.passed ? 0 : 1
     }
 
-    private func runIPhone(_ args: [String]) throws -> Int32 {
+    private func runRoute(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl iphone status|drive begin|drive end <token>|open-app <name> --driving-lease <token>")
+            throw CLIError.usage("Usage: macctl route list|inspect|benchmark|register")
         }
         switch subcommand {
-        case "status":
-            return render(sendOrLocal(method: "iphone.status", params: [:], localFallback: true))
-        case "drive":
-            guard let action = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl iphone drive begin|end <token>")
+        case "list":
+            return render(sendOrLocal(method: "route.list", params: [:], localFallback: true))
+        case "inspect":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args)),
+                "task": .string(try requiredOption("--task", from: args))
+            ]
+            if let target = try optionalOption("--target-fingerprint", from: args) {
+                params["target_fingerprint"] = .string(target)
             }
-            switch action {
-            case "begin":
-                return render(sendOrLocal(method: "iphone.drive.begin", params: [:], localFallback: false))
-            case "end":
-                guard let token = args.dropFirst(2).first else {
-                    throw CLIError.usage("Usage: macctl iphone drive end <token>")
+            return render(sendOrLocal(method: "route.inspect", params: params, localFallback: true))
+        case "benchmark":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args)),
+                "task": .string(try requiredOption("--task", from: args)),
+                "target_fingerprint": .string(try requiredOption("--target-fingerprint", from: args)),
+                "route": .string(try requiredOption("--route", from: args)),
+                "verification_oracle": .string(try requiredOption("--verification-oracle", from: args)),
+                "action": .string(try requiredOption("--action", from: args)),
+                "confirm": .bool(args.contains("--confirm"))
+            ]
+            let optionalNumbers: [(String, String)] = [
+                ("--samples", "samples"),
+                ("--warmups", "warmups"),
+                ("--count", "count"),
+                ("--amount", "amount"),
+                ("--reset-amount", "reset_amount"),
+                ("--inter-key-ms", "inter_key_ms"),
+                ("--freshness-seconds", "freshness_seconds"),
+                ("--tab-count", "tab_count"),
+                ("--scroll-count", "scroll_count"),
+                ("--user-help-count", "user_help_count")
+            ]
+            for (option, key) in optionalNumbers {
+                if let raw = try optionalOption(option, from: args) {
+                    guard let value = Double(raw) else {
+                        throw CLIError.usage("\(option) must be a number")
+                    }
+                    params[key] = .number(value)
                 }
-                return render(sendOrLocal(
-                    method: "iphone.drive.end",
-                    params: ["driving_lease_token": .string(token)],
-                    localFallback: false
-                ))
-            default:
-                throw CLIError.usage("Usage: macctl iphone drive begin|end <token>")
             }
-        case "open-app":
-            guard let name = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl iphone open-app <name> --driving-lease <token>")
+            if let direction = try optionalOption("--direction", from: args) {
+                params["direction"] = .string(direction)
             }
-            var params: [String: JSONValue] = ["name": .string(name)]
-            try addDrivingLease(from: args, to: &params)
-            return render(sendOrLocal(method: "iphone.open-app", params: params, localFallback: false))
+            if let resetDirection = try optionalOption("--reset-direction", from: args) {
+                params["reset_direction"] = .string(resetDirection)
+            }
+            if let resetAction = try optionalOption("--reset-action", from: args) {
+                params["reset_action"] = .string(resetAction)
+            }
+            if let resetRoute = try optionalOption("--reset-route", from: args) {
+                params["reset_route"] = .string(resetRoute)
+            }
+            if let permissions = try optionalOption("--required-permissions", from: args) {
+                params["required_permissions"] = .array(
+                    permissions.split(separator: ",").map { .string(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                )
+            }
+            if let fallbacks = try optionalOption("--fallback-routes", from: args) {
+                params["fallback_routes"] = .array(
+                    fallbacks.split(separator: ",").map { .string(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                )
+            }
+            if args.contains("--coordinate-use") {
+                params["coordinate_use"] = .bool(true)
+            }
+            if args.contains("--visual-coordinate-opt-in") {
+                params["visual_coordinate_opt_in"] = .bool(true)
+            }
+            if args.contains("--allow-raw-coordinate") {
+                params["allow_raw_coordinate"] = .bool(true)
+            }
+            var selector: [String: JSONValue] = [:]
+            let stringOptions: [(String, String)] = [
+                ("--role", "role"),
+                ("--identifier", "identifier"),
+                ("--title", "title"),
+                ("--subrole", "subrole"),
+                ("--contains-text", "containsText"),
+                ("--image-anchor", "imageAnchor")
+            ]
+            for (option, key) in stringOptions {
+                if let value = try optionalOption(option, from: args) {
+                    selector[key] = .string(value)
+                }
+            }
+            let numberOptions: [(String, String)] = [
+                ("--normalized-x", "normalizedX"),
+                ("--normalized-y", "normalizedY"),
+                ("--raw-x", "rawX"),
+                ("--raw-y", "rawY")
+            ]
+            for (option, key) in numberOptions {
+                if let raw = try optionalOption(option, from: args) {
+                    guard let value = Double(raw) else {
+                        throw CLIError.usage("\(option) must be a number")
+                    }
+                    selector[key] = .number(value)
+                }
+            }
+            if !selector.isEmpty {
+                params["selector"] = .object(selector)
+            }
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("route benchmark requires --confirm")
+            }
+            return render(sendOrLocal(method: "route.benchmark", params: params, localFallback: false))
+        case "register":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args)),
+                "task": .string(try requiredOption("--task", from: args)),
+                "target_fingerprint": .string(try requiredOption("--target-fingerprint", from: args)),
+                "route": .string(try requiredOption("--route", from: args)),
+                "verification_oracle": .string(try requiredOption("--verification-oracle", from: args)),
+                "latency_ms": .number(try requiredDoubleOption("--latency-ms", from: args)),
+                "p95_latency_ms": .number(try requiredDoubleOption("--p95-ms", from: args)),
+                "verification_rate": .number(try requiredDoubleOption("--verification-rate", from: args)),
+                "confirm": .bool(args.contains("--confirm"))
+            ]
+            let optionalNumbers: [(String, String)] = [
+                ("--recoveries", "recoveries"),
+                ("--samples", "samples"),
+                ("--freshness-seconds", "freshness_seconds"),
+                ("--tab-count", "tab_count"),
+                ("--scroll-count", "scroll_count"),
+                ("--user-help-count", "user_help_count")
+            ]
+            for (option, key) in optionalNumbers {
+                if let raw = try optionalOption(option, from: args) {
+                    guard let value = Double(raw) else {
+                        throw CLIError.usage("\(option) must be a number")
+                    }
+                    params[key] = .number(value)
+                }
+            }
+            if let permissions = try optionalOption("--required-permissions", from: args) {
+                params["required_permissions"] = .array(
+                    permissions.split(separator: ",").map { .string(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                )
+            }
+            if let fallbacks = try optionalOption("--fallback-routes", from: args) {
+                params["fallback_routes"] = .array(
+                    fallbacks.split(separator: ",").map { .string(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                )
+            }
+            if args.contains("--coordinate-use") {
+                params["coordinate_use"] = .bool(true)
+            }
+            if args.contains("--visual-coordinate-opt-in") {
+                params["visual_coordinate_opt_in"] = .bool(true)
+            }
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("route register requires --confirm")
+            }
+            return render(sendOrLocal(method: "route.register", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl iphone status|drive begin|drive end <token>|open-app <name> --driving-lease <token>")
+            throw CLIError.usage("Usage: macctl route list|inspect|benchmark|register")
+        }
+    }
+
+    private func runAccessibility(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl accessibility tree|audit")
+        }
+        switch subcommand {
+        case "tree":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args))
+            ]
+            if let maxNodes = try optionalOption("--max-nodes", from: args) {
+                guard let value = Int(maxNodes), value > 0 else {
+                    throw CLIError.usage("--max-nodes must be a positive integer")
+                }
+                params["max_nodes"] = .number(Double(value))
+            }
+            if let maxDepth = try optionalOption("--max-depth", from: args) {
+                guard let value = Int(maxDepth), value >= 0 else {
+                    throw CLIError.usage("--max-depth must be a non-negative integer")
+                }
+                params["max_depth"] = .number(Double(value))
+            }
+            return render(sendOrLocal(method: "accessibility.tree", params: params, localFallback: false))
+        case "audit":
+            let manifestPath = try requiredOption("--manifest", from: args)
+            return render(sendOrLocal(
+                method: "accessibility.audit",
+                params: [
+                    "app": .string(try requiredOption("--app", from: args)),
+                    "manifest": try readJSONValue(at: manifestPath)
+                ],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl accessibility tree|audit")
+        }
+    }
+
+    private func runIdealState(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl ideal-state validate|audit")
+        }
+        let manifestPath = try requiredOption("--manifest", from: args)
+        let manifestValue = try readJSONValue(at: manifestPath)
+        switch subcommand {
+        case "validate":
+            let data = try JSONCodec.encode(manifestValue)
+            let manifest: MacControlIdealStateManifest
+            do {
+                manifest = try JSONCodec.decode(MacControlIdealStateManifest.self, from: data)
+            } catch {
+                throw CLIError.usage("Manifest is not a valid Mac Control ideal-state manifest")
+            }
+            let validation = MacControlIdealStateManifestValidator.validate(manifest)
+            if jsonOutput {
+                return renderValue(validation)
+            }
+            print(validation.valid ? "valid" : "invalid")
+            for error in validation.errors {
+                print("error: \(error)")
+            }
+            return validation.valid ? 0 : 1
+        case "audit":
+            return render(sendOrLocal(
+                method: "ideal-state.audit",
+                params: [
+                    "app": .string(try requiredOption("--app", from: args)),
+                    "manifest": manifestValue
+                ],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl ideal-state validate|audit")
+        }
+    }
+
+    private func readJSONValue(at path: String) throws -> JSONValue {
+        do {
+            return try JSONCodec.decode(JSONValue.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        } catch {
+            throw CLIError.usage("Could not read JSON manifest at \(path)")
         }
     }
 
     private func runKeyboard(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl keyboard status|setup|enable|inspect|lease|navigate|send")
+            throw CLIError.usage("Usage: macctl keyboard status|setup|enable|inspect|lease|freeze|navigate|send")
         }
         switch subcommand {
         case "status":
@@ -262,6 +464,8 @@ struct CLI {
             return render(sendOrLocal(method: "keyboard.inspect", params: [:], localFallback: false))
         case "lease":
             return try runKeyboardLease(Array(args.dropFirst()))
+        case "freeze":
+            return try runKeyboardFreeze(Array(args.dropFirst()))
         case "navigate":
             guard let command = args.dropFirst().first else {
                 throw CLIError.usage("Usage: macctl keyboard navigate <command> --lease-token <token> [--count N]")
@@ -311,17 +515,93 @@ struct CLI {
             }
             return render(sendOrLocal(method: "keyboard.send", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl keyboard status|setup|enable|inspect|lease|navigate|send")
+            throw CLIError.usage("Usage: macctl keyboard status|setup|enable|inspect|lease|freeze|navigate|send")
         }
     }
 
     private func runControl(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl control status|perform <action> (--lease-token <token> | --app <app> --confirm)")
+            throw CLIError.usage("Usage: macctl control status|perform|batch|capabilities|capability-audit|capability-audit-batch")
         }
         switch subcommand {
         case "status":
             return render(sendOrLocal(method: "control.status", params: [:], localFallback: true))
+        case "capabilities":
+            let application = try requiredOption("--app", from: args)
+            var params: [String: JSONValue] = ["app": .string(application)]
+            if let task = try optionalOption("--task", from: args) {
+                params["task"] = .string(task)
+            }
+            if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
+                params["target_fingerprint"] = .string(targetFingerprint)
+            }
+            return render(sendOrLocal(method: "control.capabilities", params: params, localFallback: false))
+        case "capability-audit":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args))
+            ]
+            if let maxNodes = try optionalOption("--max-nodes", from: args) {
+                guard let value = Int(maxNodes), value > 0 else {
+                    throw CLIError.usage("--max-nodes must be a positive integer")
+                }
+                params["max_nodes"] = .number(Double(value))
+            }
+            if let maxDepth = try optionalOption("--max-depth", from: args) {
+                guard let value = Int(maxDepth), value >= 0 else {
+                    throw CLIError.usage("--max-depth must be a non-negative integer")
+                }
+                params["max_depth"] = .number(Double(value))
+            }
+            return render(sendOrLocal(method: "control.capability_audit", params: params, localFallback: false))
+        case "capability-audit-batch":
+            var params: [String: JSONValue] = [:]
+            if let apps = try optionalOption("--apps", from: args) {
+                let selectors = apps
+                    .split(separator: ",", omittingEmptySubsequences: true)
+                    .map { JSONValue.string(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                guard !selectors.isEmpty else {
+                    throw CLIError.usage("--apps must contain at least one app selector")
+                }
+                params["apps"] = .array(selectors)
+            }
+            if args.contains("--all-applicable") {
+                params["all_applicable"] = .bool(true)
+            }
+            if let runID = try optionalOption("--run-id", from: args) {
+                params["run_id"] = .string(runID)
+            }
+            for (option, key, minimum) in [
+                ("--max-nodes", "max_nodes", 1),
+                ("--max-depth", "max_depth", 0),
+                ("--max-apps", "max_apps", 1),
+                ("--max-concurrency", "max_concurrency", 1)
+            ] {
+                if let raw = try optionalOption(option, from: args) {
+                    guard let value = Int(raw), value >= minimum else {
+                        throw CLIError.usage("(option) must be an integer >= (minimum)")
+                    }
+                    params[key] = .number(Double(value))
+                }
+            }
+            guard params["run_id"] != nil || params["apps"] != nil || params["all_applicable"]?.boolValue == true else {
+                throw CLIError.usage("Usage: macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]")
+            }
+            guard !(params["run_id"] != nil && (params["apps"] != nil || params["all_applicable"] != nil)) else {
+                throw CLIError.usage("--run-id cannot be combined with --apps or --all-applicable")
+            }
+            return render(sendOrLocal(method: "control.capability_audit_batch", params: params, localFallback: false))
+        case "batch":
+            let application = try requiredOption("--app", from: args)
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("control batch requires --confirm")
+            }
+            guard args.contains("--actions-stdin") else {
+                throw CLIError.usage("control batch requires --actions-stdin")
+            }
+            var params = try controlBatchParameters(from: args)
+            params["app"] = .string(application)
+            params["confirm"] = .bool(true)
+            return render(sendOrLocal(method: "control.batch", params: params, localFallback: false))
         case "perform":
             guard let action = args.dropFirst().first else {
                 throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [selector options]")
@@ -344,6 +624,32 @@ struct CLI {
                 }
                 params["app"] = .string(application)
                 params["confirm"] = .bool(true)
+            }
+            if let task = try optionalOption("--task", from: args) {
+                params["task"] = .string(task)
+            }
+            if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
+                params["target_fingerprint"] = .string(targetFingerprint)
+            }
+            if let route = try optionalOption("--route", from: args) {
+                params["route"] = .string(route)
+            }
+            if action.lowercased() == "scroll" {
+                guard application != nil, leaseToken == nil else {
+                    throw CLIError.usage("Semantic scrolling requires --app <app> --confirm")
+                }
+                params["direction"] = .string(try requiredOption("--direction", from: args))
+                guard let amount = Int(try requiredOption("--amount", from: args)), amount > 0 else {
+                    throw CLIError.usage("--amount must be a positive integer")
+                }
+                params["amount"] = .number(Double(amount))
+                if let fallback = try optionalOption("--fallback", from: args) {
+                    let normalized = fallback.lowercased().replacingOccurrences(of: "-", with: "_")
+                    guard ["input_scroll", "computer_use"].contains(normalized) else {
+                        throw CLIError.usage("--fallback must be input-scroll or computer-use")
+                    }
+                    params["fallback_route"] = .string(normalized)
+                }
             }
             if let count = try optionalOption("--count", from: args) {
                 guard let value = Int(count), value > 0 else {
@@ -393,8 +699,32 @@ struct CLI {
             }
             return render(sendOrLocal(method: "control.perform", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl control status|perform <action> (--lease-token <token> | --app <app> --confirm)")
+            throw CLIError.usage("Usage: macctl control status|perform|batch|capabilities|capability-audit|capability-audit-batch")
         }
+    }
+
+    private func controlBatchParameters(from args: [String]) throws -> [String: JSONValue] {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        guard !data.isEmpty, let value = try? JSONCodec.decode(JSONValue.self, from: data) else {
+            throw CLIError.usage("--actions-stdin expects a JSON array or {\"actions\": [...]} envelope")
+        }
+        let actions: JSONValue?
+        if let array = value.arrayValue {
+            actions = .array(array)
+        } else {
+            actions = value.objectValue?["actions"]
+        }
+        guard let actions, actions.arrayValue != nil else {
+            throw CLIError.usage("--actions-stdin expects a JSON array or {\"actions\": [...]} envelope")
+        }
+        var params: [String: JSONValue] = ["actions": actions]
+        if let task = try optionalOption("--task", from: args) {
+            params["task"] = .string(task)
+        }
+        if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
+            params["target_fingerprint"] = .string(targetFingerprint)
+        }
+        return params
     }
 
     private func runTask(_ args: [String]) throws -> Int32 {
@@ -456,6 +786,47 @@ struct CLI {
         return render(sendOrLocal(method: "adapter.capabilities", params: [:], localFallback: true))
     }
 
+    private func runKeyboardFreeze(_ args: [String]) throws -> Int32 {
+        guard let action = args.first else {
+            throw CLIError.usage("Usage: macctl keyboard freeze acquire|status|release <token>")
+        }
+        switch action {
+        case "acquire":
+            let scope = try requiredOption("--scope", from: args).lowercased()
+            guard scope == KeyboardLeaseScope.session.rawValue else {
+                throw CLIError.usage("Keyboard freeze is session-only; use --scope session")
+            }
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("keyboard freeze acquire requires --confirm")
+            }
+            var params: [String: JSONValue] = [
+                "scope": .string(scope),
+                "reason": .string(try requiredOption("--reason", from: args)),
+                "confirm": .bool(true)
+            ]
+            if let seconds = try optionalOption("--seconds", from: args) {
+                guard let value = Double(seconds) else {
+                    throw CLIError.usage("--seconds must be a number")
+                }
+                params["seconds"] = .number(value)
+            }
+            return render(sendOrLocal(method: "keyboard.freeze.acquire", params: params, localFallback: false))
+        case "status":
+            return render(sendOrLocal(method: "keyboard.freeze.status", params: [:], localFallback: false))
+        case "release":
+            guard let token = args.dropFirst().first, !token.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl keyboard freeze release <token>")
+            }
+            return render(sendOrLocal(
+                method: "keyboard.freeze.release",
+                params: ["token": .string(token)],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl keyboard freeze acquire|status|release <token>")
+        }
+    }
+
     private func runKeyboardLease(_ args: [String]) throws -> Int32 {
         guard let action = args.first else {
             throw CLIError.usage("Usage: macctl keyboard lease acquire|release")
@@ -482,8 +853,16 @@ struct CLI {
                 }
                 params["seconds"] = .number(value)
             }
+            let suppressPhysicalKeyboard = args.contains("--suppress-physical-keyboard")
+            if suppressPhysicalKeyboard, scope.lowercased() != KeyboardLeaseScope.session.rawValue {
+                throw CLIError.usage("--suppress-physical-keyboard requires --scope session")
+            }
+            if suppressPhysicalKeyboard {
+                params["physical_input_mode"] = .string("suppressed")
+                params["reason"] = .string(try requiredOption("--reason", from: args))
+            }
             guard args.contains("--confirm") else {
-                throw CLIError.usage("Usage: macctl keyboard lease acquire --scope app --app \"<name>\" [--seconds N] --confirm")
+                throw CLIError.usage("Usage: macctl keyboard lease acquire --scope app|session [--seconds N] [--suppress-physical-keyboard --reason <text>] --confirm")
             }
             return render(sendOrLocal(
                 method: "keyboard.lease.acquire",
@@ -515,6 +894,14 @@ struct CLI {
     private func requiredOption(_ name: String, from args: [String]) throws -> String {
         guard let value = try optionalOption(name, from: args) else {
             throw CLIError.usage("Missing required \(name) option")
+        }
+        return value
+    }
+
+    private func requiredDoubleOption(_ name: String, from args: [String]) throws -> Double {
+        let raw = try requiredOption(name, from: args)
+        guard let value = Double(raw), value.isFinite else {
+            throw CLIError.usage("\(name) must be a finite number")
         }
         return value
     }
@@ -588,9 +975,6 @@ struct CLI {
                 if let token = response.result.objectValue?["approval"]?.objectValue?["token"]?.stringValue {
                     print("approval token: \(token)")
                 }
-                if let token = response.result.objectValue?["driving_lease_token"]?.stringValue {
-                    print("driving lease token: \(token)")
-                }
                 if let token = response.result.objectValue?["lease"]?.objectValue?["token"]?.stringValue {
                     print("keyboard lease token: \(token)")
                 }
@@ -617,19 +1001,35 @@ struct CLI {
         macctl status --json
         macctl app list [--json]
         macctl app open <name-or-bundle-id> [--background]
-        macctl workflow list|validate|prepare|run <workflow> [--background] [--driving-lease <token>] [--ephemeral-stdin]
+        macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]
         macctl approval list|approve|deny <token>
         macctl receipts list|status
         macctl release check [--json]
-        macctl iphone status|drive begin|drive end <token>|open-app <name> --driving-lease <token>
         macctl keyboard status|setup|enable --confirm|inspect
         macctl keyboard lease acquire --scope app --app "<name>" [--seconds N] --confirm
-        macctl keyboard lease acquire --scope session [--seconds N] --confirm
+        macctl keyboard lease acquire --scope session [--seconds N] [--suppress-physical-keyboard --reason <text>] --confirm
         macctl keyboard lease release <token>
+        macctl keyboard freeze acquire --scope session --seconds 30 --confirm --reason <text>
+        macctl keyboard freeze status
+        macctl keyboard freeze release <token>
         macctl keyboard navigate <command> --lease-token <token> [--count N]
         macctl keyboard send <key>... --lease-token <token>
         macctl control status [--json]
-        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--title <title>] [--role <role>]
+        macctl control capabilities --app <app> [--task <id> --target-fingerprint <fingerprint>]
+        macctl control capability-audit --app <app> [--max-nodes N] [--max-depth N]
+        macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
+        macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
+        macctl control batch --app <app> --actions-stdin --confirm [--task <id> --target-fingerprint <fingerprint>]
+        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--task <id>] [--route <route>]
+        macctl control perform scroll --app <app> --role AXScrollArea --identifier <id> --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
+        macctl route list|inspect --app <app> --task <task>
+        macctl route benchmark --app <app> --task <task> --action <action> --route <route> --confirm
+        macctl route benchmark ... --action scroll --route scroll --direction up|down|left|right --amount N [--reset-direction <opposite> --reset-amount N]
+        macctl route register --app <app> --task <task> --latency-ms <ms> --p95-ms <ms> --verification-rate <0...1> --confirm
+        macctl accessibility tree --app <app>
+        macctl accessibility audit --app <app> --manifest <path>
+        macctl ideal-state validate --manifest <path> [--json]
+        macctl ideal-state audit --app <app> --manifest <path> [--json]
         macctl task prepare|run|status|resume|cancel
         macctl task prepare --plan-stdin [--json]
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]

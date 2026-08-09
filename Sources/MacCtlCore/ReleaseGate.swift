@@ -51,6 +51,7 @@ public struct ReleaseGateSnapshot {
     public let launchAgent: LaunchAgentStatus
     public let daemonStatus: DaemonStatus?
     public let doctorReport: DoctorReport?
+    public let capabilityReport: CapabilityReport?
     public let keyboardAccessStatus: KeyboardAccessStatus?
     public let taskCapabilities: TaskCapabilityReport?
     public let checkpointStoreStatus: TaskCheckpointStoreStatus?
@@ -65,6 +66,7 @@ public struct ReleaseGateSnapshot {
         launchAgent: LaunchAgentStatus,
         daemonStatus: DaemonStatus?,
         doctorReport: DoctorReport?,
+        capabilityReport: CapabilityReport? = nil,
         receiptStoreStatus: ReceiptStoreStatus?,
         receipts: [OperationReceipt],
         socketExists: Bool,
@@ -78,6 +80,7 @@ public struct ReleaseGateSnapshot {
         self.launchAgent = launchAgent
         self.daemonStatus = daemonStatus
         self.doctorReport = doctorReport
+        self.capabilityReport = capabilityReport
         self.keyboardAccessStatus = keyboardAccessStatus
         self.taskCapabilities = taskCapabilities ?? doctorReport?.taskCapabilities
         self.checkpointStoreStatus = checkpointStoreStatus ?? doctorReport?.checkpointStore
@@ -125,7 +128,7 @@ public final class ReleaseGate {
             macWorkflowCheck(snapshot),
             keyboardAccessCheck(snapshot),
             taskControlCheck(snapshot),
-            iPhoneMirroringCheck(snapshot),
+            agentContractCheck(snapshot),
             approvalSafetyCheck(snapshot)
         ]
         let passed = checks.allSatisfy { $0.state == .passed }
@@ -147,6 +150,7 @@ public final class ReleaseGate {
         var doctorReport: DoctorReport?
         var keyboardAccessStatus: KeyboardAccessStatus?
         var daemonStatus: DaemonStatus?
+        var capabilityReport: CapabilityReport?
         var daemonError: String?
 
         if socketExists && socketOwnerOnly {
@@ -161,6 +165,18 @@ public final class ReleaseGate {
                     }
                 } else {
                     daemonError = doctorResponse.error?.message ?? "daemon doctor request was not successful"
+                }
+                let capabilitiesResponse = try client.send(RequestEnvelope(method: "capabilities"))
+                if capabilitiesResponse.status == .succeeded {
+                    do {
+                        capabilityReport = try decodeResult(CapabilityReport.self, from: capabilitiesResponse)
+                    } catch {
+                        if daemonError == nil {
+                            daemonError = "capabilities response decode failed: \(error.localizedDescription)"
+                        }
+                    }
+                } else if daemonError == nil {
+                    daemonError = capabilitiesResponse.error?.message ?? "daemon capabilities request was not successful"
                 }
                 let statusResponse = try client.send(RequestEnvelope(method: "status"))
                 if statusResponse.status == .succeeded {
@@ -205,6 +221,7 @@ public final class ReleaseGate {
             launchAgent: launchAgent,
             daemonStatus: daemonStatus,
             doctorReport: doctorReport,
+            capabilityReport: capabilityReport,
             receiptStoreStatus: receiptStoreStatus,
             receipts: receipts,
             socketExists: socketExists,
@@ -560,6 +577,47 @@ public final class ReleaseGate {
         )
     }
 
+    private func agentContractCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        guard let capabilities = snapshot.capabilityReport else {
+            return ReleaseGateCheck(
+                id: "agent.contract",
+                state: .blocked,
+                message: "The daemon did not report the provider-neutral agent contract",
+                details: ["missing": .array([.string("capabilities")])]
+            )
+        }
+        let requiredCapabilities = [
+            "control.outcome",
+            "control.batch",
+            "control.capabilities",
+            "control.capability_audit",
+            "control.capability_audit_batch",
+            "route.benchmark"
+        ]
+        let requiredSafetyMarkers = [
+            "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
+            "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
+            "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
+            "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
+            "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions"
+        ]
+        let missingCapabilities = requiredCapabilities.filter { !capabilities.capabilities.contains($0) }
+        let missingSafetyMarkers = requiredSafetyMarkers.filter { !capabilities.safety.contains($0) }
+        let missing = missingCapabilities + missingSafetyMarkers
+        return ReleaseGateCheck(
+            id: "agent.contract",
+            state: missing.isEmpty ? .passed : .blocked,
+            message: missing.isEmpty
+                ? "Agent-facing outcomes, provider handoff, bounded batching, and measured route provenance are exposed"
+                : "Agent-facing control contract is incomplete",
+            details: [
+                "missing": .array(missing.map(JSONValue.string)),
+                "capability_count": .number(Double(capabilities.capabilities.count)),
+                "safety_marker_count": .number(Double(capabilities.safety.count))
+            ]
+        )
+    }
+
     private func hasFreshTaskReceipt(
         method: String,
         status: OperationStatus = .succeeded,
@@ -573,34 +631,6 @@ public final class ReleaseGate {
                 && $0.evidence.contains { $0.kind == "task_checkpoint" }
                 && isFresh($0)
         }
-    }
-
-    private func iPhoneMirroringCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
-        let candidates = snapshot.receipts.filter {
-            $0.workflowID == "iphone.open-tinder"
-                && $0.status == .succeeded
-                && $0.verificationResult == "passed"
-                && isFresh($0)
-        }
-        guard let receipt = candidates.first else {
-            return ReleaseGateCheck(
-                id: "live.iphone-mirroring",
-                state: .blocked,
-                message: "Fresh iPhone Mirroring Tinder evidence is missing",
-                details: ["workflow": .string("iphone.open-tinder")]
-            )
-        }
-        let evidenceKinds = Set(receipt.evidence.map(\.kind))
-        let requiredKinds = Set(["mirroring_driving_lease", "ocr_anchor", "assertion"])
-        let missingKinds = requiredKinds.subtracting(evidenceKinds).sorted()
-        return ReleaseGateCheck(
-            id: "live.iphone-mirroring",
-            state: missingKinds.isEmpty ? .passed : .failed,
-            message: missingKinds.isEmpty
-                ? "Fresh Tinder foreground/visibility evidence is present"
-                : "Tinder receipt is missing required verification evidence",
-            details: ["missing_evidence": .array(missingKinds.map(JSONValue.string))]
-        )
     }
 
     private func approvalSafetyCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {

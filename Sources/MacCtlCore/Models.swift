@@ -138,6 +138,67 @@ public struct MacCtlError: Codable, Equatable {
     }
 }
 
+/// Provider-neutral machine-readable action result.  Agents can use this
+/// contract without interpreting human error strings or assuming that every
+/// failure is retryable through the same provider.
+public enum AgentActionOutcomeState: String, Codable, Equatable {
+    case verifiedSuccess = "verified_success"
+    case targetMissing = "target_missing"
+    case targetAmbiguous = "target_ambiguous"
+    case actionUnavailable = "action_unavailable"
+    case actionFailed = "action_failed"
+    case permissionBlocked = "permission_blocked"
+    case noObservedChange = "no_observed_change"
+    case verificationUnavailable = "verification_unavailable"
+    case foregroundRace = "foreground_race"
+}
+
+public struct AgentActionOutcome: Codable, Equatable {
+    public let state: AgentActionOutcomeState
+    public let provider: String
+    public let route: String?
+    public let verification: String?
+    public let failureClass: String?
+    public let fallbackAllowed: Bool
+    public let recommendedProvider: String?
+    public let freshStateRequired: Bool
+    public let nextAction: String?
+
+    public init(
+        state: AgentActionOutcomeState,
+        provider: String = "mac_control",
+        route: String? = nil,
+        verification: String? = nil,
+        failureClass: String? = nil,
+        fallbackAllowed: Bool = false,
+        recommendedProvider: String? = nil,
+        freshStateRequired: Bool = false,
+        nextAction: String? = nil
+    ) {
+        self.state = state
+        self.provider = provider
+        self.route = route
+        self.verification = verification
+        self.failureClass = failureClass
+        self.fallbackAllowed = fallbackAllowed
+        self.recommendedProvider = recommendedProvider
+        self.freshStateRequired = freshStateRequired
+        self.nextAction = nextAction
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case provider
+        case route
+        case verification
+        case failureClass = "failure_class"
+        case fallbackAllowed = "fallback_allowed"
+        case recommendedProvider = "recommended_provider"
+        case freshStateRequired = "fresh_state_required"
+        case nextAction = "next_action"
+    }
+}
+
 public struct Evidence: Codable, Equatable {
     public let kind: String
     public let message: String
@@ -165,6 +226,7 @@ public struct ResponseEnvelope: Codable, Equatable {
     public let result: JSONValue
     public let evidence: [Evidence]
     public let error: MacCtlError?
+    public let outcome: AgentActionOutcome?
 
     public init(
         requestID: String,
@@ -173,6 +235,7 @@ public struct ResponseEnvelope: Codable, Equatable {
         result: JSONValue = .object([:]),
         evidence: [Evidence] = [],
         error: MacCtlError? = nil,
+        outcome: AgentActionOutcome? = nil,
         schemaVersion: Int = 1
     ) {
         self.schemaVersion = schemaVersion
@@ -182,6 +245,7 @@ public struct ResponseEnvelope: Codable, Equatable {
         self.result = result
         self.evidence = evidence
         self.error = error
+        self.outcome = outcome
     }
 
     enum CodingKeys: String, CodingKey {
@@ -192,6 +256,7 @@ public struct ResponseEnvelope: Codable, Equatable {
         case result
         case evidence
         case error
+        case outcome
     }
 }
 
@@ -208,7 +273,6 @@ public enum RiskLevel: String, Codable, Equatable, CaseIterable {
 public enum SurfaceKind: String, Codable, Equatable, CaseIterable {
     case macDesktop = "mac_desktop"
     case macApp = "mac_app"
-    case iphoneMirroring = "iphone_mirroring"
 }
 
 public enum FocusPolicy: String, Codable, Equatable, CaseIterable {
@@ -222,6 +286,7 @@ public enum ActionKind: String, Codable, Equatable, CaseIterable {
     case click
     case type
     case key
+    case search
     case scroll
     case waitFor
     case capture
@@ -236,6 +301,15 @@ public enum SelectorTier: Int, Codable, Equatable {
     case visual = 2
     case normalizedCoordinate = 3
     case rawCoordinate = 4
+}
+
+/// The selector's addressability family.  This is descriptive metadata, not a
+/// global route precedence rule; a task manifest chooses among measured routes.
+public enum SelectorAddressability: String, Codable, Equatable, CaseIterable {
+    case accessibility
+    case visual
+    case normalizedCoordinate = "normalized_coordinate"
+    case rawCoordinate = "raw_coordinate"
 }
 
 public struct Selector: Codable, Equatable {
@@ -274,7 +348,7 @@ public struct Selector: Codable, Equatable {
         self.imageAnchor = imageAnchor
     }
 
-    public var tier: SelectorTier {
+    public var addressability: SelectorAddressability {
         if role != nil || identifier != nil || title != nil || subrole != nil {
             return .accessibility
         }
@@ -285,6 +359,19 @@ public struct Selector: Codable, Equatable {
             return .normalizedCoordinate
         }
         return .rawCoordinate
+    }
+
+    /// Compatibility projection for older workflow receipts and adapters.
+    /// New route selection must use `addressability` and the task-specific
+    /// warm-path manifest; this numeric value is not a ranking input.
+    @available(*, deprecated, message: "Use addressability; SelectorTier is a compatibility projection, not route precedence")
+    public var tier: SelectorTier {
+        switch addressability {
+        case .accessibility: return .accessibility
+        case .visual: return .visual
+        case .normalizedCoordinate: return .normalizedCoordinate
+        case .rawCoordinate: return .rawCoordinate
+        }
     }
 
     public var hasTarget: Bool {
@@ -362,6 +449,10 @@ public struct WorkflowSpec: Codable, Equatable {
     public let summary: String
     public let surface: SurfaceKind
     public let focusPolicy: FocusPolicy
+    /// Physical keyboard suppression is a separate, explicit authority.  This
+    /// flag is part of the approved workflow digest so a lease cannot silently
+    /// escalate an ordinary workflow into a keyboard freeze.
+    public let keyboardFreezeRequired: Bool
     public let actions: [ActionSpec]
     public let assertions: [AssertionSpec]
     public let recipe: String?
@@ -372,6 +463,7 @@ public struct WorkflowSpec: Codable, Equatable {
         summary: String,
         surface: SurfaceKind,
         focusPolicy: FocusPolicy = .foreground,
+        keyboardFreezeRequired: Bool = false,
         actions: [ActionSpec],
         assertions: [AssertionSpec] = [],
         recipe: String? = nil
@@ -381,6 +473,7 @@ public struct WorkflowSpec: Codable, Equatable {
         self.summary = summary
         self.surface = surface
         self.focusPolicy = focusPolicy
+        self.keyboardFreezeRequired = keyboardFreezeRequired
         self.actions = actions
         self.assertions = assertions
         self.recipe = recipe
@@ -392,6 +485,8 @@ public struct WorkflowSpec: Codable, Equatable {
         case summary
         case surface
         case focusPolicy
+        case keyboardFreezeRequired
+        case keyboardFreezeRequiredSnake = "keyboard_freeze_required"
         case actions
         case assertions
         case recipe
@@ -404,9 +499,25 @@ public struct WorkflowSpec: Codable, Equatable {
         self.summary = try container.decode(String.self, forKey: .summary)
         self.surface = try container.decode(SurfaceKind.self, forKey: .surface)
         self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        self.keyboardFreezeRequired = try container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequired)
+            ?? container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequiredSnake)
+            ?? false
         self.actions = try container.decode([ActionSpec].self, forKey: .actions)
         self.assertions = try container.decodeIfPresent([AssertionSpec].self, forKey: .assertions) ?? []
         self.recipe = try container.decodeIfPresent(String.self, forKey: .recipe)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(summary, forKey: .summary)
+        try container.encode(surface, forKey: .surface)
+        try container.encode(focusPolicy, forKey: .focusPolicy)
+        try container.encode(keyboardFreezeRequired, forKey: .keyboardFreezeRequired)
+        try container.encode(actions, forKey: .actions)
+        try container.encode(assertions, forKey: .assertions)
+        try container.encodeIfPresent(recipe, forKey: .recipe)
     }
 
     public func withFocusPolicy(_ focusPolicy: FocusPolicy) -> WorkflowSpec {
@@ -416,6 +527,7 @@ public struct WorkflowSpec: Codable, Equatable {
             summary: summary,
             surface: surface,
             focusPolicy: focusPolicy,
+            keyboardFreezeRequired: keyboardFreezeRequired,
             actions: actions,
             assertions: assertions,
             recipe: recipe
@@ -429,19 +541,36 @@ public struct AppInfo: Codable, Equatable {
     public let path: String
     public let isRunning: Bool
     public let processID: Int32?
+    public let bundleVersion: String?
 
     public init(
         name: String,
         bundleID: String?,
         path: String,
         isRunning: Bool,
-        processID: Int32?
+        processID: Int32?,
+        bundleVersion: String? = nil
     ) {
         self.name = name
         self.bundleID = bundleID
         self.path = path
         self.isRunning = isRunning
         self.processID = processID
+        self.bundleVersion = bundleVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, bundleID, path, isRunning, processID, bundleVersion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID)
+        path = try container.decode(String.self, forKey: .path)
+        isRunning = try container.decode(Bool.self, forKey: .isRunning)
+        processID = try container.decodeIfPresent(Int32.self, forKey: .processID)
+        bundleVersion = try container.decodeIfPresent(String.self, forKey: .bundleVersion)
     }
 }
 
@@ -690,6 +819,7 @@ public struct ApprovalRecord: Codable, Equatable {
     public let summary: String
     public let risk: RiskLevel
     public let focusPolicy: FocusPolicy
+    public let keyboardFreezeRequired: Bool
     public let expiresAt: Date
 
     public init(
@@ -699,6 +829,7 @@ public struct ApprovalRecord: Codable, Equatable {
         summary: String,
         risk: RiskLevel,
         focusPolicy: FocusPolicy = .foreground,
+        keyboardFreezeRequired: Bool = false,
         expiresAt: Date
     ) {
         self.token = token
@@ -707,6 +838,7 @@ public struct ApprovalRecord: Codable, Equatable {
         self.summary = summary
         self.risk = risk
         self.focusPolicy = focusPolicy
+        self.keyboardFreezeRequired = keyboardFreezeRequired
         self.expiresAt = expiresAt
     }
 
@@ -717,6 +849,8 @@ public struct ApprovalRecord: Codable, Equatable {
         case summary
         case risk
         case focusPolicy
+        case keyboardFreezeRequired
+        case keyboardFreezeRequiredSnake = "keyboard_freeze_required"
         case expiresAt
     }
 
@@ -728,7 +862,22 @@ public struct ApprovalRecord: Codable, Equatable {
         self.summary = try container.decode(String.self, forKey: .summary)
         self.risk = try container.decode(RiskLevel.self, forKey: .risk)
         self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        self.keyboardFreezeRequired = try container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequired)
+            ?? container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequiredSnake)
+            ?? false
         self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(token, forKey: .token)
+        try container.encode(operationID, forKey: .operationID)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(summary, forKey: .summary)
+        try container.encode(risk, forKey: .risk)
+        try container.encode(focusPolicy, forKey: .focusPolicy)
+        try container.encode(keyboardFreezeRequired, forKey: .keyboardFreezeRequired)
+        try container.encode(expiresAt, forKey: .expiresAt)
     }
 }
 
@@ -799,9 +948,6 @@ public enum MacCtlErrorCode: String {
     case focusChanged = "focus_changed"
     case launchAgentUnhealthy = "launch_agent_unhealthy"
     case receiptUnavailable = "receipt_unavailable"
-    case mirroringDrivingLeaseRequired = "mirroring_driving_lease_required"
-    case mirroringDrivingLeaseHeld = "mirroring_driving_lease_held"
-    case mirroringDrivingLeaseInvalid = "mirroring_driving_lease_invalid"
     case keyboardAccessDisabled = "keyboard_access_disabled"
     case keyboardConfirmationRequired = "keyboard_confirmation_required"
     case keyboardEnableVerificationFailed = "keyboard_enable_verification_failed"
@@ -810,6 +956,9 @@ public enum MacCtlErrorCode: String {
     case keyboardLeaseExpired = "keyboard_lease_expired"
     case keyboardLeaseConflict = "keyboard_lease_conflict"
     case keyboardLeaseInvalid = "keyboard_lease_invalid"
+    case keyboardPhysicalSuppressionUnavailable = "keyboard_physical_suppression_unavailable"
+    case keyboardPhysicalSuppressionRequiresSession = "keyboard_physical_suppression_requires_session"
+    case keyboardFreezeReasonRequired = "keyboard_freeze_reason_required"
     case keyboardFocusChanged = "keyboard_focus_changed"
     case keyboardFocusUnavailable = "keyboard_focus_unavailable"
     case keyboardCommandInvalid = "keyboard_command_invalid"
@@ -832,6 +981,12 @@ public enum MacCtlErrorCode: String {
     case taskCheckpointUnavailable = "task_checkpoint_unavailable"
     case adapterUnsupported = "adapter_unsupported"
     case adapterPermissionMissing = "adapter_permission_missing"
+    case routeSelectionBlocked = "route_selection_blocked"
+    case routeBenchmarkBlocked = "route_benchmark_blocked"
+    case scrollFallbackRequired = "scroll_fallback_required"
+    case scrollVerificationUnavailable = "scroll_verification_unavailable"
+    case accessibilityTreeUnavailable = "accessibility_tree_unavailable"
+    case accessibilityAuditFailed = "accessibility_audit_failed"
 }
 
 struct ApprovalDigestPayload: Codable {

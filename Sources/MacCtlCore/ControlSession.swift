@@ -2,10 +2,13 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-public enum ControlActionRoute: String, Codable, Equatable {
+public enum ControlActionRoute: String, Codable, Equatable, Hashable {
     case accessibility
     case keyboard
     case visual
+    case normalizedCoordinate = "normalized_coordinate"
+    case rawCoordinate = "raw_coordinate"
+    case scroll
 }
 
 public enum ControlVerificationState: String, Codable, Equatable {
@@ -175,6 +178,8 @@ public struct SemanticActionReport: Codable, Equatable {
     public let keyCount: Int
     public let targetApplication: AppInfo
     public let verification: ControlActionVerification
+    public let fallbackChain: [ControlActionRoute]
+    public let routeSelection: RouteSelectionReport?
 
     public init(
         action: String,
@@ -182,7 +187,9 @@ public struct SemanticActionReport: Codable, Equatable {
         fallbackUsed: Bool,
         keyCount: Int,
         targetApplication: AppInfo,
-        verification: ControlActionVerification
+        verification: ControlActionVerification,
+        fallbackChain: [ControlActionRoute] = [],
+        routeSelection: RouteSelectionReport? = nil
     ) {
         self.action = action
         self.route = route
@@ -190,6 +197,8 @@ public struct SemanticActionReport: Codable, Equatable {
         self.keyCount = keyCount
         self.targetApplication = targetApplication
         self.verification = verification
+        self.fallbackChain = fallbackChain
+        self.routeSelection = routeSelection
     }
 }
 
@@ -431,7 +440,7 @@ public final class VisualControlFallback: VisualActionPerforming {
 
     @discardableResult
     public func activate(selector: Selector, application: AppInfo) throws -> CGRect {
-        switch selector.tier {
+        switch selector.addressability {
         case .visual:
             let frame = try captureController.capture(surface: .macApp, app: application.name)
             if let text = selector.containsText {
@@ -515,73 +524,71 @@ public final class SemanticActionRouter {
         leaseToken: String,
         count: Int,
         interKeyDelay: TimeInterval,
-        allowRawCoordinate: Bool
+        allowRawCoordinate: Bool,
+        requestedRoute: ControlActionRoute? = nil,
+        fallbackChain: [ControlActionRoute] = [],
+        routeSelection: RouteSelectionReport? = nil
     ) throws -> SemanticActionReport {
-        if let selector {
-            guard selector.hasTarget else { throw SemanticActionRouterError.invalidSelector }
-            switch selector.tier {
-            case .accessibility:
-                if command == .activate,
-                   let report = try accessibilityFirst(
-                       command: command,
-                       selector: selector,
-                       leaseToken: leaseToken
-                   ) {
-                    return report
-                }
-            case .visual, .normalizedCoordinate, .rawCoordinate:
-                guard command == .activate else {
-                    throw SemanticActionRouterError.selectorRequiresActivate
-                }
-                if selector.tier == .rawCoordinate, !allowRawCoordinate {
-                    throw SemanticActionRouterError.rawCoordinateRequiresExplicitOptIn
-                }
-                let context = try session.beginAction(
-                    leaseToken: leaseToken,
-                    requireFullKeyboardAccess: false
-                )
-                _ = try session.revalidate(context)
-                _ = try visualActionController.activate(
+        if let selector, !selector.hasTarget {
+            throw SemanticActionRouterError.invalidSelector
+        }
+        let initialRoute = requestedRoute ?? routeForSelector(selector)
+        let routes = deduplicatedRoutes([initialRoute] + fallbackChain)
+        var lastPreActionError: AccessibilityControllerError?
+        for (index, route) in routes.enumerated() {
+            do {
+                return try perform(
+                    route: route,
+                    command: command,
                     selector: selector,
-                    application: context.foregroundApplication
+                    leaseToken: leaseToken,
+                    count: count,
+                    interKeyDelay: interKeyDelay,
+                    allowRawCoordinate: allowRawCoordinate,
+                    fallbackUsed: index > 0,
+                    fallbackChain: Array(routes.dropFirst()),
+                    routeSelection: routeSelection
                 )
-                let verification = try session.completeAction(
-                    context,
-                    action: command.rawValue,
-                    route: .visual
-                )
-                return SemanticActionReport(
-                    action: command.rawValue,
-                    route: .visual,
-                    fallbackUsed: false,
-                    keyCount: 0,
-                    targetApplication: verification.foregroundAfter,
-                    verification: verification
-                )
+            } catch let error as AccessibilityControllerError {
+                // A missing target is the only pre-action failure that can
+                // advance through an explicitly declared chain. Ambiguity,
+                // action failure, and verification failures stop immediately.
+                if case .elementNotFound = error, index + 1 < routes.count {
+                    lastPreActionError = error
+                    continue
+                }
+                throw error
             }
         }
-        return try keyboard(
-            command: command,
-            leaseToken: leaseToken,
-            count: count,
-            interKeyDelay: interKeyDelay,
-            fallbackUsed: selector?.tier == .accessibility
-        )
+        if let lastPreActionError { throw lastPreActionError }
+        throw SemanticActionRouterError.invalidSelector
     }
 
-    private func accessibilityFirst(
+    private func perform(
+        route: ControlActionRoute,
         command: KeyboardCommand,
-        selector: Selector,
-        leaseToken: String
-    ) throws -> SemanticActionReport? {
-        let context = try session.beginAction(
-            leaseToken: leaseToken,
-            requireFullKeyboardAccess: false
-        )
-        guard let pid = context.foregroundApplication.processID else {
-            throw KeyboardControlError.foregroundUnavailable
-        }
-        do {
+        selector: Selector?,
+        leaseToken: String,
+        count: Int,
+        interKeyDelay: TimeInterval,
+        allowRawCoordinate: Bool,
+        fallbackUsed: Bool,
+        fallbackChain: [ControlActionRoute],
+        routeSelection: RouteSelectionReport?
+    ) throws -> SemanticActionReport {
+        switch route {
+        case .accessibility:
+            guard command == .activate, let selector,
+                  selector.addressability == .accessibility else {
+                throw SemanticActionRouterError.invalidSelector
+            }
+            let context = try session.beginAction(
+                leaseToken: leaseToken,
+                requireFullKeyboardAccess: false
+            )
+            guard let pid = context.foregroundApplication.processID else {
+                throw KeyboardControlError.foregroundUnavailable
+            }
             _ = try session.revalidate(context)
             _ = try accessibilityActionController.press(pid: pid, selector: selector)
             let verification = try session.completeAction(
@@ -592,18 +599,66 @@ public final class SemanticActionRouter {
             return SemanticActionReport(
                 action: command.rawValue,
                 route: .accessibility,
-                fallbackUsed: false,
+                fallbackUsed: fallbackUsed,
                 keyCount: 0,
                 targetApplication: verification.foregroundAfter,
-                verification: verification
+                verification: verification,
+                fallbackChain: fallbackChain,
+                routeSelection: routeSelection
             )
-        } catch let error as AccessibilityControllerError {
-            switch error {
-            case .elementNotFound, .actionFailed:
-                return nil
-            case .permissionDenied, .boundsUnavailable, .ambiguousMatch, .unreadableFocus:
-                throw error
+        case .keyboard:
+            return try keyboard(
+                command: command,
+                leaseToken: leaseToken,
+                count: count,
+                interKeyDelay: interKeyDelay,
+                fallbackUsed: fallbackUsed,
+                fallbackChain: fallbackChain,
+                routeSelection: routeSelection
+            )
+        case .visual, .normalizedCoordinate, .rawCoordinate:
+            guard command == .activate, let selector,
+                  selector.hasTarget else {
+                throw SemanticActionRouterError.selectorRequiresActivate
             }
+            let selectorRoute: ControlActionRoute = switch selector.addressability {
+            case .visual: .visual
+            case .normalizedCoordinate: .normalizedCoordinate
+            case .rawCoordinate: .rawCoordinate
+            case .accessibility: .accessibility
+            }
+            guard selectorRoute == route || (route == .visual && selector.addressability == .visual) else {
+                throw SemanticActionRouterError.invalidSelector
+            }
+            if route == .rawCoordinate, !allowRawCoordinate {
+                throw SemanticActionRouterError.rawCoordinateRequiresExplicitOptIn
+            }
+            let context = try session.beginAction(
+                leaseToken: leaseToken,
+                requireFullKeyboardAccess: false
+            )
+            _ = try session.revalidate(context)
+            _ = try visualActionController.activate(
+                selector: selector,
+                application: context.foregroundApplication
+            )
+            let verification = try session.completeAction(
+                context,
+                action: command.rawValue,
+                route: route
+            )
+            return SemanticActionReport(
+                action: command.rawValue,
+                route: route,
+                fallbackUsed: fallbackUsed,
+                keyCount: 0,
+                targetApplication: verification.foregroundAfter,
+                verification: verification,
+                fallbackChain: fallbackChain,
+                routeSelection: routeSelection
+            )
+        case .scroll:
+            throw SemanticActionRouterError.selectorRequiresActivate
         }
     }
 
@@ -612,7 +667,9 @@ public final class SemanticActionRouter {
         leaseToken: String,
         count: Int,
         interKeyDelay: TimeInterval,
-        fallbackUsed: Bool
+        fallbackUsed: Bool,
+        fallbackChain: [ControlActionRoute],
+        routeSelection: RouteSelectionReport?
     ) throws -> SemanticActionReport {
         let context = try session.beginAction(
             leaseToken: leaseToken,
@@ -640,7 +697,24 @@ public final class SemanticActionRouter {
             fallbackUsed: fallbackUsed,
             keyCount: report.keyCount,
             targetApplication: verification.foregroundAfter,
-            verification: verification
+            verification: verification,
+            fallbackChain: fallbackChain,
+            routeSelection: routeSelection
         )
+    }
+
+    private func routeForSelector(_ selector: Selector?) -> ControlActionRoute {
+        guard let selector else { return .keyboard }
+        switch selector.addressability {
+        case .accessibility: return .accessibility
+        case .visual: return .visual
+        case .normalizedCoordinate: return .normalizedCoordinate
+        case .rawCoordinate: return .rawCoordinate
+        }
+    }
+
+    private func deduplicatedRoutes(_ routes: [ControlActionRoute]) -> [ControlActionRoute] {
+        var seen = Set<ControlActionRoute>()
+        return routes.filter { seen.insert($0).inserted }
     }
 }

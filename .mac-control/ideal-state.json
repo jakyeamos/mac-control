@@ -1,0 +1,213 @@
+{
+  "schema": "mac-control-task-manifest/v1",
+  "repository_id": "repo-9d391fb754b67008",
+  "repository_name": "mac-control",
+  "applicability": "applicable",
+  "applicability_reason": "mac-control packages the supported macOS daemon status item and approval HUD; this manifest records its supported user-facing workflow catalog while live and measured evidence remain outstanding.",
+  "app": {
+    "name": "macctld",
+    "bundle_id": "com.jakyeamos.macctl.daemon"
+  },
+  "criteria": {
+    "stable_identity": true,
+    "correct_semantics": true,
+    "observable_state": true,
+    "useful_hierarchy": true,
+    "efficient_navigation": true,
+    "verifiable_outcomes": true,
+    "route_flexibility": true,
+    "stable_change_behavior": true
+  },
+  "tasks": [
+    {
+      "task_id": "inspect-approval-window",
+      "stable_target_id": "macctl.approval.window",
+      "hierarchy": "macctl > approval > window",
+      "semantic_action": "inspect pending approvals",
+      "observable_postcondition": "Approval records, risk, expiry, and state are readable",
+      "observable_states": [
+        "enabled",
+        "focused",
+        "selected",
+        "expanded",
+        "visible",
+        "loading",
+        "completed"
+      ],
+      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
+      "eligible_routes": [
+        "native_api",
+        "adapter",
+        "accessibility",
+        "keyboard"
+      ],
+      "selected_route": "adapter",
+      "change_states": [
+        "loading",
+        "modal",
+        "disabled",
+        "permission_unavailable"
+      ],
+      "accessibility": {
+        "identifier": "macctl.approval.window",
+        "label": "Approval list",
+        "role": "AXWebArea",
+        "required_actions": [
+          "AXFocus"
+        ]
+      }
+    },
+    {
+      "task_id": "approve-exact-plan",
+      "stable_target_id": "macctl.approval.exact-plan",
+      "hierarchy": "macctl > approval > exact-plan",
+      "semantic_action": "approve the exact task plan",
+      "observable_postcondition": "Approval is consumed only for matching plan and receipt is readable",
+      "observable_states": [
+        "enabled",
+        "focused",
+        "selected",
+        "expanded",
+        "visible",
+        "loading",
+        "completed"
+      ],
+      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
+      "eligible_routes": [
+        "native_api",
+        "adapter",
+        "accessibility",
+        "keyboard"
+      ],
+      "selected_route": "adapter",
+      "change_states": [
+        "loading",
+        "modal",
+        "disabled",
+        "permission_unavailable"
+      ],
+      "accessibility": {
+        "identifier": "macctl.approval.exact-plan",
+        "label": "Approve exact plan",
+        "role": "AXButton",
+        "required_actions": [
+          "AXPress"
+        ]
+      }
+    },
+    {
+      "task_id": "audit-ideal-state",
+      "stable_target_id": "macctl.ideal-state.audit",
+      "hierarchy": "macctl > ideal-state > audit",
+      "semantic_action": "run ideal-state audit",
+      "observable_postcondition": "Criteria, task contracts, and explicit pass/fail are readable",
+      "observable_states": [
+        "enabled",
+        "focused",
+        "selected",
+        "expanded",
+        "visible",
+        "loading",
+        "completed"
+      ],
+      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
+      "eligible_routes": [
+        "native_api",
+        "adapter",
+        "accessibility",
+        "keyboard"
+      ],
+      "selected_route": "adapter",
+      "change_states": [
+        "loading",
+        "modal",
+        "disabled",
+        "permission_unavailable"
+      ],
+      "accessibility": {
+        "identifier": "macctl.ideal-state.audit",
+        "label": "Ideal-state audit",
+        "role": "AXWebArea",
+        "required_actions": [
+          "AXFocus"
+        ]
+      }
+    },
+    {
+      "task_id": "inspect-accessibility-tree",
+      "stable_target_id": "macctl.accessibility.tree",
+      "hierarchy": "macctl > accessibility > tree",
+      "semantic_action": "inspect the accessibility tree",
+      "observable_postcondition": "Target hierarchy and stable identifiers are readable",
+      "observable_states": [
+        "enabled",
+        "focused",
+        "selected",
+        "expanded",
+        "visible",
+        "loading",
+        "completed"
+      ],
+      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
+      "eligible_routes": [
+        "native_api",
+        "adapter",
+        "accessibility",
+        "keyboard"
+      ],
+      "selected_route": "adapter",
+      "change_states": [
+        "loading",
+        "modal",
+        "disabled",
+        "permission_unavailable"
+      ],
+      "accessibility": {
+        "identifier": "macctl.accessibility.tree",
+        "label": "Accessibility tree",
+        "role": "AXWebArea",
+        "required_actions": [
+          "AXFocus"
+        ]
+      }
+    },
+    {
+      "task_id": "prepare-exact-task",
+      "stable_target_id": "macctl.task.prepare",
+      "hierarchy": "macctl > task > prepare",
+      "semantic_action": "prepare an exact task plan",
+      "observable_postcondition": "Plan digest, approval requirement, and expiry are readable",
+      "observable_states": [
+        "enabled",
+        "focused",
+        "selected",
+        "expanded",
+        "visible",
+        "loading",
+        "completed"
+      ],
+      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
+      "eligible_routes": [
+        "native_api",
+        "adapter",
+        "accessibility",
+        "keyboard"
+      ],
+      "selected_route": "adapter",
+      "change_states": [
+        "loading",
+        "modal",
+        "disabled",
+        "permission_unavailable"
+      ],
+      "accessibility": {
+        "identifier": "macctl.task.prepare",
+        "label": "Prepare task",
+        "role": "AXWebArea",
+        "required_actions": [
+          "AXFocus"
+        ]
+      }
+    }
+  ]
+}

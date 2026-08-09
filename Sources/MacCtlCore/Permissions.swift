@@ -20,7 +20,7 @@ public enum PermissionDiagnostics {
             PermissionStatus(
                 name: "Input Monitoring",
                 state: listenEvents ? "granted" : "missing",
-                requiredFor: "Caps Lock double-tap event monitoring",
+                requiredFor: "Caps Lock double-tap monitoring and explicit physical keyboard freeze",
                 instruction: "\(instructions) > Input Monitoring: enable \(packagedDaemon)"
             ),
             PermissionStatus(
@@ -57,7 +57,7 @@ public enum PermissionDiagnostics {
             PermissionStatus(
                 name: "Input Monitoring",
                 state: "unknown",
-                requiredFor: "Caps Lock double-tap event monitoring",
+                requiredFor: "Caps Lock double-tap monitoring and explicit physical keyboard freeze",
                 instruction: "Start the packaged macctld daemon before evaluating permissions"
             ),
             PermissionStatus(

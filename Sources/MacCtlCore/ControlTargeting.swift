@@ -154,7 +154,7 @@ public enum ControlTargetFingerprints {
         let processValue = digest(String(application.processID ?? 0))
         let windowValue = window.identityFingerprint
             ?? digest("visible=\(window.visible)|modal=\(window.modal)")
-        let focusValue = digest([
+        let focusValue = focus?.identityFingerprint ?? digest([
             focus?.role ?? "",
             focus?.subrole ?? "",
             focus?.identifier ?? "",

@@ -34,6 +34,27 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("task-checkpoints", isDirectory: true)
     }
 
+    /// App/task/target-specific measured route manifests.  These are kept
+    /// separate from receipts so a stale benchmark can never masquerade as a
+    /// completed operation.
+    public static var warmPathsDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("warm-paths", isDirectory: true)
+    }
+
+    /// Broad, read-only AX/provider capability profiles. These are separate
+    /// from warm-path route manifests so a capability audit can never become
+    /// latency-ranking authority.
+    public static var capabilityProfilesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("capability-profiles", isDirectory: true)
+    }
+
+    /// Resumable, per-application read-only capability audit runs. These
+    /// receipts are separate from individual capability profiles so a batch
+    /// can resume without changing the hot-path cache contract.
+    public static var capabilityAuditBatchesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("capability-audit-batches", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -73,7 +94,10 @@ public enum MacCtlPaths {
             logDirectory,
             workflowDirectory,
             receiptsDirectory,
-            taskCheckpointsDirectory
+            taskCheckpointsDirectory,
+            warmPathsDirectory,
+            capabilityProfilesDirectory,
+            capabilityAuditBatchesDirectory
         ]
         for directory in directories {
             try FileManager.default.createDirectory(

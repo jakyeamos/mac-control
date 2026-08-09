@@ -1,12 +1,126 @@
 import Foundation
 
+private struct RouteSelectionResolution {
+    let report: RouteSelectionReport?
+    let cacheHit: Bool
+}
+
+private struct ControlActionExecution {
+    let report: SemanticActionReport
+    let foregroundFastPathUsed: Bool
+    let routeSelectionCacheHit: Bool
+}
+
+private struct RouteSelectionCacheEntry {
+    let leaseToken: String
+    let application: AppInfo
+    let taskID: String
+    let targetFingerprint: String
+    let manifest: WarmPathManifest
+}
+
+private struct ControlBatchExecutionError: Error, LocalizedError {
+    let failedIndex: Int
+    let completedCount: Int
+    let cause: String
+
+    var errorDescription: String? {
+        "control.batch stopped at action \(failedIndex) after \(completedCount) completed action(s): \(cause)"
+    }
+
+    var details: [String: JSONValue] {
+        [
+            "failed_index": .number(Double(failedIndex)),
+            "completed_count": .number(Double(completedCount)),
+            "lease_released": .bool(true),
+            "cause": .string(cause),
+            "fresh_state_required": .bool(true),
+            "recommended_provider": .string("mac_control")
+        ]
+    }
+}
+
+private enum RouteBenchmarkError: Error, LocalizedError {
+    case verificationFailed(route: ControlActionRoute, sample: Int, state: ControlVerificationState)
+    case scrollVerificationFailed(route: ControlActionRoute, sample: Int, state: ScrollVerificationState)
+    case routeMismatch(expected: ControlActionRoute, actual: ControlActionRoute)
+
+    var errorDescription: String? {
+        switch self {
+        case let .verificationFailed(route, sample, state):
+            return "Daemon benchmark sample \(sample) for \(route.rawValue) did not reach verified state (observed \(state.rawValue)); no route manifest was written"
+        case let .scrollVerificationFailed(route, sample, state):
+            return "Daemon benchmark sample \(sample) for \(route.rawValue) did not reach verified state (observed \(state.rawValue)); no route manifest was written"
+        case let .routeMismatch(expected, actual):
+            return "Daemon benchmark requested \(expected.rawValue) but executed \(actual.rawValue); no route manifest was written"
+        }
+    }
+}
+
+private struct SemanticScrollFailure: Error, LocalizedError {
+    let failureClass: SemanticScrollFailureClass
+    let message: String
+    let recommendedProvider: ScrollFallbackRoute?
+    let freshStateRequired: Bool
+    let fallbackAllowed: Bool
+    let requestedFallback: ScrollFallbackRoute?
+    let localFallbackDispatched: Bool
+    let localFallbackVerification: ScrollVerificationState?
+
+    var errorDescription: String? { message }
+
+    var details: [String: JSONValue] {
+        var details: [String: JSONValue] = [
+            "failure_class": .string(failureClass.rawValue),
+            "fallback_allowed": .bool(fallbackAllowed),
+            "fresh_state_required": .bool(freshStateRequired),
+            "local_fallback_dispatched": .bool(localFallbackDispatched)
+        ]
+        if let recommendedProvider {
+            details["recommended_provider"] = .string(recommendedProvider.rawValue)
+        }
+        if let requestedFallback {
+            details["requested_fallback"] = .string(requestedFallback.rawValue)
+        }
+        if let localFallbackVerification {
+            details["local_fallback_verification"] = .string(localFallbackVerification.rawValue)
+        }
+        return details
+    }
+}
+
+private enum SemanticScrollExecution {
+    case accessibility(AccessibilityScrollReport)
+    case input(InputScrollReport, from: SemanticScrollFailureClass)
+}
+
+private struct CapabilityAuditExecution {
+    let profile: CapabilityAuditProfile
+    let initialMaxNodes: Int
+    let initialMaxDepth: Int
+    let effectiveMaxNodes: Int
+    let effectiveMaxDepth: Int
+    let attempts: Int
+    let traversalMode: String
+    let coverage: AccessibilityTreeCoverage?
+    let windowedAttempted: Bool
+
+    var adaptiveRetry: Bool { attempts > 1 }
+    var coverageComplete: Bool {
+        coverage?.complete ?? !profile.treeTruncated
+    }
+    var exhausted: Bool {
+        profile.treeTruncated
+            && effectiveMaxNodes == CapabilityAuditBounds.maximumNodes
+            && effectiveMaxDepth == CapabilityAuditBounds.maximumDepth
+    }
+}
+
 public final class MacCtlService {
     private let appController: AppController
     private let workflowRegistry: WorkflowRegistry
     private let workflowExecutor: WorkflowExecutor
     private let approvalStore: ApprovalStore
-    private let iphoneController: IPhoneMirroringController
-    private let iphoneDrivingLeaseStore: IPhoneMirroringDrivingLeaseStore
     private let keyboardAccessController: KeyboardAccessController
     private let keyboardDriveStore: KeyboardDriveStore
     private let taskApprovalStore: TaskApprovalStore
@@ -15,6 +129,12 @@ public final class MacCtlService {
     private let adapterRegistry: AppAdapterRegistry
     private let targetInspector: ControlTargetInspecting
     private let focusedElementInspector: FocusedElementInspecting
+    private let accessibilityTreeInspector: AccessibilityTreeInspecting
+    private let accessibilityScrollPerformer: AccessibilityScrollPerforming
+    private let inputScrollPerformer: InputScrollPerforming
+    private let warmPathStore: WarmPathStore
+    private let capabilityProfileStore: CapabilityProfileStore
+    private let capabilityAuditBatchStore: CapabilityAuditBatchStore
     private let controlSession: ControlSession
     private let semanticActionRouter: SemanticActionRouter
     private let foregroundApplication: () -> AppInfo?
@@ -28,6 +148,10 @@ public final class MacCtlService {
     private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
     private let executionLock = NSLock()
+    // Access is serialized by executionLock. The cache is deliberately held
+    // only by a single keyboard lease and re-runs permission selection on
+    // every action, so a warm manifest cannot bypass a changed permission gate.
+    private var routeSelectionCache: RouteSelectionCacheEntry?
 
     public init(
         appController: AppController = AppController(),
@@ -37,7 +161,6 @@ public final class MacCtlService {
         logger: SafeLog = SafeLog(),
         receiptStore: OperationReceiptStore = OperationReceiptStore(),
         permissionContext: String = "daemon",
-        iphoneDrivingLeaseStore: IPhoneMirroringDrivingLeaseStore = IPhoneMirroringDrivingLeaseStore(),
         keyboardAccessController: KeyboardAccessController = KeyboardAccessController(),
         keyboardDriveStore: KeyboardDriveStore = KeyboardDriveStore(),
         taskApprovalStore: TaskApprovalStore = TaskApprovalStore(),
@@ -55,7 +178,13 @@ public final class MacCtlService {
         resolveApplication: ((String) throws -> AppInfo)? = nil,
         activateApplication: ((String) throws -> AppInfo)? = nil,
         foregroundStabilityVerifier: ControlStateVerifier? = nil,
-        hasPostEventAccess: (() -> Bool)? = nil
+        hasPostEventAccess: (() -> Bool)? = nil,
+        warmPathStore: WarmPathStore = WarmPathStore(),
+        capabilityProfileStore: CapabilityProfileStore = CapabilityProfileStore(),
+        accessibilityTreeInspector: AccessibilityTreeInspecting? = nil,
+        accessibilityScrollPerformer: AccessibilityScrollPerforming? = nil,
+        inputScrollPerformer: InputScrollPerforming? = nil,
+        capabilityAuditBatchStore: CapabilityAuditBatchStore = CapabilityAuditBatchStore()
     ) {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
@@ -64,13 +193,17 @@ public final class MacCtlService {
         self.logger = logger
         self.receiptStore = receiptStore
         self.permissionContext = permissionContext
-        self.iphoneDrivingLeaseStore = iphoneDrivingLeaseStore
         self.keyboardAccessController = keyboardAccessController
         self.keyboardDriveStore = keyboardDriveStore
         self.taskApprovalStore = taskApprovalStore
         self.taskCheckpointStore = taskCheckpointStore
         self.adapterRegistry = adapterRegistry
         let defaultAccessibilityController = AccessibilityController()
+        self.warmPathStore = warmPathStore
+        self.capabilityProfileStore = capabilityProfileStore
+        self.capabilityAuditBatchStore = capabilityAuditBatchStore
+        self.accessibilityTreeInspector = accessibilityTreeInspector ?? defaultAccessibilityController
+        self.accessibilityScrollPerformer = accessibilityScrollPerformer ?? defaultAccessibilityController
         let resolvedTargetInspector = targetInspector
             ?? AccessibilityTargetInspector(accessibility: defaultAccessibilityController)
         self.targetInspector = resolvedTargetInspector
@@ -97,6 +230,7 @@ public final class MacCtlService {
             }
         )
         self.controlSession = resolvedControlSession
+        self.inputScrollPerformer = inputScrollPerformer ?? inputController
         let resolvedSemanticActionRouter = semanticActionRouter ?? SemanticActionRouter(
             session: resolvedControlSession,
             keyboardAccessController: keyboardAccessController,
@@ -108,17 +242,21 @@ public final class MacCtlService {
                 )
         )
         self.semanticActionRouter = resolvedSemanticActionRouter
-        let resolvedIPhoneController = IPhoneMirroringController(
-            appController: appController,
-            captureController: captureController,
-            inputController: inputController
-        )
-        self.iphoneController = resolvedIPhoneController
         self.workflowExecutor = WorkflowExecutor(
             appController: appController,
             inputController: inputController,
             captureController: captureController,
-            iphoneController: resolvedIPhoneController
+            keyboardAccessController: keyboardAccessController,
+            keyboardDriveStore: keyboardDriveStore,
+            controlSession: resolvedControlSession,
+            semanticActionRouter: resolvedSemanticActionRouter,
+            searchFieldResolver: defaultAccessibilityController,
+            focusedElementInspector: resolvedFocusedElementInspector,
+            foregroundApplication: resolvedForegroundApplication,
+            hasPostEventAccess: resolvedPostEventAccess,
+            fullKeyboardAccessEnabled: {
+                keyboardAccessController.status(permissionContext: permissionContext).fullKeyboardAccessEnabled == true
+            }
         )
         let resolvedTaskExecutor = taskActionExecutor ?? MacTaskActionExecutor(
             appController: appController,
@@ -181,7 +319,7 @@ public final class MacCtlService {
                     return snapshot
                 }
                 if let selector = target?.selector,
-                   selector.tier == .accessibility,
+                   selector.addressability == .accessibility,
                    let pid = application.processID {
                     do {
                         _ = try defaultAccessibilityController.findElement(pid: pid, selector: selector)
@@ -229,6 +367,11 @@ public final class MacCtlService {
         return response
     }
 
+    public func shutdown() {
+        routeSelectionCache = nil
+        keyboardDriveStore.shutdown()
+    }
+
     private func execute(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         switch request.method {
             case "doctor":
@@ -249,6 +392,12 @@ public final class MacCtlService {
                 return try acquireKeyboardLease(request)
             case "keyboard.lease.release":
                 return try releaseKeyboardLease(request)
+            case "keyboard.freeze.acquire":
+                return try acquireKeyboardFreeze(request)
+            case "keyboard.freeze.status":
+                return try keyboardFreezeStatus(request)
+            case "keyboard.freeze.release":
+                return try releaseKeyboardFreeze(request)
             case "keyboard.navigate":
                 return try navigateKeyboard(request)
             case "keyboard.send":
@@ -280,6 +429,28 @@ public final class MacCtlService {
                 return try controlStatus(request)
             case "control.perform":
                 return try performControlAction(request)
+            case "control.batch":
+                return try performControlBatch(request)
+            case "control.capabilities":
+                return try controlCapabilities(request)
+            case "control.capability_audit":
+                return try controlCapabilityAudit(request)
+            case "control.capability_audit_batch":
+                return try controlCapabilityAuditBatch(request)
+            case "route.list":
+                return try routeList(request)
+            case "route.inspect":
+                return try routeInspect(request)
+            case "route.benchmark":
+                return try routeBenchmark(request)
+            case "route.register":
+                return try routeRegister(request)
+            case "accessibility.tree":
+                return try accessibilityTree(request)
+            case "accessibility.audit":
+                return try accessibilityAudit(request)
+            case "ideal-state.audit":
+                return try idealStateAudit(request)
             case "app.list":
                 return try success(request, value: appController.listApplications())
             case "app.open":
@@ -326,38 +497,6 @@ public final class MacCtlService {
                 return try success(request, value: receiptStore.status())
             case "logs":
                 return try success(request, value: ["lines": logger.tail()])
-            case "iphone.status":
-                return try success(request, value: iphoneController.state())
-            case "iphone.drive.begin":
-                return try beginIPhoneDrivingLease(request)
-            case "iphone.drive.end":
-                return try endIPhoneDrivingLease(request)
-            case "iphone.open-app":
-                let appName = try requiredString(request, key: "name")
-                let drivingLease = try requiredIPhoneDrivingLease(from: request)
-                let match = try withExecutionLock {
-                    try iphoneController.openMirroredApp(appName, drivingLease: drivingLease)
-                }
-                return try success(
-                    request,
-                    result: [
-                        "app": .string(appName),
-                        "anchor_x": .number(Double(match.bounds.midX)),
-                        "anchor_y": .number(Double(match.bounds.midY))
-                    ],
-                    evidence: [
-                        Evidence(
-                            kind: "mirroring_driving_lease",
-                            message: "Synthetic Mirroring navigation ran under an active user-held exclusive driving lease",
-                            source: "macctld"
-                        ),
-                        Evidence(
-                            kind: "ocr_anchor",
-                            message: "Mirrored app located and clicked by OCR",
-                            source: "iPhone Mirroring"
-                        )
-                    ]
-                )
             default:
                 return failure(
                     request,
@@ -370,6 +509,11 @@ public final class MacCtlService {
 
     public func localReadOnlyHandle(_ request: RequestEnvelope) -> ResponseEnvelope {
         handle(request)
+    }
+
+    public func isApprovalPending(token: String) -> Bool {
+        approvalStore.list().contains { $0.token == token }
+            || taskApprovalStore.list().contains { $0.token == token }
     }
 
     private func keyboardStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -441,9 +585,14 @@ public final class MacCtlService {
         guard let scope = KeyboardLeaseScope(rawValue: rawScope) else {
             throw KeyboardControlError.invalidSequence("scope")
         }
+        let rawPhysicalInputMode = request.params["physical_input_mode"]?.stringValue ?? "shared"
+        guard let physicalInputMode = KeyboardPhysicalInputMode(rawValue: rawPhysicalInputMode.lowercased()) else {
+            throw KeyboardControlError.invalidSequence("physical_input_mode")
+        }
         guard hasPostEventAccess() else {
             throw KeyboardControlError.permissionDenied("Post Events")
         }
+        let freezeReason = request.params["reason"]?.stringValue
         let application: AppInfo?
         switch scope {
         case .app:
@@ -469,21 +618,47 @@ public final class MacCtlService {
             scope: scope,
             application: application,
             seconds: try requestedKeyboardLifetime(from: request),
-            confirm: request.params["confirm"]?.boolValue == true
+            confirm: request.params["confirm"]?.boolValue == true,
+            physicalInputMode: physicalInputMode,
+            freezeReason: freezeReason
         )
-        return try success(
-            request,
-            result: [
-                "message": .string("Keyboard driving lease acquired; keep the physical keyboard and trackpad idle while driving"),
-                "lease": try JSONValue.fromEncodable(lease),
-                "scope": .string(scope.rawValue),
-                "expires_at": try JSONValue.fromEncodable(lease.expiresAt)
-            ],
-            evidence: [Evidence(
+        let message = physicalInputMode == .suppressed
+            ? "Keyboard driving lease acquired; physical keyboard events are suppressed until release or expiry; use the mouse or daemon quit action for emergency release"
+            : "Keyboard driving lease acquired; keep the physical keyboard and trackpad idle while driving"
+        let evidence: [Evidence] = physicalInputMode == .suppressed
+            ? [
+                Evidence(
+                    kind: "keyboard_lease",
+                    message: "A short-lived keyboard driving lease was acquired in memory",
+                    source: "macctld"
+                ),
+                Evidence(
+                    kind: "keyboard_physical_suppression",
+                    message: "An opt-in session event tap is suppressing physical keyboard events while the lease is active",
+                    source: "macctld"
+                ),
+                Evidence(
+                    kind: "keyboard_freeze",
+                    message: "Physical keyboard suppression was explicitly requested with a human reason and bounded expiry",
+                    source: "macctld"
+                )
+            ]
+            : [Evidence(
                 kind: "keyboard_lease",
                 message: "A short-lived keyboard driving lease was acquired in memory",
                 source: "macctld"
             )]
+        return try success(
+            request,
+            result: [
+                "message": .string(message),
+                "lease": try JSONValue.fromEncodable(lease),
+                "scope": .string(scope.rawValue),
+                "physical_input_mode": .string(physicalInputMode.rawValue),
+                "freeze_reason_present": .bool(lease.freezeReasonProvided),
+                "expires_at": try JSONValue.fromEncodable(lease.expiresAt)
+            ],
+            evidence: evidence
         )
     }
 
@@ -492,6 +667,9 @@ public final class MacCtlService {
             throw KeyboardControlError.leaseRequired
         }
         let lease = try keyboardDriveStore.release(token: token)
+        if routeSelectionCache?.leaseToken == token {
+            routeSelectionCache = nil
+        }
         return try success(
             request,
             result: [
@@ -502,6 +680,96 @@ public final class MacCtlService {
             evidence: [Evidence(
                 kind: "keyboard_lease",
                 message: "Keyboard driving lease was released from memory",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func acquireKeyboardFreeze(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let scope = try requiredString(request, key: "scope").lowercased()
+        if scope != KeyboardLeaseScope.session.rawValue {
+            throw KeyboardDriveStoreError.physicalKeyboardSuppressionRequiresSession
+        }
+        guard request.params["confirm"]?.boolValue == true else {
+            throw KeyboardControlError.confirmationRequired
+        }
+        guard let reason = request.params["reason"]?.stringValue,
+              !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw KeyboardDriveStoreError.physicalKeyboardSuppressionReasonRequired
+        }
+        let lease = try keyboardDriveStore.acquire(
+            scope: .session,
+            application: nil,
+            seconds: try requestedKeyboardLifetime(from: request),
+            confirm: true,
+            physicalInputMode: .suppressed,
+            freezeReason: reason
+        )
+        return try success(
+            request,
+            result: [
+                "message": .string("Physical keyboard freeze acquired until release or bounded expiry; mouse remains available"),
+                "token": .string(lease.token),
+                "expires_at": try JSONValue.fromEncodable(lease.expiresAt),
+                "reason_present": .bool(lease.freezeReasonProvided),
+                "scope": .string(lease.scope.rawValue)
+            ],
+            evidence: [
+                Evidence(
+                    kind: "keyboard_freeze",
+                    message: "An explicit session-only physical keyboard freeze is active",
+                    source: "macctld"
+                ),
+                Evidence(
+                    kind: "keyboard_freeze_permissions",
+                    message: "Accessibility and Input Monitoring are required; expiry and shutdown release the freeze",
+                    source: "macctld"
+                )
+            ]
+        )
+    }
+
+    private func keyboardFreezeStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let lease = keyboardDriveStore.activeLease()
+        let freeze = lease?.physicalInputMode == .suppressed ? lease : nil
+        let permissions = permissionContext == "daemon"
+            ? PermissionDiagnostics.report()
+            : PermissionDiagnostics.unknownReport()
+        return try success(
+            request,
+            value: KeyboardFreezeStatus(
+                active: freeze != nil,
+                token: freeze?.token,
+                scope: freeze?.scope,
+                expiresAt: freeze?.expiresAt,
+                reasonPresent: freeze?.freezeReasonProvided ?? false,
+                permissions: permissions
+            ),
+            evidence: [Evidence(
+                kind: "keyboard_freeze_status",
+                message: "Freeze activity and required permissions were inspected without changing input state",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func releaseKeyboardFreeze(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let token = try requiredString(request, key: "token")
+        let active = try keyboardDriveStore.lease(for: token)
+        guard active.physicalInputMode == .suppressed else {
+            throw KeyboardControlError.invalidSequence("freeze token")
+        }
+        let released = try keyboardDriveStore.release(token: token)
+        return try success(
+            request,
+            result: [
+                "released": .bool(true),
+                "token": .string(released.token),
+                "scope": .string(released.scope.rawValue)
+            ],
+            evidence: [Evidence(
+                kind: "keyboard_freeze",
+                message: "Physical keyboard freeze was explicitly released; mouse remains available",
                 source: "macctld"
             )]
         )
@@ -588,6 +856,605 @@ public final class MacCtlService {
         )
     }
 
+    private func controlCapabilities(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try resolveApplication(try requiredString(request, key: "app"))
+        let taskID = request.params["task"]?.stringValue
+        let targetFingerprint = request.params["target_fingerprint"]?.stringValue
+        if taskID != nil && targetFingerprint == nil {
+            throw WarmPathSelectionError.targetFingerprintRequired
+        }
+        let manifest: WarmPathManifest? = if let taskID, let targetFingerprint {
+            warmPathStore.inspect(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint
+            )
+        } else {
+            nil
+        }
+        let providerState = currentCapabilityProviderState()
+        let cachedProfile = capabilityProfileStore.lookup(
+            application: application,
+            osVersion: currentOSVersion(),
+            providerState: providerState
+        )
+        let profile = ControlCapabilityProfile(
+            application: WarmPathApplicationIdentity(application: application),
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            manifest: manifest,
+            deepAuditAvailable: application.isRunning && application.processID != nil,
+            cachedBroadProfile: cachedProfile.summary
+        )
+        return try success(
+            request,
+            value: profile,
+            evidence: [Evidence(
+                kind: "control_capabilities",
+                message: "Fast route and cached broad-profile metadata were reported without walking the Accessibility tree",
+                source: "macctld",
+                metadata: [
+                    "archetype": .string(profile.archetype.rawValue),
+                    "manifest_found": .bool(profile.manifestFound),
+                    "route_selection_policy": .string(profile.routeSelectionPolicy),
+                    "probe_mode": .string(profile.probeMode),
+                    "broad_profile_cache_hit": .bool(cachedProfile.cacheHit),
+                    "deep_audit_recommended": .bool(cachedProfile.summary.deepAuditRecommended)
+                ]
+            )]
+        )
+    }
+
+    private func controlCapabilityAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        let execution = try auditCapabilityProfile(
+            application: application,
+            maxNodes: try requestedNonNegativeInt(
+                from: request,
+                key: "max_nodes",
+                defaultValue: CapabilityAuditBounds.defaultMaxNodes
+            ),
+            maxDepth: try requestedNonNegativeInt(
+                from: request,
+                key: "max_depth",
+                defaultValue: CapabilityAuditBounds.defaultMaxDepth
+            )
+        )
+        let profile = execution.profile
+        var auditMetadata: [String: JSONValue] = [
+            "audit_depth": .string(CapabilityAuditDepth.deepReadOnly.rawValue),
+            "tree_signature": .string(profile.identity.treeSignature),
+            "tree_node_count": .number(Double(profile.treeNodeCount)),
+            "tree_truncated": .bool(profile.treeTruncated),
+            "profile_state": .string(profile.state.rawValue),
+            "archetype": .string(profile.archetype.rawValue),
+            "audit_attempts": .number(Double(execution.attempts)),
+            "adaptive_retry": .bool(execution.adaptiveRetry),
+            "initial_max_nodes": .number(Double(execution.initialMaxNodes)),
+            "initial_max_depth": .number(Double(execution.initialMaxDepth)),
+            "effective_max_nodes": .number(Double(execution.effectiveMaxNodes)),
+            "effective_max_depth": .number(Double(execution.effectiveMaxDepth)),
+            "adaptive_ceiling_reached": .bool(execution.exhausted),
+            "traversal_mode": .string(execution.traversalMode),
+            "windowed_attempted": .bool(execution.windowedAttempted),
+            "coverage_complete": .bool(execution.coverageComplete)
+        ]
+        if let coverage = execution.coverage {
+            auditMetadata["window_count"] = .number(Double(coverage.windowCount))
+            auditMetadata["page_count"] = .number(Double(coverage.pageCount))
+            auditMetadata["omitted_window_count"] = .number(Double(coverage.omittedWindowCount))
+            auditMetadata["omitted_page_count"] = .number(Double(coverage.omittedPageCount))
+        }
+        return try success(
+            request,
+            value: profile,
+            evidence: [Evidence(
+                kind: "control_capability_audit",
+                message: "A bounded, redacted Accessibility tree produced a persisted broad capability profile; no action was dispatched",
+                source: "macctld",
+                metadata: auditMetadata
+            )]
+        )
+    }
+
+    private func controlCapabilityAuditBatch(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let runID = request.params["run_id"]?.stringValue
+        let resumed = runID != nil
+        var run: CapabilityAuditBatchRun
+        if let runID {
+            guard request.params["apps"] == nil,
+                  request.params["all_applicable"] == nil else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "run_id cannot be combined with apps or all_applicable; resume the stored manifest unchanged"
+                )
+            }
+            run = try capabilityAuditBatchStore.load(runID: runID)
+        } else {
+            let targets = try capabilityAuditBatchTargets(from: request)
+            let maxNodes = try requestedPositiveInt(
+                from: request,
+                key: "max_nodes",
+                defaultValue: CapabilityAuditCatalog.defaultMaxNodes
+            )
+            let maxDepth = try requestedNonNegativeInt(
+                from: request,
+                key: "max_depth",
+                defaultValue: CapabilityAuditCatalog.defaultMaxDepth
+            )
+            let maxConcurrency = try requestedPositiveInt(
+                from: request,
+                key: "max_concurrency",
+                defaultValue: 1
+            )
+            guard maxConcurrency == 1 else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "Accessibility batch audits are serialized; max_concurrency must be 1"
+                )
+            }
+            run = try capabilityAuditBatchStore.create(
+                targets: targets,
+                maxNodes: maxNodes,
+                maxDepth: maxDepth,
+                maxConcurrency: maxConcurrency
+            )
+        }
+
+        let maxApps = try requestedPositiveInt(
+            from: request,
+            key: "max_apps",
+            defaultValue: CapabilityAuditCatalog.maximumTargets
+        )
+        guard maxApps <= CapabilityAuditCatalog.maximumTargets else {
+            throw WorkflowExecutionError.unsafeInput(
+                "max_apps must be at most \(CapabilityAuditCatalog.maximumTargets)"
+            )
+        }
+
+        var entries = run.entries
+        var targets = run.targets
+        var processedCount = 0
+        for index in entries.indices where entries[index].canResume {
+            guard processedCount < maxApps else { break }
+            let originalEntry = entries[index]
+            let startedAt = Date()
+            let attempt = originalEntry.attempts + 1
+            entries[index] = CapabilityAuditBatchEntryReceipt(
+                target: originalEntry.target,
+                state: .pending,
+                reason: .pending,
+                attempts: attempt,
+                startedAt: startedAt
+            )
+            run = run.replacingTargetsAndEntries(targets, entries: entries, updatedAt: startedAt)
+            try capabilityAuditBatchStore.save(run)
+
+            do {
+                let application: AppInfo
+                do {
+                    application = try resolveApplication(originalEntry.target.selector)
+                } catch AppControllerError.appNotFound {
+                    entries[index] = CapabilityAuditBatchEntryReceipt(
+                        target: originalEntry.target,
+                        state: .notObserved,
+                        reason: .applicationNotFound,
+                        attempts: attempt,
+                        startedAt: startedAt,
+                        completedAt: Date()
+                    )
+                    processedCount += 1
+                    run = run.replacingTargetsAndEntries(targets, entries: entries)
+                    try capabilityAuditBatchStore.save(run)
+                    continue
+                }
+
+                if let expected = originalEntry.target.identity,
+                   let mismatch = capabilityAuditIdentityMismatch(expected: expected, actual: application) {
+                    entries[index] = CapabilityAuditBatchEntryReceipt(
+                        target: originalEntry.target,
+                        state: .blocked,
+                        reason: mismatch,
+                        attempts: attempt,
+                        startedAt: startedAt,
+                        completedAt: Date()
+                    )
+                    processedCount += 1
+                    run = run.replacingTargetsAndEntries(targets, entries: entries)
+                    try capabilityAuditBatchStore.save(run)
+                    continue
+                }
+
+                if originalEntry.target.identity == nil {
+                    let boundTarget = CapabilityAuditBatchTarget(application: application)
+                    targets[index] = boundTarget
+                    entries[index] = CapabilityAuditBatchEntryReceipt(
+                        target: boundTarget,
+                        state: .pending,
+                        reason: .pending,
+                        attempts: attempt,
+                        startedAt: startedAt
+                    )
+                    run = run.replacingTargetsAndEntries(targets, entries: entries, updatedAt: startedAt)
+                    try capabilityAuditBatchStore.save(run)
+                }
+
+                guard application.isRunning, application.processID != nil else {
+                    entries[index] = CapabilityAuditBatchEntryReceipt(
+                        target: entries[index].target,
+                        state: .notObserved,
+                        reason: .applicationNotRunning,
+                        attempts: attempt,
+                        startedAt: startedAt,
+                        completedAt: Date()
+                    )
+                    processedCount += 1
+                    run = run.replacingTargetsAndEntries(targets, entries: entries)
+                    try capabilityAuditBatchStore.save(run)
+                    continue
+                }
+
+                let execution = try auditCapabilityProfile(
+                    application: application,
+                    maxNodes: run.maxNodes,
+                    maxDepth: run.maxDepth
+                )
+                let profile = execution.profile
+                entries[index] = CapabilityAuditBatchEntryReceipt(
+                    target: entries[index].target,
+                    state: .audited,
+                    reason: .audited,
+                    attempts: attempt,
+                    profileState: profile.state,
+                    archetype: profile.archetype,
+                    treeSignature: profile.identity.treeSignature,
+                    treeNodeCount: profile.treeNodeCount,
+                    treeTruncated: profile.treeTruncated,
+                    auditAttempts: execution.attempts,
+                    effectiveMaxNodes: execution.effectiveMaxNodes,
+                    effectiveMaxDepth: execution.effectiveMaxDepth,
+                    traversalMode: execution.traversalMode,
+                    windowCount: execution.coverage?.windowCount,
+                    pageCount: execution.coverage?.pageCount,
+                    coverageComplete: execution.coverageComplete,
+                    startedAt: startedAt,
+                    completedAt: Date()
+                )
+            } catch AccessibilityControllerError.permissionDenied {
+                entries[index] = CapabilityAuditBatchEntryReceipt(
+                    target: entries[index].target,
+                    state: .blocked,
+                    reason: .permissionDenied,
+                    attempts: attempt,
+                    startedAt: startedAt,
+                    completedAt: Date()
+                )
+            } catch CapabilityProfileStoreError.writeFailed {
+                entries[index] = CapabilityAuditBatchEntryReceipt(
+                    target: entries[index].target,
+                    state: .failed,
+                    reason: .profilePersistenceFailed,
+                    attempts: attempt,
+                    startedAt: startedAt,
+                    completedAt: Date()
+                )
+            } catch {
+                entries[index] = CapabilityAuditBatchEntryReceipt(
+                    target: entries[index].target,
+                    state: .failed,
+                    reason: .auditFailed,
+                    attempts: attempt,
+                    startedAt: startedAt,
+                    completedAt: Date()
+                )
+            }
+            processedCount += 1
+            run = run.replacingTargetsAndEntries(targets, entries: entries)
+            try capabilityAuditBatchStore.save(run)
+        }
+
+        let report = CapabilityAuditBatchReport(
+            run: run,
+            resumed: resumed,
+            processedCount: processedCount
+        )
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "control_capability_audit_batch",
+                message: "A bounded, serialized, read-only audit batch persisted one resumable receipt per app; no applications were launched and no actions were dispatched",
+                source: "macctld",
+                metadata: [
+                    "run_id": .string(run.runID),
+                    "target_count": .number(Double(run.targets.count)),
+                    "processed_count": .number(Double(processedCount)),
+                    "remaining_count": .number(Double(run.remainingCount)),
+                    "max_concurrency": .number(Double(run.maxConcurrency)),
+                    "read_only": .bool(true),
+                    "launched_applications": .bool(false)
+                ]
+            )]
+        )
+    }
+
+    private func capabilityAuditBatchTargets(
+        from request: RequestEnvelope
+    ) throws -> [CapabilityAuditBatchTarget] {
+        if let rawApps = request.params["apps"] {
+            guard let values = rawApps.arrayValue, !values.isEmpty else {
+                throw WorkflowExecutionError.unsafeInput("apps must be a non-empty array of app names, bundle IDs, or paths")
+            }
+            guard values.count <= CapabilityAuditCatalog.maximumTargets else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "apps must contain at most \(CapabilityAuditCatalog.maximumTargets) targets"
+                )
+            }
+            var targets: [CapabilityAuditBatchTarget] = []
+            var seen = Set<String>()
+            for value in values {
+                guard let selector = value.stringValue,
+                      !selector.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw WorkflowExecutionError.unsafeInput("apps must contain only non-empty strings")
+                }
+                if let application = try? resolveApplication(selector) {
+                    let target = CapabilityAuditBatchTarget(application: application)
+                    guard seen.insert(target.stableKey).inserted else {
+                        throw WorkflowExecutionError.unsafeInput("apps must contain unique targets")
+                    }
+                    targets.append(target)
+                } else {
+                    let target = CapabilityAuditBatchTarget(selector: selector)
+                    guard seen.insert(target.stableKey).inserted else {
+                        throw WorkflowExecutionError.unsafeInput("apps must contain unique targets")
+                    }
+                    targets.append(target)
+                }
+            }
+            return targets
+        }
+
+        guard request.params["all_applicable"]?.boolValue == true else {
+            throw WorkflowExecutionError.missingParameter("apps or all_applicable")
+        }
+        let targets = CapabilityAuditCatalog.defaultTargets(
+            from: appController.listApplications(),
+            limit: CapabilityAuditCatalog.maximumTargets
+        )
+        guard !targets.isEmpty else {
+            throw WorkflowExecutionError.unsafeInput("no applicable user-facing applications were found")
+        }
+        return targets
+    }
+
+    private func auditCapabilityProfile(
+        application: AppInfo,
+        maxNodes: Int,
+        maxDepth: Int
+    ) throws -> CapabilityAuditExecution {
+        guard let pid = application.processID else {
+            throw AccessibilityControllerError.applicationNotRunning
+        }
+        let initialMaxNodes = CapabilityAuditBounds.normalizedNodes(maxNodes)
+        let initialMaxDepth = CapabilityAuditBounds.normalizedDepth(maxDepth)
+        var effectiveMaxNodes = initialMaxNodes
+        var effectiveMaxDepth = initialMaxDepth
+        var attempts = 0
+        var tree: AccessibilityTreeReport
+        while true {
+            attempts += 1
+            let candidate = try accessibilityTreeInspector.tree(
+                pid: pid,
+                application: application,
+                maxNodes: effectiveMaxNodes,
+                maxDepth: effectiveMaxDepth
+            )
+            if !candidate.truncated {
+                tree = candidate
+                break
+            }
+
+            let nextMaxNodes = CapabilityAuditBounds.nextNodes(after: effectiveMaxNodes)
+            let nextMaxDepth = CapabilityAuditBounds.nextDepth(after: effectiveMaxDepth)
+            guard nextMaxNodes != effectiveMaxNodes || nextMaxDepth != effectiveMaxDepth else {
+                tree = candidate
+                break
+            }
+            effectiveMaxNodes = nextMaxNodes
+            effectiveMaxDepth = nextMaxDepth
+        }
+
+        var traversalMode = tree.coverage?.mode ?? "recursive"
+        var coverage = tree.coverage
+        var windowedAttempted = false
+        if tree.truncated,
+           let windowedInspector = accessibilityTreeInspector as? WindowedAccessibilityTreeInspecting {
+            windowedAttempted = true
+            let windowedTree = try windowedInspector.windowedTree(
+                pid: pid,
+                application: application,
+                maxNodesPerPage: CapabilityAuditBounds.maximumNodes,
+                maxDepth: CapabilityAuditBounds.maximumDepth,
+                maxWindows: CapabilityAuditBounds.maximumWindows,
+                maxPages: CapabilityAuditBounds.maximumPages
+            )
+            // A paginated report carries its own coverage proof. Prefer it
+            // whenever available, including incomplete coverage, so the
+            // persisted stale profile explains what was and was not observed.
+            // A provider that does not return coverage cannot promote a new
+            // broad profile merely because it returned more nodes.
+            if windowedTree.coverage != nil {
+                tree = windowedTree
+                traversalMode = windowedTree.coverage?.mode ?? "windowed"
+                coverage = windowedTree.coverage
+            }
+        }
+        let profile = CapabilityProfileBuilder.build(
+            application: application,
+            osVersion: currentOSVersion(),
+            providerState: currentCapabilityProviderState(),
+            tree: tree
+        )
+        return CapabilityAuditExecution(
+            profile: try capabilityProfileStore.save(profile),
+            initialMaxNodes: initialMaxNodes,
+            initialMaxDepth: initialMaxDepth,
+            effectiveMaxNodes: effectiveMaxNodes,
+            effectiveMaxDepth: effectiveMaxDepth,
+            attempts: attempts,
+            traversalMode: traversalMode,
+            coverage: coverage,
+            windowedAttempted: windowedAttempted
+        )
+    }
+
+    private func capabilityAuditIdentityMismatch(
+        expected: WarmPathApplicationIdentity,
+        actual: AppInfo
+    ) -> CapabilityAuditBatchReason? {
+        let current = WarmPathApplicationIdentity(application: actual)
+        guard expected.path == current.path,
+              expected.bundleID == current.bundleID else {
+            return .applicationIdentityChanged
+        }
+        guard expected.version == current.version else {
+            return .applicationVersionChanged
+        }
+        return nil
+    }
+
+    private func performControlBatch(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw KeyboardControlError.confirmationRequired
+        }
+        guard request.params["lease_token"]?.stringValue == nil else {
+            throw WorkflowExecutionError.unsafeInput("control.batch owns one ephemeral app lease; do not provide lease_token")
+        }
+        let applicationName = try requiredString(request, key: "app")
+        guard let actions = request.params["actions"]?.arrayValue, !actions.isEmpty else {
+            throw WorkflowExecutionError.missingParameter("actions")
+        }
+        guard actions.count <= 32 else {
+            throw WorkflowExecutionError.unsafeInput("control.batch accepts at most 32 actions")
+        }
+        let batchTaskID = request.params["task"]?.stringValue
+        let batchTargetFingerprint = request.params["target_fingerprint"]?.stringValue
+        if batchTaskID != nil && batchTargetFingerprint == nil {
+            throw WarmPathSelectionError.targetFingerprintRequired
+        }
+        let parsedActions = try actions.enumerated().map { index, value -> (Int, [String: JSONValue]) in
+            guard let object = value.objectValue else {
+                throw WorkflowExecutionError.unsafeInput("control.batch action \(index) must be a JSON object")
+            }
+            guard let rawAction = object["action"]?.stringValue,
+                  !rawAction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw WorkflowExecutionError.missingParameter("actions[\(index)].action")
+            }
+            if rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "scroll" {
+                throw WorkflowExecutionError.unsafeInput(
+                    "semantic scroll requires control.perform so target and provider handoff remain explicit"
+                )
+            }
+            return (index, object)
+        }
+
+        let batch = try withExecutionLock { () throws -> ControlBatchReport in
+            let activation = try activateAndStabilizeApplication(applicationName)
+            let stableForeground = activation.application
+            let lease = try keyboardDriveStore.acquire(
+                scope: .app,
+                application: stableForeground,
+                seconds: 30,
+                confirm: true
+            )
+            routeSelectionCache = nil
+            defer {
+                routeSelectionCache = nil
+                keyboardDriveStore.invalidate(token: lease.token)
+            }
+
+            var steps: [ControlBatchStepReport] = []
+            var routeSelectionCacheHits = 0
+            for (index, object) in parsedActions {
+                do {
+                    var stepParams = object
+                    if stepParams["task"] == nil, let batchTaskID {
+                        stepParams["task"] = .string(batchTaskID)
+                    }
+                    if stepParams["target_fingerprint"] == nil, let batchTargetFingerprint {
+                        stepParams["target_fingerprint"] = .string(batchTargetFingerprint)
+                    }
+                    let stepRequest = RequestEnvelope(method: "control.perform", params: stepParams)
+                    let command = try KeyboardCommand.resolve(try requiredString(stepRequest, key: "action"))
+                    let execution = try performControlActionWithLease(
+                        command: command,
+                        selector: try requestedControlSelector(from: stepRequest),
+                        count: try requestedKeyboardCount(from: stepRequest),
+                        interKeyDelay: try requestedInterKeyDelay(from: stepRequest),
+                        allowRawCoordinate: stepRequest.params["allow_raw_coordinate"]?.boolValue == true,
+                        taskID: stepRequest.params["task"]?.stringValue,
+                        targetFingerprint: stepRequest.params["target_fingerprint"]?.stringValue,
+                        requestedRoute: try requestedControlRoute(from: stepRequest),
+                        application: foregroundApplication(),
+                        leaseToken: lease.token,
+                        foregroundFastPathUsed: activation.foregroundFastPathUsed
+                    )
+                    guard execution.report.verification.state == .passed else {
+                        throw WorkflowExecutionError.unsafeInput(
+                            "batch action did not reach verified state (\(execution.report.verification.state.rawValue))"
+                        )
+                    }
+                    if execution.routeSelectionCacheHit {
+                        routeSelectionCacheHits += 1
+                    }
+                    steps.append(ControlBatchStepReport(
+                        index: index,
+                        action: execution.report.action,
+                        route: execution.report.route,
+                        verification: execution.report.verification.state,
+                        fallbackUsed: execution.report.fallbackUsed,
+                        routeSelectionCacheHit: execution.routeSelectionCacheHit
+                    ))
+                } catch {
+                    throw ControlBatchExecutionError(
+                        failedIndex: index,
+                        completedCount: steps.count,
+                        cause: error.localizedDescription
+                    )
+                }
+            }
+            return ControlBatchReport(
+                application: WarmPathApplicationIdentity(application: stableForeground),
+                actionCount: actions.count,
+                completedCount: steps.count,
+                routeSelectionCacheHits: routeSelectionCacheHits,
+                foregroundFastPathUsed: activation.foregroundFastPathUsed,
+                leaseReleased: true,
+                steps: steps
+            )
+        }
+
+        return try success(
+            request,
+            value: batch,
+            evidence: [Evidence(
+                kind: "control_batch",
+                message: "A bounded sequence shared one app-scoped lease while revalidating every action and route selection",
+                source: "macctld",
+                metadata: [
+                    "action_count": .number(Double(batch.actionCount)),
+                    "completed_count": .number(Double(batch.completedCount)),
+                    "route_selection_cache_hits": .number(Double(batch.routeSelectionCacheHits)),
+                    "foreground_fast_path": .bool(batch.foregroundFastPathUsed),
+                    "lease_released": .bool(batch.leaseReleased)
+                ]
+            )],
+            outcome: AgentActionOutcome(
+                state: .verifiedSuccess,
+                route: "batch",
+                verification: "passed"
+            )
+        )
+    }
+
     private func performControlAction(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = request.params["lease_token"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -600,13 +1467,20 @@ public final class MacCtlService {
                 "control.perform accepts either lease_token or app, not both"
             )
         }
-        let command = try KeyboardCommand.resolve(try requiredString(request, key: "action"))
+        let rawAction = try requiredString(request, key: "action")
+        if rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "scroll" {
+            return try performSemanticScroll(request)
+        }
+        let command = try KeyboardCommand.resolve(rawAction)
         let selector = try requestedControlSelector(from: request)
         let count = try requestedKeyboardCount(from: request)
         let interKeyDelay = try requestedInterKeyDelay(from: request)
         let allowRawCoordinate = request.params["allow_raw_coordinate"]?.boolValue == true
+        let requestedRoute = try requestedControlRoute(from: request)
+        let taskID = request.params["task"]?.stringValue
+        let targetFingerprint = request.params["target_fingerprint"]?.stringValue
         let usesEphemeralLease = hasRequestedApplication
-        let report = try withExecutionLock {
+        let execution = try withExecutionLock {
             if let requestedApplication, !requestedApplication.isEmpty {
                 guard request.params["confirm"]?.boolValue == true else {
                     throw KeyboardDriveStoreError.confirmationRequired
@@ -617,50 +1491,148 @@ public final class MacCtlService {
                     selector: selector,
                     count: count,
                     interKeyDelay: interKeyDelay,
-                    allowRawCoordinate: allowRawCoordinate
+                    allowRawCoordinate: allowRawCoordinate,
+                    taskID: taskID,
+                    targetFingerprint: targetFingerprint,
+                    requestedRoute: requestedRoute
                 )
             }
             guard let token, !token.isEmpty else { throw KeyboardControlError.leaseRequired }
-            return try semanticActionRouter.perform(
+            return try performControlActionWithLease(
                 command: command,
                 selector: selector,
-                leaseToken: token,
                 count: count,
                 interKeyDelay: interKeyDelay,
-                allowRawCoordinate: allowRawCoordinate
+                allowRawCoordinate: allowRawCoordinate,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                requestedRoute: requestedRoute,
+                application: foregroundApplication(),
+                leaseToken: token,
+                foregroundFastPathUsed: false
             )
         }
         return try success(
             request,
-            value: report,
+            value: execution.report,
             evidence: [Evidence(
                 kind: "control_action",
                 message: "Semantic control used the strongest available route and verified the resulting foreground state",
                 source: "macctld",
                 metadata: [
-                    "route": .string(report.route.rawValue),
-                    "fallback_used": .bool(report.fallbackUsed),
-                    "verification": .string(report.verification.state.rawValue),
-                    "foreground_changed": .bool(report.verification.foregroundChanged),
-                    "focus_changed": .bool(report.verification.focusChanged),
+                    "route": .string(execution.report.route.rawValue),
+                    "fallback_used": .bool(execution.report.fallbackUsed),
+                    "fallback_chain": .array(execution.report.fallbackChain.map { .string($0.rawValue) }),
+                    "verification": .string(execution.report.verification.state.rawValue),
+                    "foreground_changed": .bool(execution.report.verification.foregroundChanged),
+                    "focus_changed": .bool(execution.report.verification.focusChanged),
                     "lease_mode": .string(usesEphemeralLease ? "ephemeral" : "provided"),
                     "lease_released": .bool(usesEphemeralLease),
-                    "foreground_reasserted": .bool(usesEphemeralLease)
+                    "foreground_reasserted": .bool(usesEphemeralLease),
+                    "foreground_fast_path": .bool(execution.foregroundFastPathUsed),
+                    "route_selection_cache": .string(
+                        execution.routeSelectionCacheHit
+                            ? "hit"
+                            : (taskID == nil ? "not_used" : "miss")
+                    )
                 ]
-            )]
+            )],
+            outcome: AgentActionOutcome(
+                state: .verifiedSuccess,
+                route: execution.report.route.rawValue,
+                verification: execution.report.verification.state.rawValue,
+                failureClass: nil,
+                fallbackAllowed: false,
+                recommendedProvider: nil,
+                freshStateRequired: false,
+                nextAction: nil
+            )
         )
     }
 
-    private func performEphemeralControlAction(
-        applicationName: String,
+    private func performControlActionWithLease(
         command: KeyboardCommand,
         selector: Selector?,
         count: Int,
         interKeyDelay: TimeInterval,
-        allowRawCoordinate: Bool
-    ) throws -> SemanticActionReport {
-        let activated = try activateApplication(applicationName)
-        let stableForeground: AppInfo
+        allowRawCoordinate: Bool,
+        taskID: String?,
+        targetFingerprint: String?,
+        requestedRoute: ControlActionRoute?,
+        application: AppInfo?,
+        leaseToken: String,
+        foregroundFastPathUsed: Bool
+    ) throws -> ControlActionExecution {
+        do {
+            let selection = try routeSelection(
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                application: application,
+                leaseToken: leaseToken
+            )
+            let report = try semanticActionRouter.perform(
+                command: command,
+                selector: selector,
+                leaseToken: leaseToken,
+                count: count,
+                interKeyDelay: interKeyDelay,
+                allowRawCoordinate: allowRawCoordinate,
+                requestedRoute: selection.report?.selectedRoute ?? requestedRoute,
+                fallbackChain: selection.report?.fallbackChain ?? [],
+                routeSelection: selection.report
+            )
+            let kind: CapabilityEvidenceKind = report.verification.state == .passed
+                ? .positive
+                : .ambiguous
+            recordCapabilityVerification(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: report.route,
+                selector: selector,
+                kind: kind,
+                reason: report.verification.state == .passed ? "verified_action" : "verification_unavailable"
+            )
+            return ControlActionExecution(
+                report: report,
+                foregroundFastPathUsed: foregroundFastPathUsed,
+                routeSelectionCacheHit: selection.cacheHit
+            )
+        } catch {
+            let (kind, reason) = capabilityEvidence(for: error)
+            recordCapabilityVerification(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: requestedRoute ?? .keyboard,
+                selector: selector,
+                kind: kind,
+                reason: reason
+            )
+            throw error
+        }
+    }
+
+    private func activateAndStabilizeApplication(
+        _ applicationName: String
+    ) throws -> (application: AppInfo, foregroundFastPathUsed: Bool) {
+        let currentForeground = foregroundApplication()
+        let resolvedRequestedApplication = try? resolveApplication(applicationName)
+        let activated: AppInfo
+        let foregroundFastPathUsed: Bool
+        if let currentForeground,
+           let resolvedRequestedApplication,
+           sameKeyboardApplication(resolvedRequestedApplication, currentForeground, requireProcess: true) {
+            // The process identity is already exact. Keep the stability wait
+            // below so a focus race still fails closed, but avoid reopening
+            // and re-activating the already foreground app.
+            activated = currentForeground
+            foregroundFastPathUsed = true
+        } else {
+            activated = try activateApplication(applicationName)
+            foregroundFastPathUsed = false
+        }
+
         do {
             let observation = try foregroundStabilityVerifier.waitUntil(
                 timeout: 2,
@@ -681,16 +1653,32 @@ public final class MacCtlService {
                     )
                 }
             )
-            guard let current = observation.foregroundApplication else {
+            guard let stableForeground = observation.foregroundApplication else {
                 throw KeyboardControlError.foregroundUnavailable
             }
-            stableForeground = current
+            return (stableForeground, foregroundFastPathUsed)
         } catch ControlStateVerifierError.timedOut {
             throw KeyboardControlError.appScopeMismatch(
                 expected: keyboardApplicationLabel(activated),
                 actual: keyboardApplicationLabel(foregroundApplication())
             )
         }
+    }
+
+    private func performEphemeralControlAction(
+        applicationName: String,
+        command: KeyboardCommand,
+        selector: Selector?,
+        count: Int,
+        interKeyDelay: TimeInterval,
+        allowRawCoordinate: Bool,
+        taskID: String?,
+        targetFingerprint: String?,
+        requestedRoute: ControlActionRoute?
+    ) throws -> ControlActionExecution {
+        let activation = try activateAndStabilizeApplication(applicationName)
+        let stableForeground = activation.application
+        let foregroundFastPathUsed = activation.foregroundFastPathUsed
 
         let lease = try keyboardDriveStore.acquire(
             scope: .app,
@@ -698,15 +1686,1258 @@ public final class MacCtlService {
             seconds: 30,
             confirm: true
         )
-        defer { keyboardDriveStore.invalidate(token: lease.token) }
-        return try semanticActionRouter.perform(
+        defer {
+            routeSelectionCache = nil
+            keyboardDriveStore.invalidate(token: lease.token)
+        }
+        return try performControlActionWithLease(
             command: command,
             selector: selector,
-            leaseToken: lease.token,
             count: count,
             interKeyDelay: interKeyDelay,
-            allowRawCoordinate: allowRawCoordinate
+            allowRawCoordinate: allowRawCoordinate,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            requestedRoute: requestedRoute,
+            application: stableForeground,
+            leaseToken: lease.token,
+            foregroundFastPathUsed: foregroundFastPathUsed
         )
+    }
+
+    private func performEphemeralSemanticScroll(
+        applicationName: String,
+        selector: Selector,
+        direction: AccessibilityScrollDirection,
+        amount: Int
+    ) throws -> (report: AccessibilityScrollReport, foregroundFastPathUsed: Bool) {
+        // AX scroll is selector- and process-scoped; it does not synthesize
+        // global input. Preserve that direct route instead of forcing the
+        // keyboard activation/stability guard onto it. The foreground probe
+        // remains observable for benchmark accounting, while the AX
+        // controller performs target re-resolution and viewport verification.
+        let application = try resolveApplication(applicationName)
+        guard application.isRunning, let processID = application.processID else {
+            throw AccessibilityControllerError.applicationNotRunning
+        }
+        let foregroundFastPathUsed = foregroundApplication().map {
+            sameKeyboardApplication(application, $0, requireProcess: true)
+        } ?? false
+        let report = try accessibilityScrollPerformer.scroll(
+            pid: processID,
+            application: application,
+            selector: selector,
+            direction: direction,
+            amount: amount
+        )
+        return (report, foregroundFastPathUsed)
+    }
+
+    private func requestedControlRoute(from request: RequestEnvelope) throws -> ControlActionRoute? {
+        guard let raw = request.params["route"]?.stringValue,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let normalized = raw.lowercased().replacingOccurrences(of: "-", with: "_")
+        guard let route = ControlActionRoute(rawValue: normalized) else {
+            throw WorkflowExecutionError.unsafeInput("unknown control route: \(raw)")
+        }
+        return route
+    }
+
+    private func benchmarkPermissions(for route: ControlActionRoute) -> [String] {
+        switch route {
+        case .accessibility:
+            return ["Accessibility"]
+        case .keyboard:
+            return ["Accessibility", "Post Events"]
+        case .scroll:
+            return ["Accessibility"]
+        case .visual, .normalizedCoordinate, .rawCoordinate:
+            return ["Screen Recording", "Post Events"]
+        }
+    }
+
+    private func routeSelection(
+        taskID: String?,
+        targetFingerprint: String?,
+        application: AppInfo?,
+        leaseToken: String?
+    ) throws -> RouteSelectionResolution {
+        guard let taskID else { return RouteSelectionResolution(report: nil, cacheHit: false) }
+        guard let targetFingerprint, !targetFingerprint.isEmpty else {
+            throw WarmPathSelectionError.targetFingerprintRequired
+        }
+        guard let application else { throw KeyboardControlError.foregroundUnavailable }
+        let cachedManifest: WarmPathManifest?
+        if let leaseToken,
+           let cached = routeSelectionCache,
+           cached.leaseToken == leaseToken,
+           cached.application == application,
+           cached.taskID == taskID,
+           cached.targetFingerprint == targetFingerprint {
+            cachedManifest = cached.manifest
+        } else {
+            cachedManifest = nil
+        }
+        let cacheHit = cachedManifest != nil
+        guard let manifest = cachedManifest ?? warmPathStore.inspect(
+            application: application,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint
+        ) else {
+            throw WarmPathSelectionError.manifestNotFound
+        }
+        if !cacheHit, let leaseToken {
+            routeSelectionCache = RouteSelectionCacheEntry(
+                leaseToken: leaseToken,
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                manifest: manifest
+            )
+        }
+        let permissions = Set(PermissionDiagnostics.report()
+            .filter { $0.state == "granted" }
+            .map { $0.name.lowercased() })
+        let report = WarmPathSelection.select(
+            manifest: manifest,
+            context: WarmPathSelectionContext(
+                application: WarmPathApplicationIdentity(application: application),
+                targetFingerprint: targetFingerprint,
+                grantedPermissions: permissions,
+                targetIsUnique: true,
+                verificationAvailable: !manifest.verificationOracle.isEmpty
+            )
+        )
+        guard report.selectedRoute != nil else {
+            throw WarmPathSelectionError.noEligibleRoute
+        }
+        return RouteSelectionResolution(report: report, cacheHit: cacheHit)
+    }
+
+    private func routeList(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let manifests = warmPathStore.list()
+        return try success(
+            request,
+            result: [
+                "directory": .string(warmPathStore.directory.path),
+                "manifests": .array(try manifests.map { try JSONValue.fromEncodable($0) }),
+                "count": .number(Double(manifests.count))
+            ],
+            evidence: [Evidence(
+                kind: "warm_path_registry",
+                message: "Persisted app/task warm-path manifests were listed without launching an app",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func routeInspect(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try resolveApplication(try requiredString(request, key: "app"))
+        let taskID = try requiredString(request, key: "task")
+        let targetFingerprint = request.params["target_fingerprint"]?.stringValue
+        let manifest = warmPathStore.inspect(
+            application: application,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint
+        )
+        return try success(
+            request,
+            result: [
+                "application": try JSONValue.fromEncodable(WarmPathApplicationIdentity(application: application)),
+                "task_id": .string(taskID),
+                "target_fingerprint": targetFingerprint.map(JSONValue.string) ?? .null,
+                "found": .bool(manifest != nil),
+                "manifest": manifest.map { (try? JSONValue.fromEncodable($0)) ?? .null } ?? .null
+            ],
+            evidence: [Evidence(
+                kind: "warm_path_inspection",
+                message: "The warm-path registry was inspected for the requested app, task, and target",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func routeBenchmark(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw KeyboardControlError.confirmationRequired
+        }
+        let application = try resolveApplication(try requiredString(request, key: "app"))
+        let taskID = try requiredString(request, key: "task")
+        let targetFingerprint = try requiredString(request, key: "target_fingerprint")
+        let verificationOracle = try requiredString(request, key: "verification_oracle")
+        guard let route = try requestedControlRoute(from: request) else {
+            throw WorkflowExecutionError.missingParameter("route")
+        }
+        let rawAction = try requiredString(request, key: "action")
+        let selector = try requestedControlSelector(from: request)
+        let count = try requestedKeyboardCount(from: request)
+        let interKeyDelay = try requestedInterKeyDelay(from: request)
+        let allowRawCoordinate = request.params["allow_raw_coordinate"]?.boolValue == true
+        let warmups = try requestedNonNegativeInt(from: request, key: "warmups", defaultValue: 1)
+        let samples = try requestedPositiveInt(from: request, key: "samples", defaultValue: 5)
+        guard (0...20).contains(warmups), (1...50).contains(samples) else {
+            throw WorkflowExecutionError.unsafeInput("warmups must be 0...20 and samples must be 1...50")
+        }
+        let requiredPermissions = request.params["required_permissions"] == nil
+            ? benchmarkPermissions(for: route)
+            : try requestedStringArray(from: request, key: "required_permissions")
+        let freshness = try requestedPositiveDouble(
+            from: request,
+            key: "freshness_seconds",
+            defaultValue: WarmPathStore.defaultFreshness
+        )
+        let tabCount = try requestedNonNegativeInt(from: request, key: "tab_count", defaultValue: 0)
+        let scrollCount = try requestedNonNegativeInt(from: request, key: "scroll_count", defaultValue: 0)
+        let coordinateUse = request.params["coordinate_use"]?.boolValue == true
+        let userHelpCount = try requestedNonNegativeInt(from: request, key: "user_help_count", defaultValue: 0)
+        let visualCoordinateOptIn = request.params["visual_coordinate_opt_in"]?.boolValue == true
+        let declaredFallbackRoutes = try requestedRouteArray(from: request, key: "fallback_routes")
+
+        let normalizedAction = rawAction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+        if normalizedAction == "scroll" || route == .scroll {
+            guard normalizedAction == "scroll", route == .scroll else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "semantic scroll benchmarks require action scroll and route scroll"
+                )
+            }
+            return try routeSemanticScrollBenchmark(
+                request,
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                verificationOracle: verificationOracle,
+                selector: selector,
+                warmups: warmups,
+                samples: samples,
+                requiredPermissions: requiredPermissions,
+                freshness: freshness,
+                tabCount: tabCount,
+                scrollCount: scrollCount,
+                coordinateUse: coordinateUse,
+                userHelpCount: userHelpCount,
+                visualCoordinateOptIn: visualCoordinateOptIn,
+                declaredFallbackRoutes: declaredFallbackRoutes
+            )
+        }
+
+        let command = try KeyboardCommand.resolve(rawAction)
+        let resetAction = request.params["reset_action"]?.stringValue
+        let resetCommand = try resetAction.map(KeyboardCommand.resolve)
+        let resetRoute = try request.params["reset_route"]?.stringValue.map { raw in
+            guard let parsed = ControlActionRoute(
+                rawValue: raw.lowercased().replacingOccurrences(of: "-", with: "_")
+            ) else {
+                throw WorkflowExecutionError.unsafeInput("unknown reset route: \(raw)")
+            }
+            return parsed
+        } ?? route
+
+        let benchmark = try withExecutionLock {
+            var durations: [Double] = []
+            var recoveries = 0
+            var foregroundFastPathSamples = 0
+
+            func runResetIfNeeded() throws {
+                guard let resetCommand else { return }
+                let reset = try performEphemeralControlAction(
+                    applicationName: application.name,
+                    command: resetCommand,
+                    selector: selector,
+                    count: count,
+                    interKeyDelay: interKeyDelay,
+                    allowRawCoordinate: allowRawCoordinate,
+                    taskID: nil,
+                    targetFingerprint: nil,
+                    requestedRoute: resetRoute
+                )
+                guard reset.report.route == resetRoute else {
+                    throw RouteBenchmarkError.routeMismatch(expected: resetRoute, actual: reset.report.route)
+                }
+                guard reset.report.verification.state == .passed else {
+                    throw RouteBenchmarkError.verificationFailed(
+                        route: resetRoute,
+                        sample: 0,
+                        state: reset.report.verification.state
+                    )
+                }
+            }
+
+            func runBenchmarkAction(sample: Int) throws -> ControlActionExecution {
+                let execution = try performEphemeralControlAction(
+                    applicationName: application.name,
+                    command: command,
+                    selector: selector,
+                    count: count,
+                    interKeyDelay: interKeyDelay,
+                    allowRawCoordinate: allowRawCoordinate,
+                    taskID: nil,
+                    targetFingerprint: nil,
+                    requestedRoute: route
+                )
+                guard execution.report.route == route else {
+                    throw RouteBenchmarkError.routeMismatch(expected: route, actual: execution.report.route)
+                }
+                guard execution.report.verification.state == .passed else {
+                    throw RouteBenchmarkError.verificationFailed(
+                        route: route,
+                        sample: sample,
+                        state: execution.report.verification.state
+                    )
+                }
+                return execution
+            }
+
+            for _ in 0..<warmups {
+                try runResetIfNeeded()
+                _ = try runBenchmarkAction(sample: 0)
+            }
+
+            for sample in 1...samples {
+                try runResetIfNeeded()
+                let started = DispatchTime.now().uptimeNanoseconds
+                let execution = try runBenchmarkAction(sample: sample)
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+                durations.append(elapsed)
+                if execution.foregroundFastPathUsed {
+                    foregroundFastPathSamples += 1
+                }
+                if execution.report.fallbackUsed {
+                    recoveries += 1
+                }
+            }
+
+            let sorted = durations.sorted()
+            let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
+            let average = durations.reduce(0, +) / Double(durations.count)
+            return (
+                latencyMs: average,
+                p95LatencyMs: sorted[p95Index],
+                recoveries: recoveries,
+                foregroundFastPathSamples: foregroundFastPathSamples
+            )
+        }
+
+        let manifest = try warmPathStore.recordBenchmark(
+            application: application,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            verificationOracle: verificationOracle,
+            route: route,
+            requiredPermissions: requiredPermissions,
+            latencyMs: benchmark.latencyMs,
+            p95LatencyMs: benchmark.p95LatencyMs,
+            verificationRate: 1,
+            recoveries: benchmark.recoveries,
+            samples: samples,
+            freshness: freshness,
+            tabCount: tabCount,
+            scrollCount: scrollCount,
+            coordinateUse: coordinateUse,
+            userHelpCount: userHelpCount,
+            visualCoordinateOptIn: visualCoordinateOptIn,
+            declaredFallbackRoutes: declaredFallbackRoutes,
+            measurementSource: .daemonExecuted
+        )
+        return try success(
+            request,
+            result: [
+                "manifest": try JSONValue.fromEncodable(manifest),
+                "persisted": .bool(true),
+                "measurement_source": .string("daemon_executed"),
+                "sample_count": .number(Double(samples)),
+                "warmup_count": .number(Double(warmups)),
+                "latency_ms": .number(benchmark.latencyMs),
+                "p95_latency_ms": .number(benchmark.p95LatencyMs),
+                "verification_rate": .number(1),
+                "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples))
+            ],
+            evidence: [Evidence(
+                kind: "warm_path_benchmark",
+                message: "The daemon executed and verified every bounded route sample before persisting warm-path metrics",
+                source: "macctld",
+                metadata: [
+                    "route": .string(route.rawValue),
+                    "target_fingerprint": .string(targetFingerprint),
+                    "measurement_source": .string("daemon_executed"),
+                    "samples": .number(Double(samples)),
+                    "warmups": .number(Double(warmups)),
+                    "verification_rate": .number(1),
+                    "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples))
+                ]
+            )]
+        )
+    }
+
+    private func routeSemanticScrollBenchmark(
+        _ request: RequestEnvelope,
+        application: AppInfo,
+        taskID: String,
+        targetFingerprint: String,
+        verificationOracle: String,
+        selector: Selector?,
+        warmups: Int,
+        samples: Int,
+        requiredPermissions: [String],
+        freshness: TimeInterval,
+        tabCount: Int,
+        scrollCount: Int,
+        coordinateUse: Bool,
+        userHelpCount: Int,
+        visualCoordinateOptIn: Bool,
+        declaredFallbackRoutes: [ControlActionRoute]
+    ) throws -> ResponseEnvelope {
+        let direction = try requestedScrollDirection(from: request, key: "direction")
+        let amount = try requestedScrollAmount(from: request, key: "amount", defaultValue: nil)
+        guard let selector,
+              selector.role == "AXScrollArea",
+              let identifier = selector.identifier,
+              !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkflowExecutionError.unsafeInput(
+                "semantic scroll benchmarks require a selector with role AXScrollArea and a non-empty identifier"
+            )
+        }
+
+        let resetDirection = try requestedOptionalScrollDirection(from: request, key: "reset_direction")
+        guard resetDirection != nil || request.params["reset_amount"] == nil else {
+            throw WorkflowExecutionError.unsafeInput(
+                "--reset-amount requires --reset-direction for semantic scroll benchmarks"
+            )
+        }
+        guard resetDirection == nil || request.params["reset_amount"] != nil else {
+            throw WorkflowExecutionError.unsafeInput(
+                "--reset-direction requires --reset-amount for semantic scroll benchmarks"
+            )
+        }
+        let resetAmount = try requestedScrollAmount(
+            from: request,
+            key: "reset_amount",
+            defaultValue: amount
+        )
+        if let resetDirection {
+            guard resetDirection == oppositeScrollDirection(direction) else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "--reset-direction must be the opposite direction of --direction"
+                )
+            }
+        }
+        if warmups + samples > 1, resetDirection == nil {
+            throw WorkflowExecutionError.unsafeInput(
+                "semantic scroll benchmarks with more than one execution require --reset-direction and --reset-amount"
+            )
+        }
+
+        let benchmark = try withExecutionLock {
+            var durations: [Double] = []
+            var foregroundFastPathSamples = 0
+
+            func execute(
+                direction: AccessibilityScrollDirection,
+                amount: Int,
+                sample: Int
+            ) throws -> (report: AccessibilityScrollReport, foregroundFastPathUsed: Bool) {
+                let execution = try performEphemeralSemanticScroll(
+                    applicationName: application.name,
+                    selector: selector,
+                    direction: direction,
+                    amount: amount
+                )
+                guard execution.report.route == .scroll else {
+                    throw RouteBenchmarkError.routeMismatch(
+                        expected: .scroll,
+                        actual: execution.report.route
+                    )
+                }
+                guard execution.report.verification == .passed else {
+                    throw RouteBenchmarkError.scrollVerificationFailed(
+                        route: .scroll,
+                        sample: sample,
+                        state: execution.report.verification
+                    )
+                }
+                return execution
+            }
+
+            func resetIfNeeded() throws {
+                guard let resetDirection else { return }
+                _ = try execute(
+                    direction: resetDirection,
+                    amount: resetAmount,
+                    sample: 0
+                )
+            }
+
+            for _ in 0..<warmups {
+                try resetIfNeeded()
+                _ = try execute(direction: direction, amount: amount, sample: 0)
+            }
+
+            for sample in 1...samples {
+                try resetIfNeeded()
+                let started = DispatchTime.now().uptimeNanoseconds
+                let execution = try execute(
+                    direction: direction,
+                    amount: amount,
+                    sample: sample
+                )
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+                durations.append(elapsed)
+                if execution.foregroundFastPathUsed {
+                    foregroundFastPathSamples += 1
+                }
+            }
+
+            let sorted = durations.sorted()
+            let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
+            let average = durations.reduce(0, +) / Double(durations.count)
+            return (
+                latencyMs: average,
+                p95LatencyMs: sorted[p95Index],
+                foregroundFastPathSamples: foregroundFastPathSamples
+            )
+        }
+
+        let manifest = try warmPathStore.recordBenchmark(
+            application: application,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            verificationOracle: verificationOracle,
+            route: .scroll,
+            requiredPermissions: requiredPermissions,
+            latencyMs: benchmark.latencyMs,
+            p95LatencyMs: benchmark.p95LatencyMs,
+            verificationRate: 1,
+            recoveries: 0,
+            samples: samples,
+            freshness: freshness,
+            tabCount: tabCount,
+            scrollCount: scrollCount,
+            coordinateUse: coordinateUse,
+            userHelpCount: userHelpCount,
+            visualCoordinateOptIn: visualCoordinateOptIn,
+            declaredFallbackRoutes: declaredFallbackRoutes,
+            measurementSource: .daemonExecuted
+        )
+        return try success(
+            request,
+            result: [
+                "manifest": try JSONValue.fromEncodable(manifest),
+                "persisted": .bool(true),
+                "measurement_source": .string("daemon_executed"),
+                "sample_count": .number(Double(samples)),
+                "warmup_count": .number(Double(warmups)),
+                "latency_ms": .number(benchmark.latencyMs),
+                "p95_latency_ms": .number(benchmark.p95LatencyMs),
+                "verification_rate": .number(1),
+                "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples)),
+                "route": .string(ControlActionRoute.scroll.rawValue),
+                "direction": .string(direction.rawValue),
+                "amount": .number(Double(amount)),
+                "reset_direction": resetDirection.map { .string($0.rawValue) } ?? .null,
+                "reset_amount": .number(Double(resetAmount))
+            ],
+            evidence: [Evidence(
+                kind: "warm_path_benchmark",
+                message: "The daemon executed and verified every bounded semantic scroll sample before persisting warm-path metrics",
+                source: "macctld",
+                metadata: [
+                    "route": .string(ControlActionRoute.scroll.rawValue),
+                    "target_fingerprint": .string(targetFingerprint),
+                    "measurement_source": .string("daemon_executed"),
+                    "samples": .number(Double(samples)),
+                    "warmups": .number(Double(warmups)),
+                    "verification_rate": .number(1),
+                    "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples)),
+                    "reset_direction": resetDirection.map { .string($0.rawValue) } ?? .null
+                ]
+            )]
+        )
+    }
+
+    private func routeRegister(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw KeyboardControlError.confirmationRequired
+        }
+        let application = try resolveApplication(try requiredString(request, key: "app"))
+        let taskID = try requiredString(request, key: "task")
+        let targetFingerprint = try requiredString(request, key: "target_fingerprint")
+        let verificationOracle = try requiredString(request, key: "verification_oracle")
+        guard let route = try requestedControlRoute(from: request) else {
+            throw WorkflowExecutionError.missingParameter("route")
+        }
+        let manifest = try warmPathStore.recordBenchmark(
+            application: application,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            verificationOracle: verificationOracle,
+            route: route,
+            requiredPermissions: try requestedStringArray(from: request, key: "required_permissions"),
+            latencyMs: try requestedDouble(from: request, key: "latency_ms"),
+            p95LatencyMs: try requestedDouble(from: request, key: "p95_latency_ms"),
+            verificationRate: try requestedDouble(from: request, key: "verification_rate"),
+            recoveries: try requestedNonNegativeInt(from: request, key: "recoveries", defaultValue: 0),
+            samples: try requestedPositiveInt(from: request, key: "samples", defaultValue: 1),
+            freshness: try requestedPositiveDouble(
+                from: request,
+                key: "freshness_seconds",
+                defaultValue: WarmPathStore.defaultFreshness
+            ),
+            tabCount: try requestedNonNegativeInt(from: request, key: "tab_count", defaultValue: 0),
+            scrollCount: try requestedNonNegativeInt(from: request, key: "scroll_count", defaultValue: 0),
+            coordinateUse: request.params["coordinate_use"]?.boolValue == true,
+            userHelpCount: try requestedNonNegativeInt(from: request, key: "user_help_count", defaultValue: 0),
+            visualCoordinateOptIn: request.params["visual_coordinate_opt_in"]?.boolValue == true,
+            declaredFallbackRoutes: try requestedRouteArray(from: request, key: "fallback_routes"),
+            measurementSource: .callerSupplied
+        )
+        return try success(
+            request,
+            result: [
+                "manifest": try JSONValue.fromEncodable(manifest),
+                "persisted": .bool(true),
+                "measurement_source": .string("caller_supplied")
+            ],
+            evidence: [Evidence(
+                kind: "warm_path_registration",
+                message: "Caller-supplied route metadata was explicitly registered; use route benchmark for daemon-executed measurements",
+                source: "macctld",
+                metadata: [
+                    "route": .string(route.rawValue),
+                    "target_fingerprint": .string(targetFingerprint),
+                    "measurement_source": .string("caller_supplied")
+                ]
+            )]
+        )
+    }
+
+    private func accessibilityTree(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        let report = try accessibilityTreeInspector.tree(
+            pid: application.processID!,
+            application: application,
+            maxNodes: try requestedNonNegativeInt(
+                from: request,
+                key: "max_nodes",
+                defaultValue: CapabilityAuditBounds.defaultMaxNodes
+            ),
+            maxDepth: try requestedNonNegativeInt(
+                from: request,
+                key: "max_depth",
+                defaultValue: CapabilityAuditBounds.defaultMaxDepth
+            )
+        )
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "accessibility_tree",
+                message: "A bounded Accessibility tree was inspected with values, private text, screenshots, and OCR excluded",
+                source: "macctld",
+                metadata: [
+                    "redacted": .bool(report.redacted),
+                    "bounded": .bool(true),
+                    "truncated": .bool(report.truncated)
+                ]
+            )]
+        )
+    }
+
+    private func accessibilityAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        guard let manifestValue = request.params["manifest"],
+              let data = try? JSONCodec.encode(manifestValue) else {
+            throw WorkflowExecutionError.missingParameter("manifest")
+        }
+        let manifest: AccessibilityAuditManifest
+        do {
+            manifest = try JSONCodec.decode(AccessibilityAuditManifest.self, from: data)
+        } catch {
+            throw WorkflowExecutionError.unsafeInput("manifest is not a valid accessibility audit manifest")
+        }
+        let report = try accessibilityTreeInspector.audit(
+            pid: application.processID!,
+            application: application,
+            manifest: manifest
+        )
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "accessibility_audit",
+                message: report.valid
+                    ? "Accessibility audit passed within the bounded redacted tree"
+                    : "Accessibility audit reported actionable contract findings",
+                source: "macctld",
+                metadata: [
+                    "valid": .bool(report.valid),
+                    "finding_count": .number(Double(report.findings.count)),
+                    "redacted": .bool(report.tree.redacted)
+                ]
+            )]
+        )
+    }
+
+    private func idealStateAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        guard let manifestValue = request.params["manifest"],
+              let data = try? JSONCodec.encode(manifestValue) else {
+            throw WorkflowExecutionError.missingParameter("manifest")
+        }
+        let manifest: MacControlIdealStateManifest
+        do {
+            manifest = try JSONCodec.decode(MacControlIdealStateManifest.self, from: data)
+        } catch {
+            throw WorkflowExecutionError.unsafeInput("manifest is not a valid Mac Control ideal-state manifest")
+        }
+        let validation = MacControlIdealStateManifestValidator.validate(manifest)
+        var findings = validation.errors.map { error in
+            AccessibilityAuditFinding(
+                severity: .error,
+                code: "invalid_manifest",
+                target: manifest.repositoryID,
+                message: error
+            )
+        }
+        var structuralValid = validation.valid
+        if validation.valid && MacControlIdealStateManifestValidator.token(manifest.applicability) == "applicable" {
+            let accessibilityManifest = AccessibilityAuditManifest(
+                controls: manifest.tasks.compactMap(\.accessibility)
+            )
+            let report = try accessibilityTreeInspector.audit(
+                pid: application.processID!,
+                application: application,
+                manifest: accessibilityManifest
+            )
+            findings.append(contentsOf: report.findings)
+            structuralValid = report.valid
+        }
+        let audit = MacControlIdealStateLiveAudit(
+            application: application,
+            manifestValid: validation.valid,
+            structuralValid: structuralValid,
+            findings: findings
+        )
+        return try success(
+            request,
+            value: audit,
+            evidence: [Evidence(
+                kind: "ideal_state_audit",
+                message: structuralValid
+                    ? "Mac Control validated the task manifest and bounded structural Accessibility evidence"
+                    : "Mac Control found manifest or bounded structural Accessibility gaps",
+                source: "macctld",
+                metadata: [
+                    "manifest_valid": .bool(validation.valid),
+                    "structural_valid": .bool(structuralValid),
+                    "finding_count": .number(Double(findings.count)),
+                    "redacted": .bool(true)
+                ]
+            )]
+        )
+    }
+
+    private func performSemanticScroll(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw KeyboardControlError.confirmationRequired
+        }
+        guard request.params["lease_token"]?.stringValue == nil else {
+            throw WorkflowExecutionError.unsafeInput("semantic scrolling requires an app-scoped atomic request")
+        }
+        let applicationName = try requiredString(request, key: "app")
+        let direction = try requestedScrollDirection(from: request, key: "direction")
+        let amount = try requestedScrollAmount(from: request, key: "amount", defaultValue: nil)
+        let selector = try requestedControlSelector(from: request)
+            ?? Selector(
+                role: request.params["role"]?.stringValue,
+                identifier: request.params["identifier"]?.stringValue
+            )
+        let requestedFallback = try requestedScrollFallback(from: request)
+        let resolvedApplication = try? resolveApplication(applicationName)
+        let execution: SemanticScrollExecution
+        do {
+            execution = try withExecutionLock { () -> SemanticScrollExecution in
+                do {
+                    let scrollExecution = try performEphemeralSemanticScroll(
+                        applicationName: applicationName,
+                        selector: selector,
+                        direction: direction,
+                        amount: amount
+                    )
+                    let report = scrollExecution.report
+                    guard report.verification == .passed else {
+                        let failureClass: SemanticScrollFailureClass = switch report.verification {
+                        case .noObservedChange:
+                            .noObservedChange
+                        case .dispatched, .verificationUnavailable:
+                            .verificationUnavailable
+                        case .passed:
+                            .actionFailed
+                        }
+                        throw semanticScrollFailure(
+                            for: failureClass,
+                            requestedFallback: requestedFallback,
+                            message: "Accessibility scroll did not produce a verified visible change"
+                        )
+                    }
+                    return .accessibility(report)
+                } catch let error as SemanticScrollFailure {
+                    throw error
+                } catch let error as AccessibilityControllerError {
+                    let failure = semanticScrollFailure(
+                        for: error,
+                        requestedFallback: requestedFallback
+                    )
+                    guard failure.fallbackAllowed,
+                          requestedFallback == .inputScroll else {
+                        throw failure
+                    }
+
+                    do {
+                        let inputReport = try inputScrollPerformer.scroll(
+                            amount: Int32(amount),
+                            direction: direction.rawValue
+                        )
+                        switch inputReport.verification {
+                        case .passed:
+                            return .input(inputReport, from: failure.failureClass)
+                        case .noObservedChange:
+                            throw semanticScrollFailure(
+                                for: .noObservedChange,
+                                requestedFallback: requestedFallback,
+                                message: "The declared low-level scroll fallback produced no observed change",
+                                localFallbackDispatched: true,
+                                localFallbackVerification: inputReport.verification
+                            )
+                        case .dispatched, .verificationUnavailable:
+                            throw semanticScrollFailure(
+                                for: .verificationUnavailable,
+                                requestedFallback: requestedFallback,
+                                message: "The declared low-level scroll fallback dispatched an event but could not verify the visible result",
+                                localFallbackDispatched: true,
+                                localFallbackVerification: inputReport.verification
+                            )
+                        }
+                    } catch let error as SemanticScrollFailure {
+                        throw error
+                    } catch {
+                        throw semanticScrollFailure(
+                            for: .actionFailed,
+                            requestedFallback: requestedFallback,
+                            message: "The declared low-level scroll fallback failed: \(error.localizedDescription)",
+                            localFallbackDispatched: false
+                        )
+                    }
+                }
+            }
+        } catch let error as SemanticScrollFailure {
+            let kind: CapabilityEvidenceKind = error.failureClass == .targetAmbiguous
+                ? .ambiguous
+                : .negative
+            let reason: String = switch error.failureClass {
+            case .targetAmbiguous: CapabilityProfileInvalidationReason.targetAmbiguous.rawValue
+            case .noObservedChange, .verificationUnavailable: CapabilityProfileInvalidationReason.verificationFailed.rawValue
+            default: CapabilityProfileInvalidationReason.actionFailed.rawValue
+            }
+            recordCapabilityVerification(
+                application: resolvedApplication,
+                taskID: request.params["task"]?.stringValue,
+                targetFingerprint: request.params["target_fingerprint"]?.stringValue,
+                route: .scroll,
+                selector: selector,
+                kind: kind,
+                reason: reason
+            )
+            throw error
+        } catch {
+            recordCapabilityVerification(
+                application: resolvedApplication,
+                taskID: request.params["task"]?.stringValue,
+                targetFingerprint: request.params["target_fingerprint"]?.stringValue,
+                route: .scroll,
+                selector: selector,
+                kind: .negative,
+                reason: CapabilityProfileInvalidationReason.actionFailed.rawValue
+            )
+            throw error
+        }
+
+        switch execution {
+        case .accessibility(let report):
+            recordCapabilityVerification(
+                application: report.application,
+                taskID: request.params["task"]?.stringValue,
+                targetFingerprint: request.params["target_fingerprint"]?.stringValue,
+                route: .scroll,
+                selector: selector,
+                kind: .positive,
+                reason: "verified_action"
+            )
+            return try success(
+                request,
+                value: report,
+                evidence: [Evidence(
+                    kind: "semantic_scroll",
+                    message: "A uniquely identified semantic scroll container was acted on and re-resolved after scrolling",
+                    source: "macctld",
+                    metadata: [
+                        "route": .string(ControlActionRoute.scroll.rawValue),
+                        "verification": .string(report.verification.rawValue),
+                        "verification_basis": .string("target_re_resolved"),
+                        "lease_released": .bool(true)
+                    ]
+                )],
+                outcome: AgentActionOutcome(
+                    state: .verifiedSuccess,
+                    route: ControlActionRoute.scroll.rawValue,
+                    verification: report.verification.rawValue
+                )
+            )
+        case .input(let report, let originalFailure):
+            recordCapabilityVerification(
+                application: resolvedApplication,
+                taskID: request.params["task"]?.stringValue,
+                targetFingerprint: request.params["target_fingerprint"]?.stringValue,
+                route: .scroll,
+                selector: selector,
+                kind: .positive,
+                reason: "verified_input_fallback"
+            )
+            return try success(
+                request,
+                value: report,
+                evidence: [Evidence(
+                    kind: "scroll_fallback",
+                    message: "Accessibility scrolling was unavailable; the explicitly declared low-level input scroll fallback was dispatched and verified",
+                    source: "macctld",
+                    metadata: [
+                        "route": .string(report.route),
+                        "fallback_from": .string(ControlActionRoute.scroll.rawValue),
+                        "original_failure": .string(originalFailure.rawValue),
+                        "verification": .string(report.verification.rawValue),
+                        "lease_released": .bool(true)
+                    ]
+                )],
+                outcome: AgentActionOutcome(
+                    state: .verifiedSuccess,
+                    route: report.route,
+                    verification: report.verification.rawValue,
+                    failureClass: originalFailure.rawValue
+                )
+            )
+        }
+    }
+
+    private func requestedScrollFallback(from request: RequestEnvelope) throws -> ScrollFallbackRoute? {
+        guard let raw = request.params["fallback_route"]?.stringValue,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let normalized = raw.lowercased().replacingOccurrences(of: "-", with: "_")
+        guard let route = ScrollFallbackRoute(rawValue: normalized) else {
+            throw WorkflowExecutionError.unsafeInput(
+                "unknown scroll fallback route: \(raw); expected input_scroll or computer_use"
+            )
+        }
+        return route
+    }
+
+    private func semanticScrollFailure(
+        for error: AccessibilityControllerError,
+        requestedFallback: ScrollFallbackRoute?,
+        localFallbackDispatched: Bool = false,
+        localFallbackVerification: ScrollVerificationState? = nil
+    ) -> SemanticScrollFailure {
+        switch error {
+        case .elementNotFound, .scrollTargetRequired:
+            return semanticScrollFailure(
+                for: .targetMissing,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .scrollUnavailable:
+            return semanticScrollFailure(
+                for: .actionUnavailable,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .ambiguousMatch:
+            return semanticScrollFailure(
+                for: .targetAmbiguous,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .actionFailed:
+            return semanticScrollFailure(
+                for: .actionFailed,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .permissionDenied:
+            return semanticScrollFailure(
+                for: .permissionDenied,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        case .applicationNotRunning, .unreadableFocus, .boundsUnavailable:
+            return semanticScrollFailure(
+                for: .actionFailed,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
+        }
+    }
+
+    private func semanticScrollFailure(
+        for failureClass: SemanticScrollFailureClass,
+        requestedFallback: ScrollFallbackRoute?,
+        message: String,
+        localFallbackDispatched: Bool = false,
+        localFallbackVerification: ScrollVerificationState? = nil
+    ) -> SemanticScrollFailure {
+        let fallbackAllowed: Bool
+        switch failureClass {
+        case .targetMissing, .actionUnavailable, .permissionDenied:
+            fallbackAllowed = true
+        case .targetAmbiguous, .actionFailed, .noObservedChange, .verificationUnavailable:
+            fallbackAllowed = false
+        }
+        let recommendsComputerUse = failureClass != .targetAmbiguous
+        return SemanticScrollFailure(
+            failureClass: failureClass,
+            message: message,
+            recommendedProvider: recommendsComputerUse ? .computerUse : nil,
+            freshStateRequired: recommendsComputerUse,
+            fallbackAllowed: fallbackAllowed,
+            requestedFallback: requestedFallback,
+            localFallbackDispatched: localFallbackDispatched,
+            localFallbackVerification: localFallbackVerification
+        )
+    }
+
+    private func runningAccessibilityApplication(from request: RequestEnvelope) throws -> AppInfo {
+        let application = try resolveApplication(try requiredString(request, key: "app"))
+        guard application.isRunning, application.processID != nil else {
+            throw AccessibilityControllerError.applicationNotRunning
+        }
+        return application
+    }
+
+    private func currentOSVersion() -> String {
+        ProcessInfo.processInfo.operatingSystemVersionString
+    }
+
+    private func currentCapabilityProviderState() -> CapabilityProviderState {
+        let permissions = permissionContext == "daemon"
+            ? PermissionDiagnostics.report()
+            : PermissionDiagnostics.unknownReport()
+        return CapabilityProviderState(permissionStatuses: permissions)
+    }
+
+    /// Task evidence is advisory to the profile cache. A broken cache must
+    /// never turn a verified control action into a failed control action.
+    private func recordCapabilityVerification(
+        application: AppInfo?,
+        taskID: String?,
+        targetFingerprint: String?,
+        route: ControlActionRoute,
+        selector: Selector?,
+        kind: CapabilityEvidenceKind,
+        reason: String
+    ) {
+        guard let application,
+              let taskID,
+              let targetFingerprint,
+              !taskID.isEmpty,
+              !targetFingerprint.isEmpty else {
+            return
+        }
+        do {
+            _ = try capabilityProfileStore.recordTaskVerification(
+                application: application,
+                osVersion: currentOSVersion(),
+                providerState: currentCapabilityProviderState(),
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: route,
+                selector: selector,
+                kind: kind,
+                reason: reason
+            )
+        } catch {
+            logger.record(event: "capability_profile_update_failed", metadata: [
+                "task": taskID,
+                "route": route.rawValue,
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
+    private func capabilityEvidence(for error: Error) -> (CapabilityEvidenceKind, String) {
+        let description = error.localizedDescription.lowercased()
+        if description.contains("ambiguous") {
+            return (.ambiguous, CapabilityProfileInvalidationReason.targetAmbiguous.rawValue)
+        }
+        if description.contains("verification") || description.contains("focus") {
+            return (.negative, CapabilityProfileInvalidationReason.verificationFailed.rawValue)
+        }
+        if description.contains("stale") || description.contains("element") {
+            return (.negative, CapabilityProfileInvalidationReason.staleElement.rawValue)
+        }
+        return (.negative, CapabilityProfileInvalidationReason.actionFailed.rawValue)
+    }
+
+    private func requestedDouble(from request: RequestEnvelope, key: String) throws -> Double {
+        guard let value = request.params[key]?.doubleValue, value.isFinite else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a finite number")
+        }
+        return value
+    }
+
+    private func requestedPositiveDouble(
+        from request: RequestEnvelope,
+        key: String,
+        defaultValue: Double
+    ) throws -> Double {
+        guard let raw = request.params[key] else { return defaultValue }
+        guard let value = raw.doubleValue, value.isFinite, value > 0 else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a positive finite number")
+        }
+        return value
+    }
+
+    private func requestedNonNegativeInt(
+        from request: RequestEnvelope,
+        key: String,
+        defaultValue: Int
+    ) throws -> Int {
+        guard let raw = request.params[key] else { return defaultValue }
+        guard let value = raw.doubleValue, value.isFinite, value.rounded() == value, value >= 0 else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a non-negative integer")
+        }
+        return Int(value)
+    }
+
+    private func requestedPositiveInt(
+        from request: RequestEnvelope,
+        key: String,
+        defaultValue: Int?
+    ) throws -> Int {
+        guard let raw = request.params[key] else {
+            if let defaultValue { return defaultValue }
+            throw WorkflowExecutionError.missingParameter(key)
+        }
+        guard let value = raw.doubleValue, value.isFinite, value.rounded() == value, value > 0 else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a positive integer")
+        }
+        return Int(value)
+    }
+
+    private func requestedScrollDirection(
+        from request: RequestEnvelope,
+        key: String
+    ) throws -> AccessibilityScrollDirection {
+        guard let direction = try requestedOptionalScrollDirection(from: request, key: key) else {
+            throw WorkflowExecutionError.missingParameter(key)
+        }
+        return direction
+    }
+
+    private func requestedOptionalScrollDirection(
+        from request: RequestEnvelope,
+        key: String
+    ) throws -> AccessibilityScrollDirection? {
+        guard let raw = request.params[key] else { return nil }
+        guard let value = raw.stringValue,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be up, down, left, or right")
+        }
+        guard let direction = AccessibilityScrollDirection(
+            rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        ) else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be up, down, left, or right")
+        }
+        return direction
+    }
+
+    private func requestedScrollAmount(
+        from request: RequestEnvelope,
+        key: String,
+        defaultValue: Int?
+    ) throws -> Int {
+        let amount = try requestedPositiveInt(from: request, key: key, defaultValue: defaultValue)
+        guard (1...20).contains(amount) else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be between 1 and 20")
+        }
+        return amount
+    }
+
+    private func oppositeScrollDirection(
+        _ direction: AccessibilityScrollDirection
+    ) -> AccessibilityScrollDirection {
+        switch direction {
+        case .up: return .down
+        case .down: return .up
+        case .left: return .right
+        case .right: return .left
+        }
+    }
+
+    private func requestedStringArray(from request: RequestEnvelope, key: String) throws -> [String] {
+        guard let raw = request.params[key] else { return [] }
+        guard let values = raw.arrayValue else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be an array of strings")
+        }
+        var result: [String] = []
+        for value in values {
+            guard let string = value.stringValue,
+                  !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw WorkflowExecutionError.unsafeInput("\(key) must contain only non-empty strings")
+            }
+            result.append(string)
+        }
+        return result
+    }
+
+    private func requestedRouteArray(from request: RequestEnvelope, key: String) throws -> [ControlActionRoute] {
+        guard let raw = request.params[key] else { return [] }
+        let values: [String]
+        if let array = raw.arrayValue {
+            values = try array.map { value in
+                guard let string = value.stringValue else {
+                    throw WorkflowExecutionError.unsafeInput("\(key) must contain route strings")
+                }
+                return string
+            }
+        } else if let string = raw.stringValue {
+            values = string.split(separator: ",").map(String.init)
+        } else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a route array or comma-separated string")
+        }
+        return try values.map { rawRoute in
+            let normalized = rawRoute.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .replacingOccurrences(of: "-", with: "_")
+            guard let route = ControlActionRoute(rawValue: normalized) else {
+                throw WorkflowExecutionError.unsafeInput("unknown control route: \(rawRoute)")
+            }
+            return route
+        }
     }
 
     private func requestedControlSelector(from request: RequestEnvelope) throws -> Selector? {
@@ -790,45 +3021,6 @@ public final class MacCtlService {
 
     private func keyboardApplicationLabel(_ application: AppInfo?) -> String {
         application?.bundleID ?? application?.path ?? application?.name ?? "none"
-    }
-
-    private func beginIPhoneDrivingLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
-        let lease = try iphoneDrivingLeaseStore.acquire()
-        return try success(
-            request,
-            result: [
-                "message": .string(
-                    "Exclusive iPhone Mirroring driving lease acquired; keep hands off the trackpad until the operation completes"
-                ),
-                "driving_lease_token": .string(lease.token),
-                "expires_at": try JSONValue.fromEncodable(lease.expiresAt),
-                "duration_seconds": .number(iphoneDrivingLeaseStore.lifetimeSeconds)
-            ],
-            evidence: [Evidence(
-                kind: "mirroring_driving_lease",
-                message: "User-held exclusive Mirroring driving lease acquired in memory",
-                source: "macctld"
-            )]
-        )
-    }
-
-    private func endIPhoneDrivingLease(_ request: RequestEnvelope) throws -> ResponseEnvelope {
-        let token = try requiredString(request, key: "driving_lease_token")
-        guard iphoneDrivingLeaseStore.release(token: token) else {
-            throw IPhoneMirroringDrivingLeaseError.invalidOrExpired
-        }
-        return try success(
-            request,
-            result: [
-                "message": .string("Exclusive iPhone Mirroring driving lease released"),
-                "released": .bool(true)
-            ],
-            evidence: [Evidence(
-                kind: "mirroring_driving_lease",
-                message: "User-held exclusive Mirroring driving lease released",
-                source: "macctld"
-            )]
-        )
     }
 
     private func prepareTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -930,7 +3122,9 @@ public final class MacCtlService {
         guard let token = request.params["lease_token"]?.stringValue, !token.isEmpty else {
             throw TaskControlError.leaseRequired
         }
-        let requiresFullKeyboardAccess = plan.steps.contains { $0.action.kind == .key }
+        let requiresFullKeyboardAccess = plan.steps.contains {
+            $0.action.kind == .key || $0.action.kind == .search
+        }
         let context = try controlSession.beginAction(
             leaseToken: token,
             requireFullKeyboardAccess: requiresFullKeyboardAccess
@@ -981,7 +3175,7 @@ public final class MacCtlService {
         adapterRegistry: AppAdapterRegistry
     ) -> Bool {
         switch action.kind {
-        case .click, .type, .key, .scroll, .activateWindow, .capture, .ocr:
+        case .click, .type, .key, .search, .scroll, .activateWindow, .capture, .ocr:
             return true
         case .adapter:
             guard let adapterID = action.parameters["adapter_id"]?.stringValue,
@@ -1067,8 +3261,8 @@ public final class MacCtlService {
             "focus_policy": .string(workflow.focusPolicy.rawValue),
             "expires_at": try JSONValue.fromEncodable(prepared.record.expiresAt)
         ]
-        if requiresIPhoneMirroringDrivingLease(workflow) {
-            result["mirroring_driving_lease_required"] = .bool(true)
+        if workflow.actions.contains(where: { $0.kind == .search }) {
+            result["keyboard_lease_required"] = .bool(true)
         }
         return try success(
             request,
@@ -1100,7 +3294,6 @@ public final class MacCtlService {
                 details: ["errors": .array(validation.errors.map(JSONValue.string))]
             )
         }
-        let drivingLease = try requestedIPhoneMirroringDrivingLease(for: workflow, request: request)
         let suppliedInputs = try ephemeralInputs(from: request)
         if validation.risk == .sensitive {
             guard let token = request.params["approval_token"]?.stringValue else {
@@ -1157,12 +3350,16 @@ public final class MacCtlService {
             guard suppliedInputs.isEmpty || suppliedInputs == prepared.ephemeralInputs else {
                 throw WorkflowExecutionError.unsafeInput("ephemeral inputs did not match the prepared plan")
             }
-            return try executePrepared(request, prepared: prepared, drivingLease: drivingLease)
+            return try executePrepared(
+                request,
+                prepared: prepared,
+                keyboardLeaseToken: request.params["lease_token"]?.stringValue
+            )
         }
         let report = try executeWorkflow(
             workflow,
             ephemeralInputs: suppliedInputs,
-            drivingLease: drivingLease
+            keyboardLeaseToken: request.params["lease_token"]?.stringValue
         )
         logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
@@ -1207,15 +3404,12 @@ public final class MacCtlService {
             }
         }
         do {
-            let drivingLease: IPhoneMirroringDrivingLease?
-            if let record = approvalStore.record(for: token),
-               let workflow = workflowRegistry.workflow(id: record.workflowID) {
-                drivingLease = try requestedIPhoneMirroringDrivingLease(for: workflow, request: request)
-            } else {
-                drivingLease = nil
-            }
             let prepared = try approvalStore.approve(token: token)
-            return try executePrepared(request, prepared: prepared, drivingLease: drivingLease)
+            return try executePrepared(
+                request,
+                prepared: prepared,
+                keyboardLeaseToken: request.params["lease_token"]?.stringValue
+            )
         } catch let error as ApprovalStoreError {
             return approvalFailure(request, token: token, error: error)
         }
@@ -1224,7 +3418,7 @@ public final class MacCtlService {
     private func executePrepared(
         _ request: RequestEnvelope,
         prepared: PreparedApproval,
-        drivingLease: IPhoneMirroringDrivingLease? = nil
+        keyboardLeaseToken: String? = nil
     ) throws -> ResponseEnvelope {
         let digest = ApprovalStore.digest(
             prepared.workflow,
@@ -1261,12 +3455,10 @@ public final class MacCtlService {
                 operationID: prepared.record.operationID
             )
         }
-        let resolvedDrivingLease = try drivingLease
-            ?? requestedIPhoneMirroringDrivingLease(for: prepared.workflow, request: request)
         let report = try executeWorkflow(
             prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs,
-            drivingLease: resolvedDrivingLease
+            keyboardLeaseToken: keyboardLeaseToken ?? request.params["lease_token"]?.stringValue
         )
         let source = request.params["source"]?.stringValue ?? "cli"
         logger.record(event: "approved_workflow_succeeded", metadata: [
@@ -1375,12 +3567,16 @@ public final class MacCtlService {
     private func capabilityReport() -> CapabilityReport {
         CapabilityReport(
             capabilities: [
-                "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key",
+                "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key", "search",
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
-                "workflow.background", "approval.approve", "approval.deny", "iphoneMirroring",
+                "workflow.background", "approval.approve", "approval.deny",
                 "keyboard.status", "keyboard.setup", "keyboard.enable", "keyboard.inspect",
-                "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.navigate", "keyboard.send",
-                "control.status", "control.perform", "task.prepare", "task.run", "task.status",
+                "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression",
+                "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
+                "keyboard.navigate", "keyboard.send",
+                "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome",
+                "route.list", "route.inspect", "route.benchmark", "route.register",
+                "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
                 "task.resume", "task.cancel", "adapter.capabilities"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
@@ -1392,18 +3588,30 @@ public final class MacCtlService {
                 "background input is sent to target processes; global mouse, desktop, and foreground paths are rejected",
                 "Full Keyboard Access is explicit, AppKit-verified, and never enabled at daemon startup",
                 "direct keyboard navigation requires one short-lived, user-confirmed lease with per-key focus checks",
+                "physical keyboard suppression is opt-in, session-scoped, bounded by lease expiry, and leaves mouse emergency release available",
                 "bare printable keys are rejected from keyboard.send; text remains ephemeral-input plus approval gated",
                 "keyboard focus inspection returns only role, subrole, identifier, title, and target application",
-                "semantic control prefers Accessibility actions, then keyboard navigation, then explicit visual fallback",
+                "route selection uses a fresh measured app/task/version/target manifest after safety and permission gates",
+                "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
+                "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
+                "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
+                "control.capabilities is a fast route probe that may read a cached broad profile but never walks the Accessibility tree",
+                "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
+                "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+                "selector addressability identifies a requested route but never invents a universal fallback ladder",
+                "only an explicit pre-action target-not-found failure may advance through a declared fallback chain",
+                "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
                 "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
+                "semantic scroll targets a unique AXScrollArea identifier, re-resolves it, and compares bounded structural viewport metadata",
+                "semantic scroll failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
+                "accessibility trees are bounded and redacted; AX values, private text, screenshots, and OCR are excluded",
                 "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
                 "task recovery is capped at three safe, two reversible, and one sensitive attempt",
                 "sensitive uncertainty is indeterminate and is never retried automatically",
                 "adapter operations are typed and allowlisted; arbitrary AppleScript and JXA are rejected",
                 "task checkpoints contain only redacted identity hashes and verification state",
                 "raw coordinate semantic fallback requires an explicit allow_raw_coordinate flag",
-                "browser DOM automation and iPhone Mirroring remain separate surfaces",
                 "screenshots and OCR frames are discarded after an operation",
                 "no TCP or network listener is created"
             ],
@@ -1549,50 +3757,15 @@ public final class MacCtlService {
     private func executeWorkflow(
         _ workflow: WorkflowSpec,
         ephemeralInputs: [String: String],
-        drivingLease: IPhoneMirroringDrivingLease? = nil
+        keyboardLeaseToken: String? = nil
     ) throws -> ExecutionReport {
         try withExecutionLock {
             try workflowExecutor.execute(
                 workflow,
                 ephemeralInputs: ephemeralInputs,
-                mirroringDrivingLease: drivingLease
+                keyboardLeaseToken: keyboardLeaseToken
             )
         }
-    }
-
-    private func requestedIPhoneMirroringDrivingLease(
-        for workflow: WorkflowSpec,
-        request: RequestEnvelope
-    ) throws -> IPhoneMirroringDrivingLease? {
-        guard requiresIPhoneMirroringDrivingLease(workflow) else { return nil }
-        return try requiredIPhoneDrivingLease(from: request)
-    }
-
-    private func requiredIPhoneDrivingLease(
-        from request: RequestEnvelope
-    ) throws -> IPhoneMirroringDrivingLease {
-        guard let rawToken = request.params["driving_lease_token"] else {
-            throw IPhoneMirroringDrivingLeaseError.required
-        }
-        guard let token = rawToken.stringValue, !token.isEmpty,
-              let lease = iphoneDrivingLeaseStore.lease(for: token) else {
-            throw IPhoneMirroringDrivingLeaseError.invalidOrExpired
-        }
-        try lease.requireHeld()
-        return lease
-    }
-
-    private func requiresIPhoneMirroringDrivingLease(_ workflow: WorkflowSpec) -> Bool {
-        workflow.recipe == "iphone-open-tinder"
-            || workflow.actions.contains { action in
-                guard action.surface == .iphoneMirroring else { return false }
-                switch action.kind {
-                case .click, .type, .key, .scroll:
-                    return true
-                default:
-                    return false
-                }
-            }
     }
 
     private func withExecutionLock<T>(_ operation: () throws -> T) rethrows -> T {
@@ -1802,14 +3975,16 @@ public final class MacCtlService {
         status: OperationStatus = .succeeded,
         operationID: String? = nil,
         value: T,
-        evidence: [Evidence] = []
+        evidence: [Evidence] = [],
+        outcome: AgentActionOutcome? = nil
     ) throws -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
             operationID: operationID ?? UUID().uuidString,
             status: status,
             result: try JSONValue.fromEncodable(value),
-            evidence: evidence
+            evidence: evidence,
+            outcome: outcome
         )
     }
 
@@ -1818,14 +3993,16 @@ public final class MacCtlService {
         status: OperationStatus = .succeeded,
         operationID: String? = nil,
         result: [String: JSONValue],
-        evidence: [Evidence] = []
+        evidence: [Evidence] = [],
+        outcome: AgentActionOutcome? = nil
     ) throws -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
             operationID: operationID ?? UUID().uuidString,
             status: status,
             result: .object(result),
-            evidence: evidence
+            evidence: evidence,
+            outcome: outcome
         )
     }
 
@@ -1836,14 +4013,16 @@ public final class MacCtlService {
         message: String,
         operationID: String? = nil,
         evidence: [Evidence] = [],
-        details: [String: JSONValue] = [:]
+        details: [String: JSONValue] = [:],
+        outcome: AgentActionOutcome? = nil
     ) -> ResponseEnvelope {
         ResponseEnvelope(
             requestID: request.requestID,
             operationID: operationID ?? UUID().uuidString,
             status: status,
             evidence: evidence,
-            error: MacCtlError(code: code.rawValue, message: message, details: details)
+            error: MacCtlError(code: code.rawValue, message: message, details: details),
+            outcome: outcome
         )
     }
 
@@ -1901,6 +4080,31 @@ public final class MacCtlService {
         var details: [String: JSONValue] = [:]
         var evidence: [Evidence] = []
         switch error {
+        case let error as SemanticScrollFailure:
+            status = .blocked
+            switch error.failureClass {
+            case .noObservedChange, .verificationUnavailable:
+                code = .scrollVerificationUnavailable
+            default:
+                code = .scrollFallbackRequired
+            }
+            details = error.details
+            evidence = [Evidence(
+                kind: "scroll_fallback",
+                message: "Semantic Accessibility scrolling did not complete a verified action; follow the provider recommendation or refine the target",
+                source: "macctld",
+                metadata: error.details
+            )]
+        case let error as ControlBatchExecutionError:
+            status = .blocked
+            code = .operationFailed
+            details = error.details
+            evidence = [Evidence(
+                kind: "control_batch",
+                message: "A bounded control batch stopped fail-closed; the app lease was released and the remaining steps were not attempted",
+                source: "macctld",
+                metadata: error.details
+            )]
         case let error as TaskControlError:
             switch error {
             case .invalidPlan(let errors):
@@ -1992,7 +4196,10 @@ public final class MacCtlService {
             case .permissionDenied:
                 status = .blocked
                 code = .permissionDenied
-            case .ambiguousMatch, .unreadableFocus:
+            case .applicationNotRunning:
+                status = .blocked
+                code = .accessibilityTreeUnavailable
+            case .ambiguousMatch, .unreadableFocus, .elementNotFound, .scrollTargetRequired, .scrollUnavailable:
                 status = .blocked
                 code = .taskBlocked
             default:
@@ -2085,6 +4292,12 @@ public final class MacCtlService {
                 code = .keyboardLeaseConflict
             case .invalidLifetime, .applicationRequired:
                 code = .keyboardLeaseInvalid
+            case .physicalKeyboardSuppressionRequiresSession:
+                code = .keyboardPhysicalSuppressionRequiresSession
+            case .physicalKeyboardSuppressionUnavailable:
+                code = .keyboardPhysicalSuppressionUnavailable
+            case .physicalKeyboardSuppressionReasonRequired:
+                code = .keyboardFreezeReasonRequired
             case .notFound:
                 code = .keyboardLeaseNotFound
             case .expired:
@@ -2102,27 +4315,20 @@ public final class MacCtlService {
                 status = .blocked
                 code = .unsafeInput
             }
+        case let error as WarmPathSelectionError:
+            status = .blocked
+            code = .routeSelectionBlocked
+            details["selection_reason"] = .string(error.localizedDescription)
+        case let error as WarmPathStoreError:
+            status = .failed
+            code = .routeSelectionBlocked
+            details["registry_error"] = .string(error.localizedDescription)
+        case is RouteBenchmarkError:
+            status = .blocked
+            code = .routeBenchmarkBlocked
         case is ControlStateVerifierError:
             status = .blocked
             code = .operationFailed
-        case let error as IPhoneMirroringError:
-            status = .blocked
-            switch error {
-            case .drivingLeaseRequired:
-                code = .mirroringDrivingLeaseRequired
-            default:
-                code = .operationFailed
-            }
-        case let error as IPhoneMirroringDrivingLeaseError:
-            status = .blocked
-            switch error {
-            case .alreadyHeld:
-                code = .mirroringDrivingLeaseHeld
-            case .required:
-                code = .mirroringDrivingLeaseRequired
-            case .invalidOrExpired:
-                code = .mirroringDrivingLeaseInvalid
-            }
         case let error as ApprovalStoreError:
             status = .blocked
             switch error {
@@ -2164,6 +4370,13 @@ public final class MacCtlService {
                     source: "macctld",
                     metadata: ["policy": .string(FocusPolicy.background.rawValue)]
                 )]
+            case .indeterminate:
+                code = .taskIndeterminate
+                evidence = [Evidence(
+                    kind: "search_focus_guard",
+                    message: "Search input may have been dispatched, but the declared Accessibility focus could not be reverified",
+                    source: "macctld"
+                )]
             case let .focusChanged(expected, actual):
                 code = .focusChanged
                 details["focus_policy"] = .string(FocusPolicy.background.rawValue)
@@ -2179,8 +4392,6 @@ public final class MacCtlService {
                         "actual": .string(actual)
                     ]
                 )]
-            case .mirroringDrivingLeaseRequired:
-                code = .mirroringDrivingLeaseRequired
             default:
                 code = .operationFailed
             }
@@ -2194,7 +4405,82 @@ public final class MacCtlService {
             code: code,
             message: error.localizedDescription,
             evidence: evidence,
-            details: details
+            details: details,
+            outcome: agentActionOutcome(for: error, code: code, details: details)
+        )
+    }
+
+    private func agentActionOutcome(
+        for error: Error,
+        code: MacCtlErrorCode,
+        details: [String: JSONValue]
+    ) -> AgentActionOutcome {
+        if let scrollFailure = error as? SemanticScrollFailure {
+            let state: AgentActionOutcomeState = switch scrollFailure.failureClass {
+            case .targetMissing: .targetMissing
+            case .targetAmbiguous: .targetAmbiguous
+            case .actionUnavailable: .actionUnavailable
+            case .actionFailed: .actionFailed
+            case .permissionDenied: .permissionBlocked
+            case .noObservedChange: .noObservedChange
+            case .verificationUnavailable: .verificationUnavailable
+            }
+            let recommended = scrollFailure.recommendedProvider?.rawValue
+            return AgentActionOutcome(
+                state: state,
+                route: ControlActionRoute.scroll.rawValue,
+                verification: scrollFailure.localFallbackVerification?.rawValue,
+                failureClass: scrollFailure.failureClass.rawValue,
+                fallbackAllowed: scrollFailure.fallbackAllowed,
+                recommendedProvider: recommended,
+                freshStateRequired: scrollFailure.freshStateRequired,
+                nextAction: recommended == ScrollFallbackRoute.computerUse.rawValue
+                    ? "get_app_state_then_relocate_target_and_verify_with_computer_use"
+                    : nil
+            )
+        }
+
+        let failureClass = details["failure_class"]?.stringValue
+        let state: AgentActionOutcomeState
+        switch failureClass {
+        case "target_missing": state = .targetMissing
+        case "target_ambiguous": state = .targetAmbiguous
+        case "action_unavailable": state = .actionUnavailable
+        case "no_observed_change": state = .noObservedChange
+        case "verification_unavailable": state = .verificationUnavailable
+        case "permission_denied": state = .permissionBlocked
+        case "foreground_race": state = .foregroundRace
+        default:
+            switch code {
+            case .permissionDenied, .adapterPermissionMissing:
+                state = .permissionBlocked
+            case .focusChanged, .keyboardFocusChanged, .keyboardFocusUnavailable:
+                state = .foregroundRace
+            case .routeSelectionBlocked, .routeBenchmarkBlocked:
+                state = .actionUnavailable
+            default:
+                state = .actionFailed
+            }
+        }
+        let recommended = details["recommended_provider"]?.stringValue
+        let freshStateRequired = details["fresh_state_required"]?.boolValue ?? false
+        let fallbackAllowed = details["fallback_allowed"]?.boolValue ?? false
+        let nextAction: String? = if recommended == ScrollFallbackRoute.computerUse.rawValue {
+            "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        } else if freshStateRequired {
+            "refresh_state_before_retrying"
+        } else {
+            nil
+        }
+        return AgentActionOutcome(
+            state: state,
+            route: details["route"]?.stringValue,
+            verification: details["local_fallback_verification"]?.stringValue,
+            failureClass: failureClass,
+            fallbackAllowed: fallbackAllowed,
+            recommendedProvider: recommended,
+            freshStateRequired: freshStateRequired,
+            nextAction: nextAction
         )
     }
 }

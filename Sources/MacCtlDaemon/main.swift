@@ -4,8 +4,10 @@ import MacCtlCore
 
 final class MacCtlApplicationDelegate: NSObject, NSApplicationDelegate {
     var server: UnixSocketServer?
+    var shutdownHandler: (() -> Void)?
 
     func applicationWillTerminate(_ notification: Notification) {
+        shutdownHandler?()
         server?.stop()
     }
 }
@@ -18,6 +20,9 @@ var service: MacCtlService!
 service = MacCtlService(presentApproval: { approval in
     hud.present(approval)
 })
+hud.approvalPendingHandler = { token in
+    service.isApprovalPending(token: token)
+}
 hud.approveHandler = { token in
     service.handle(RequestEnvelope(
         method: "approval.approve",
@@ -30,6 +35,7 @@ hud.denyHandler = { token in
         params: ["token": .string(token), "source": .string("hud")]
     ))
 }
+delegate.shutdownHandler = { service.shutdown() }
 
 let server = UnixSocketServer()
 do {

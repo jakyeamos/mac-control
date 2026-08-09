@@ -20,7 +20,7 @@ public enum ActionRiskClassifier {
         switch action.kind {
         case .launchApp, .activateWindow, .waitFor, .capture, .ocr, .assert:
             inferred = .safe
-        case .click, .key, .adapter:
+        case .click, .key, .search, .adapter:
             inferred = .sensitive
         case .scroll:
             inferred = .reversible
@@ -110,27 +110,32 @@ public final class WorkflowRegistry {
                action.parameters["text_source"]?.stringValue != "ephemeral" {
                 errors.append("Type action \(index) must use text_source=ephemeral")
             }
+            if action.kind == .search {
+                do {
+                    _ = try SearchActionContract.parameters(for: action)
+                } catch {
+                    errors.append("Search action \(index) is invalid: \(error.localizedDescription)")
+                }
+            }
+            if action.parameters["physical_input_mode"]?.stringValue?.lowercased() == "suppressed",
+               !workflow.keyboardFreezeRequired {
+                errors.append("Suppressed physical keyboard input action \(index) requires keyboard_freeze_required=true")
+            }
             if ActionRiskClassifier.classify(action) == .sensitive,
                action.parameters["approval_reason"]?.stringValue == nil {
                 errors.append("Sensitive action \(index) must declare approval_reason")
             }
         }
         if workflow.focusPolicy == .background {
-            if workflow.surface == .iphoneMirroring {
-                errors.append("Background workflows cannot target iPhone Mirroring")
-            }
-            if workflow.recipe == "iphone-open-tinder" {
-                errors.append("The iPhone Mirroring recipe requires foreground focus")
-            }
             for (index, action) in workflow.actions.enumerated() {
                 switch action.kind {
-                case .activateWindow, .scroll:
+                case .activateWindow, .scroll, .search:
                     errors.append("Background action \(index) cannot use \(action.kind.rawValue)")
                 case .click:
                     if action.surface != .macApp {
                         errors.append("Background click action \(index) must target a macOS app")
                     }
-                    if action.selector?.tier != .accessibility {
+                    if action.selector?.addressability != .accessibility {
                         errors.append("Background click action \(index) requires an Accessibility selector")
                     }
                     if !Self.hasAppParameter(action.parameters) {
@@ -140,7 +145,7 @@ public final class WorkflowRegistry {
                     if action.surface != .macApp {
                         errors.append("Background type action \(index) must target a macOS app")
                     }
-                    if action.selector?.tier != .accessibility {
+                    if action.selector?.addressability != .accessibility {
                         errors.append("Background type action \(index) requires an Accessibility selector")
                     }
                     if !Self.hasAppParameter(action.parameters) {
@@ -168,7 +173,7 @@ public final class WorkflowRegistry {
                     break
                 case .assert:
                     let condition = action.parameters["condition"]?.stringValue ?? "foregroundApp"
-                    if condition == "foregroundApp" || condition == "iphoneMirroringForeground" {
+                    if condition == "foregroundApp" {
                         errors.append("Background assert action \(index) cannot inspect foreground focus")
                     }
                     if condition == "ocrContains"
@@ -179,7 +184,7 @@ public final class WorkflowRegistry {
                         if action.surface != .macApp || !Self.hasAppParameter(action.parameters) {
                             errors.append("Background element assert action \(index) must target a named macOS app")
                         }
-                        if action.selector?.tier != .accessibility {
+                    if action.selector?.addressability != .accessibility {
                             errors.append("Background element assert action \(index) requires an Accessibility selector")
                         }
                     }
@@ -189,7 +194,7 @@ public final class WorkflowRegistry {
             }
             for (index, assertion) in workflow.assertions.enumerated() {
                 switch assertion.kind {
-                case "foregroundApp", "iphoneMirroringForeground":
+                case "foregroundApp":
                     errors.append("Background assertion \(index) cannot inspect foreground focus")
                 case "ocrContains":
                     if assertion.surface != .macApp || !Self.hasAppParameter(assertion.parameters) {
@@ -199,7 +204,7 @@ public final class WorkflowRegistry {
                     if assertion.surface != .macApp || !Self.hasAppParameter(assertion.parameters) {
                         errors.append("Background element assertion \(index) must target a named macOS app")
                     }
-                    if assertion.selector?.tier != .accessibility {
+                    if assertion.selector?.addressability != .accessibility {
                         errors.append("Background element assertion \(index) requires an Accessibility selector")
                     }
                 default:
@@ -289,38 +294,6 @@ public final class WorkflowRegistry {
             recipe: "approval-smoke"
         )
 
-        let iPhoneWorkflow = WorkflowSpec(
-            id: "iphone.open-tinder",
-            name: "Open Tinder in iPhone Mirroring",
-            summary: "With a user-held driving lease, bring iPhone Mirroring forward and locate Tinder without swiping, messaging, purchasing, or submitting",
-            surface: .iphoneMirroring,
-            actions: [
-                ActionSpec(
-                    kind: .launchApp,
-                    surface: .iphoneMirroring,
-                    parameters: ["app": .string("iPhone Mirroring")]
-                ),
-                ActionSpec(
-                    kind: .activateWindow,
-                    surface: .iphoneMirroring,
-                    parameters: ["app": .string("iPhone Mirroring")]
-                ),
-                ActionSpec(
-                    kind: .waitFor,
-                    surface: .iphoneMirroring,
-                    parameters: ["seconds": .number(1)]
-                )
-            ],
-            assertions: [
-                AssertionSpec(
-                    kind: "iphoneMirroringForeground",
-                    surface: .iphoneMirroring,
-                    expected: "iPhone Mirroring"
-                )
-            ],
-            recipe: "iphone-open-tinder"
-        )
-
-        return safeOpenWorkflows + [approvalSmokeWorkflow, iPhoneWorkflow]
+        return safeOpenWorkflows + [approvalSmokeWorkflow]
     }
 }

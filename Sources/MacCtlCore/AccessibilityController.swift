@@ -5,16 +5,21 @@ import Foundation
 
 public enum AccessibilityControllerError: Error, LocalizedError {
     case permissionDenied
+    case applicationNotRunning
     case elementNotFound
     case ambiguousMatch(Int)
     case unreadableFocus
     case actionFailed(String)
     case boundsUnavailable
+    case scrollTargetRequired
+    case scrollUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
         case .permissionDenied:
             return "Accessibility permission is missing for the macctl host"
+        case .applicationNotRunning:
+            return "The requested application is not running, so its Accessibility tree is unavailable"
         case .elementNotFound:
             return "No Accessibility element matched the selector"
         case .ambiguousMatch(let count):
@@ -25,7 +30,51 @@ public enum AccessibilityControllerError: Error, LocalizedError {
             return "Accessibility action failed: \(action)"
         case .boundsUnavailable:
             return "Accessibility element has no usable screen bounds"
+        case .scrollTargetRequired:
+            return "Semantic scrolling requires one uniquely identified AXScrollArea target"
+        case .scrollUnavailable(let direction):
+            return "Accessibility scrolling is not available in direction: \(direction)"
         }
+    }
+}
+
+/// Projects the same redacted accessible name that the tree inspector exposes.
+/// Native controls do not consistently put that name in AXTitle; some use
+/// AXDescription or AXHelp instead. Selectors must address the exposed name
+/// without reading private text or relying on coordinates.
+enum AccessibilitySelectorLabel {
+    static func preferred(
+        title: String?,
+        description: String?,
+        help: String?
+    ) -> String? {
+        [title, description, help]
+            .compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+            .first
+    }
+
+    static func matchesExact(
+        _ expected: String,
+        title: String?,
+        description: String?,
+        help: String?
+    ) -> Bool {
+        preferred(title: title, description: description, help: help) == expected
+    }
+
+    static func contains(
+        _ expected: String,
+        title: String?,
+        description: String?,
+        help: String?,
+        value: String?
+    ) -> Bool {
+        preferred(title: title, description: description, help: help)?
+            .localizedCaseInsensitiveContains(expected) == true
+            || value?.localizedCaseInsensitiveContains(expected) == true
     }
 }
 
@@ -58,6 +107,7 @@ public final class AccessibilityController: FocusedElementInspecting {
         let application = AXUIElementCreateApplication(pid)
         var found: [AXUIElement] = []
         var identities = Set<UInt64>()
+        var visitedElements = Set<UInt64>()
         func append(_ element: AXUIElement) {
             let identity = UInt64(CFHash(element))
             guard identities.insert(identity).inserted else { return }
@@ -77,6 +127,24 @@ public final class AccessibilityController: FocusedElementInspecting {
                 maxNodes: nodeLimit,
                 found: &found,
                 identities: &identities,
+                visitedElements: &visitedElements,
+                visited: &visited,
+                truncated: &truncated
+            )
+        }
+        // Some native result menus are exposed as application-level children
+        // rather than descendants of AXWindows. Walk both surfaces while
+        // de-duplicating handles so a structurally unique result remains
+        // addressable without coordinates.
+        let applicationChildren = (attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        for child in applicationChildren {
+            search(
+                child,
+                selector: selector,
+                maxNodes: nodeLimit,
+                found: &found,
+                identities: &identities,
+                visitedElements: &visitedElements,
                 visited: &visited,
                 truncated: &truncated
             )
@@ -196,12 +264,28 @@ public final class AccessibilityController: FocusedElementInspecting {
         guard let focused = elementAttribute(applicationElement, kAXFocusedUIElementAttribute) else {
             throw AccessibilityControllerError.unreadableFocus
         }
+        let role = attribute(focused, kAXRoleAttribute) as? String
+        let subrole = attribute(focused, kAXSubroleAttribute) as? String
+        let identifier = attribute(focused, kAXIdentifierAttribute) as? String
+        let title = attribute(focused, kAXTitleAttribute) as? String
+        let frame = (try? bounds(of: focused)).map {
+            "\($0.origin.x),\($0.origin.y),\($0.size.width),\($0.size.height)"
+        }
+        let structuralIdentity = [role, subrole, identifier, title, frame]
+            .compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+            .joined(separator: "|")
         return FocusedElementSnapshot(
             targetApplication: application,
-            role: attribute(focused, kAXRoleAttribute) as? String,
-            subrole: attribute(focused, kAXSubroleAttribute) as? String,
-            identifier: attribute(focused, kAXIdentifierAttribute) as? String,
-            title: attribute(focused, kAXTitleAttribute) as? String
+            role: role,
+            subrole: subrole,
+            identifier: identifier,
+            title: title,
+            identityFingerprint: structuralIdentity.isEmpty
+                ? nil
+                : ControlTargetFingerprints.structuralDigest(structuralIdentity)
         )
     }
 
@@ -211,11 +295,15 @@ public final class AccessibilityController: FocusedElementInspecting {
         maxNodes: Int,
         found: inout [AXUIElement],
         identities: inout Set<UInt64>,
+        visitedElements: inout Set<UInt64>,
         visited: inout Int,
         truncated: inout Bool
     ) {
         guard visited < maxNodes else {
             truncated = true
+            return
+        }
+        guard visitedElements.insert(UInt64(CFHash(element))).inserted else {
             return
         }
         visited += 1
@@ -233,6 +321,7 @@ public final class AccessibilityController: FocusedElementInspecting {
                 maxNodes: maxNodes,
                 found: &found,
                 identities: &identities,
+                visitedElements: &visitedElements,
                 visited: &visited,
                 truncated: &truncated
             )
@@ -247,7 +336,13 @@ public final class AccessibilityController: FocusedElementInspecting {
            identifier != (attribute(element, kAXIdentifierAttribute) as? String) {
             return false
         }
-        if let title = selector.title, title != (attribute(element, kAXTitleAttribute) as? String) {
+        if let title = selector.title,
+           !AccessibilitySelectorLabel.matchesExact(
+               title,
+               title: attribute(element, kAXTitleAttribute) as? String,
+               description: attribute(element, kAXDescriptionAttribute) as? String,
+               help: attribute(element, kAXHelpAttribute) as? String
+           ) {
             return false
         }
         if let subrole = selector.subrole,
@@ -255,10 +350,13 @@ public final class AccessibilityController: FocusedElementInspecting {
             return false
         }
         if let text = selector.containsText {
-            let title = (attribute(element, kAXTitleAttribute) as? String) ?? ""
-            let value = (attribute(element, kAXValueAttribute) as? String) ?? ""
-            guard title.localizedCaseInsensitiveContains(text)
-                || value.localizedCaseInsensitiveContains(text) else {
+            guard AccessibilitySelectorLabel.contains(
+                text,
+                title: attribute(element, kAXTitleAttribute) as? String,
+                description: attribute(element, kAXDescriptionAttribute) as? String,
+                help: attribute(element, kAXHelpAttribute) as? String,
+                value: attribute(element, kAXValueAttribute) as? String
+            ) else {
                 return false
             }
         }
@@ -266,14 +364,14 @@ public final class AccessibilityController: FocusedElementInspecting {
             || selector.subrole != nil || selector.containsText != nil
     }
 
-    private func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
+    func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, name as CFString, &value)
         guard result == .success else { return nil }
         return value as AnyObject?
     }
 
-    private func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
         guard let value = attribute(element, name) else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
     }

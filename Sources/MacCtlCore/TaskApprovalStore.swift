@@ -73,6 +73,7 @@ public final class TaskApprovalStore {
             summary: plan.summary,
             risk: plan.steps.map(\.risk).max(by: { rank($0) < rank($1) }) ?? .safe,
             focusPolicy: plan.focusPolicy,
+            keyboardFreezeRequired: plan.keyboardFreezeRequired,
             expiresAt: now().addingTimeInterval(lifetime)
         )
         let prepared = PreparedTaskApproval(

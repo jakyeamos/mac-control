@@ -27,12 +27,14 @@ private final class ApprovalButton: NSButton {
 public final class ApprovalHUD: NSObject {
     public var approveHandler: ((String) -> ResponseEnvelope)?
     public var denyHandler: ((String) -> ResponseEnvelope)?
+    public var approvalPendingHandler: ((String) -> Bool)?
 
     private var panel: MacCtlPanel?
     private var statusItem: NSStatusItem?
     private var currentApproval: ApprovalRecord?
     private var statusLabel: NSTextField?
     private var expiryTimer: Timer?
+    private var pendingStateTimer: Timer?
     private let capsLockMonitor: CapsLockMonitor
 
     public init(capsLockMonitor: CapsLockMonitor = CapsLockMonitor()) {
@@ -66,6 +68,8 @@ public final class ApprovalHUD: NSObject {
         }
         expiryTimer?.invalidate()
         expiryTimer = nil
+        pendingStateTimer?.invalidate()
+        pendingStateTimer = nil
         guard approval.expiresAt > Date() else {
             dismissCurrentApproval()
             return
@@ -80,6 +84,7 @@ public final class ApprovalHUD: NSObject {
         window.makeKeyAndOrderFront(nil)
         _ = window.makeFirstResponder(nil)
         scheduleExpiry(for: approval)
+        schedulePendingStateCheck(for: approval)
     }
 
     public func bringToFront() {
@@ -109,7 +114,10 @@ public final class ApprovalHUD: NSObject {
         }
         SafeLog().record(event: "approval_hud_action", metadata: ["action": "approve"])
         guard let response = approveHandler?(token) else { return }
-        if response.status == .succeeded {
+        if Self.shouldDismissAfterAction(
+            response: response,
+            approvalIsPending: approvalPendingHandler?(token)
+        ) {
             dismissCurrentApproval()
         } else {
             statusLabel?.stringValue = response.error?.message ?? "Approval failed; operation was not completed"
@@ -124,11 +132,21 @@ public final class ApprovalHUD: NSObject {
         }
         SafeLog().record(event: "approval_hud_action", metadata: ["action": "deny"])
         guard let response = denyHandler?(token) else { return }
-        if response.status == .succeeded {
+        if Self.shouldDismissAfterAction(
+            response: response,
+            approvalIsPending: approvalPendingHandler?(token)
+        ) {
             dismissCurrentApproval()
         } else {
             statusLabel?.stringValue = response.error?.message ?? "Deny failed"
         }
+    }
+
+    static func shouldDismissAfterAction(
+        response: ResponseEnvelope,
+        approvalIsPending: Bool?
+    ) -> Bool {
+        response.status == .succeeded || approvalIsPending == false
     }
 
     private func scheduleExpiry(for approval: ApprovalRecord) {
@@ -146,9 +164,28 @@ public final class ApprovalHUD: NSObject {
         }
     }
 
+    private func schedulePendingStateCheck(for approval: ApprovalRecord) {
+        guard approvalPendingHandler != nil else { return }
+        pendingStateTimer?.invalidate()
+        pendingStateTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.5,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self, self.currentApproval?.token == approval.token else { return }
+            guard let isPending = self.approvalPendingHandler?(approval.token) else { return }
+            if isPending {
+                self.schedulePendingStateCheck(for: approval)
+            } else {
+                self.dismissCurrentApproval()
+            }
+        }
+    }
+
     private func dismissCurrentApproval() {
         expiryTimer?.invalidate()
         expiryTimer = nil
+        pendingStateTimer?.invalidate()
+        pendingStateTimer = nil
         currentApproval = nil
         panel?.orderOut(nil)
     }

@@ -70,6 +70,7 @@ public final class ApprovalStore {
             summary: workflow.summary,
             risk: ActionRiskClassifier.classify(workflow),
             focusPolicy: workflow.focusPolicy,
+            keyboardFreezeRequired: workflow.keyboardFreezeRequired,
             expiresAt: expiresAt
         )
         let prepared = PreparedApproval(

@@ -122,8 +122,12 @@ public final class InputController {
             throw InputControllerError.permissionDenied
         }
         event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        MacCtlKeyboardEventMetadata.markSynthetic(event)
         event.post(tap: .cghidEventTap)
         let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        if let keyUp {
+            MacCtlKeyboardEventMetadata.markSynthetic(keyUp)
+        }
         keyUp?.post(tap: .cghidEventTap)
     }
 
@@ -145,6 +149,8 @@ public final class InputController {
             up?.flags.insert(modifier)
         }
         guard let down, let up else { throw InputControllerError.permissionDenied }
+        MacCtlKeyboardEventMetadata.markSynthetic(down)
+        MacCtlKeyboardEventMetadata.markSynthetic(up)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
     }
@@ -167,11 +173,14 @@ public final class InputController {
             up?.flags.insert(modifier)
         }
         guard let down, let up else { throw InputControllerError.permissionDenied }
+        MacCtlKeyboardEventMetadata.markSynthetic(down)
+        MacCtlKeyboardEventMetadata.markSynthetic(up)
         down.postToPid(processID)
         up.postToPid(processID)
     }
 
-    public func scroll(amount: Int32, direction: String) throws {
+    @discardableResult
+    public func scroll(amount: Int32, direction: String) throws -> InputScrollReport {
         try requirePostEventAccess()
         let normalizedDirection = direction.lowercased()
         let delta: Int32
@@ -192,6 +201,11 @@ public final class InputController {
             throw InputControllerError.permissionDenied
         }
         event.post(tap: .cghidEventTap)
+        return InputScrollReport(
+            direction: normalizedDirection,
+            amount: Int(abs(amount)),
+            verification: .verificationUnavailable
+        )
     }
 
     private func requirePostEventAccess() throws {
@@ -200,6 +214,8 @@ public final class InputController {
         }
     }
 }
+
+extension InputController: InputScrollPerforming {}
 
 public struct KeySpecification: Equatable {
     public let keyCode: CGKeyCode

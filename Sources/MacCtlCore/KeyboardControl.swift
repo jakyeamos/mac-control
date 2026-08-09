@@ -8,6 +8,11 @@ public enum KeyboardLeaseScope: String, Codable, Equatable, CaseIterable {
     case session
 }
 
+public enum KeyboardPhysicalInputMode: String, Codable, Equatable, CaseIterable {
+    case shared
+    case suppressed
+}
+
 public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
     case nextControl = "next-control"
     case previousControl = "previous-control"
@@ -84,22 +89,54 @@ public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
 public struct KeyboardDriveLease: Codable, Equatable {
     public let token: String
     public let scope: KeyboardLeaseScope
+    public let physicalInputMode: KeyboardPhysicalInputMode
+    /// Only presence is retained; the human-supplied reason never enters a
+    /// lease response, receipt, or log.
+    public let freezeReasonProvided: Bool
     public let application: AppInfo?
     public let acquiredAt: Date
     public let expiresAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case token
+        case scope
+        case physicalInputMode
+        case freezeReasonProvided
+        case application
+        case acquiredAt
+        case expiresAt
+    }
 
     public init(
         token: String,
         scope: KeyboardLeaseScope,
         application: AppInfo?,
         acquiredAt: Date,
-        expiresAt: Date
+        expiresAt: Date,
+        physicalInputMode: KeyboardPhysicalInputMode = .shared,
+        freezeReasonProvided: Bool = false
     ) {
         self.token = token
         self.scope = scope
+        self.physicalInputMode = physicalInputMode
+        self.freezeReasonProvided = freezeReasonProvided
         self.application = application
         self.acquiredAt = acquiredAt
         self.expiresAt = expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decode(String.self, forKey: .token)
+        scope = try container.decode(KeyboardLeaseScope.self, forKey: .scope)
+        physicalInputMode = try container.decodeIfPresent(
+            KeyboardPhysicalInputMode.self,
+            forKey: .physicalInputMode
+        ) ?? .shared
+        freezeReasonProvided = try container.decodeIfPresent(Bool.self, forKey: .freezeReasonProvided) ?? false
+        application = try container.decodeIfPresent(AppInfo.self, forKey: .application)
+        acquiredAt = try container.decode(Date.self, forKey: .acquiredAt)
+        expiresAt = try container.decode(Date.self, forKey: .expiresAt)
     }
 }
 
@@ -133,6 +170,31 @@ public struct KeyboardAccessStatus: Codable, Equatable {
     }
 }
 
+public struct KeyboardFreezeStatus: Codable, Equatable {
+    public let active: Bool
+    public let token: String?
+    public let scope: KeyboardLeaseScope?
+    public let expiresAt: Date?
+    public let reasonPresent: Bool
+    public let permissions: [PermissionStatus]
+
+    public init(
+        active: Bool,
+        token: String?,
+        scope: KeyboardLeaseScope?,
+        expiresAt: Date?,
+        reasonPresent: Bool,
+        permissions: [PermissionStatus]
+    ) {
+        self.active = active
+        self.token = token
+        self.scope = scope
+        self.expiresAt = expiresAt
+        self.reasonPresent = reasonPresent
+        self.permissions = permissions
+    }
+}
+
 public struct KeyboardSetupInfo: Codable, Equatable {
     public let settingsPath: String
     public let instructions: [String]
@@ -159,19 +221,25 @@ public struct FocusedElementSnapshot: Codable, Equatable {
     public let subrole: String?
     public let identifier: String?
     public let title: String?
+    /// A redacted structural identity for controls that expose no stable AX
+    /// identifier or title. This is deliberately a digest, never an AX
+    /// element reference or raw value.
+    public let identityFingerprint: String?
 
     public init(
         targetApplication: AppInfo,
         role: String?,
         subrole: String?,
         identifier: String?,
-        title: String?
+        title: String?,
+        identityFingerprint: String? = nil
     ) {
         self.targetApplication = targetApplication
         self.role = role
         self.subrole = subrole
         self.identifier = identifier
         self.title = title
+        self.identityFingerprint = identityFingerprint
     }
 }
 
@@ -253,6 +321,9 @@ public enum KeyboardDriveStoreError: Error, LocalizedError, Equatable {
     case duplicateLease
     case invalidLifetime
     case applicationRequired
+    case physicalKeyboardSuppressionRequiresSession
+    case physicalKeyboardSuppressionReasonRequired
+    case physicalKeyboardSuppressionUnavailable
     case notFound
     case expired
 
@@ -266,6 +337,12 @@ public enum KeyboardDriveStoreError: Error, LocalizedError, Equatable {
             return "Keyboard lease lifetime must be greater than zero and no more than 300 seconds"
         case .applicationRequired:
             return "An app-scoped keyboard lease requires a foreground application"
+        case .physicalKeyboardSuppressionRequiresSession:
+            return "Physical keyboard suppression is available only for session-scoped leases"
+        case .physicalKeyboardSuppressionReasonRequired:
+            return "Physical keyboard suppression requires a non-empty human-readable reason"
+        case .physicalKeyboardSuppressionUnavailable:
+            return "macOS could not enable physical keyboard suppression; verify Accessibility and Input Monitoring permissions"
         case .notFound:
             return "The keyboard lease token is invalid"
         case .expired:
@@ -327,21 +404,32 @@ public final class KeyboardDriveStore {
     private let lock = NSLock()
     private let defaultLifetime: TimeInterval
     private let now: () -> Date
+    private let physicalKeyboardSuppressor: PhysicalKeyboardSuppressing
+    private let expiryQueue = DispatchQueue(label: "com.jakyeamos.macctl.keyboard-lease-expiry")
     private var active: ActiveLease?
+    private var expiryWorkItem: DispatchWorkItem?
 
     public init(
         defaultLifetime: TimeInterval = KeyboardDriveStore.defaultLifetime,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        physicalKeyboardSuppressor: PhysicalKeyboardSuppressing = SystemPhysicalKeyboardSuppressor()
     ) {
         self.defaultLifetime = min(max(defaultLifetime, 0.001), KeyboardDriveStore.maximumLifetime)
         self.now = now
+        self.physicalKeyboardSuppressor = physicalKeyboardSuppressor
+    }
+
+    deinit {
+        shutdown()
     }
 
     public func acquire(
         scope: KeyboardLeaseScope,
         application: AppInfo?,
         seconds: TimeInterval?,
-        confirm: Bool
+        confirm: Bool,
+        physicalInputMode: KeyboardPhysicalInputMode = .shared,
+        freezeReason: String? = nil
     ) throws -> KeyboardDriveLease {
         guard confirm else { throw KeyboardDriveStoreError.confirmationRequired }
         let lifetime = seconds ?? defaultLifetime
@@ -351,60 +439,102 @@ public final class KeyboardDriveStore {
         if scope == .app, application == nil {
             throw KeyboardDriveStoreError.applicationRequired
         }
+        if physicalInputMode == .suppressed, scope != .session {
+            throw KeyboardDriveStoreError.physicalKeyboardSuppressionRequiresSession
+        }
+        let hasFreezeReason = !(freezeReason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if physicalInputMode == .suppressed, !hasFreezeReason {
+            throw KeyboardDriveStoreError.physicalKeyboardSuppressionReasonRequired
+        }
         lock.lock()
-        defer { lock.unlock() }
         let current = now()
-        purgeExpired(at: current)
-        guard active == nil else { throw KeyboardDriveStoreError.duplicateLease }
+        if let expiredMode = removeExpiredLocked(at: current) {
+            lock.unlock()
+            releasePhysicalInputIfNeeded(expiredMode)
+            lock.lock()
+        }
+        guard active == nil else {
+            lock.unlock()
+            throw KeyboardDriveStoreError.duplicateLease
+        }
         let lease = KeyboardDriveLease(
             token: "kbd_\(UUID().uuidString)",
             scope: scope,
             application: scope == .app ? application : nil,
             acquiredAt: current,
-            expiresAt: current.addingTimeInterval(lifetime)
+            expiresAt: current.addingTimeInterval(lifetime),
+            physicalInputMode: physicalInputMode,
+            freezeReasonProvided: hasFreezeReason
         )
+
+        if physicalInputMode == .suppressed {
+            do {
+                try physicalKeyboardSuppressor.acquire(until: lease.expiresAt)
+            } catch {
+                lock.unlock()
+                physicalKeyboardSuppressor.release()
+                throw KeyboardDriveStoreError.physicalKeyboardSuppressionUnavailable
+            }
+        }
         active = ActiveLease(lease: lease)
+        scheduleExpirationLocked(for: lease)
+        lock.unlock()
         return lease
     }
 
     public func lease(for token: String) throws -> KeyboardDriveLease {
         lock.lock()
-        defer { lock.unlock() }
-        guard let active else { throw KeyboardDriveStoreError.notFound }
-        guard active.lease.token == token else { throw KeyboardDriveStoreError.notFound }
+        guard let active, active.lease.token == token else {
+            lock.unlock()
+            throw KeyboardDriveStoreError.notFound
+        }
         let current = now()
         guard active.lease.expiresAt > current else {
-            self.active = nil
+            let mode = removeActiveLocked()
+            lock.unlock()
+            releasePhysicalInputIfNeeded(mode)
             throw KeyboardDriveStoreError.expired
         }
+        lock.unlock()
         return active.lease
     }
 
     public func activeLease() -> KeyboardDriveLease? {
         lock.lock()
-        defer { lock.unlock() }
-        guard let active else { return nil }
-        let current = now()
-        guard active.lease.expiresAt > current else {
-            self.active = nil
+        guard let active else {
+            lock.unlock()
             return nil
         }
+        let current = now()
+        guard active.lease.expiresAt > current else {
+            let mode = removeActiveLocked()
+            lock.unlock()
+            releasePhysicalInputIfNeeded(mode)
+            return nil
+        }
+        lock.unlock()
         return active.lease
     }
 
     @discardableResult
     public func release(token: String) throws -> KeyboardDriveLease {
         lock.lock()
-        defer { lock.unlock() }
-        guard let active else { throw KeyboardDriveStoreError.notFound }
-        guard active.lease.token == token else { throw KeyboardDriveStoreError.notFound }
+        guard let active, active.lease.token == token else {
+            lock.unlock()
+            throw KeyboardDriveStoreError.notFound
+        }
         let current = now()
         guard active.lease.expiresAt > current else {
-            self.active = nil
+            let mode = removeActiveLocked()
+            lock.unlock()
+            releasePhysicalInputIfNeeded(mode)
             throw KeyboardDriveStoreError.expired
         }
-        self.active = nil
-        return active.lease
+        let lease = active.lease
+        let mode = removeActiveLocked()
+        lock.unlock()
+        releasePhysicalInputIfNeeded(mode)
+        return lease
     }
 
     /// Invalidates a matching lease without depending on its expiry state.
@@ -414,15 +544,68 @@ public final class KeyboardDriveStore {
     @discardableResult
     public func invalidate(token: String) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-        guard let active, active.lease.token == token else { return false }
-        self.active = nil
+        guard let active, active.lease.token == token else {
+            lock.unlock()
+            return false
+        }
+        let mode = removeActiveLocked()
+        lock.unlock()
+        releasePhysicalInputIfNeeded(mode)
         return true
     }
 
-    private func purgeExpired(at date: Date) {
-        guard let active, active.lease.expiresAt <= date else { return }
+    /// Releases the active lease and any physical suppression owned by it.
+    /// This is called during daemon shutdown and is safe to invoke repeatedly.
+    public func shutdown() {
+        lock.lock()
+        let mode = removeActiveLocked()
+        lock.unlock()
+        releasePhysicalInputIfNeeded(mode)
+    }
+
+    private func removeActiveLocked() -> KeyboardPhysicalInputMode? {
+        guard let active else { return nil }
         self.active = nil
+        expiryWorkItem?.cancel()
+        expiryWorkItem = nil
+        return active.lease.physicalInputMode
+    }
+
+    private func removeExpiredLocked(at date: Date) -> KeyboardPhysicalInputMode? {
+        guard let active, active.lease.expiresAt <= date else { return nil }
+        return removeActiveLocked()
+    }
+
+    private func releasePhysicalInputIfNeeded(_ mode: KeyboardPhysicalInputMode?) {
+        guard mode == .suppressed else { return }
+        physicalKeyboardSuppressor.release()
+    }
+
+    private func scheduleExpirationLocked(for lease: KeyboardDriveLease) {
+        expiryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.expireIfNeeded(token: lease.token)
+        }
+        expiryWorkItem = workItem
+        let delay = max(lease.expiresAt.timeIntervalSince(now()), 0)
+        expiryQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func expireIfNeeded(token: String) {
+        lock.lock()
+        guard let active, active.lease.token == token else {
+            lock.unlock()
+            return
+        }
+        let remaining = active.lease.expiresAt.timeIntervalSince(now())
+        if remaining > 0 {
+            scheduleExpirationLocked(for: active.lease)
+            lock.unlock()
+            return
+        }
+        let mode = removeActiveLocked()
+        lock.unlock()
+        releasePhysicalInputIfNeeded(mode)
     }
 }
 

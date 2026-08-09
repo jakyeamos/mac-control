@@ -644,7 +644,7 @@ public final class TaskRunner {
 
     private func requiresTargetRevalidation(for action: ActionSpec) -> Bool {
         switch action.kind {
-        case .click, .type, .key, .scroll, .activateWindow, .capture, .ocr, .adapter:
+        case .click, .type, .key, .search, .scroll, .activateWindow, .capture, .ocr, .adapter:
             return true
         case .launchApp, .waitFor, .assert:
             return false
@@ -866,6 +866,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let adapterRegistry: AppAdapterRegistry
     private let typedAppleScriptExecutor: TypedAppleScriptExecuting
     private let foregroundApplication: () -> AppInfo?
+    private let searchFieldResolver: SearchFieldResolving
+    private let focusedElementInspector: FocusedElementInspecting
+    private let searchTextTyper: SearchTextTyping
 
     public init(
         appController: AppController,
@@ -875,7 +878,10 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         semanticActionRouter: SemanticActionRouter,
         adapterRegistry: AppAdapterRegistry,
         foregroundApplication: @escaping () -> AppInfo?,
-        typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor()
+        typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor(),
+        searchFieldResolver: SearchFieldResolving? = nil,
+        focusedElementInspector: FocusedElementInspecting? = nil,
+        searchTextTyper: SearchTextTyping? = nil
     ) {
         self.appController = appController
         self.accessibilityController = accessibilityController
@@ -885,6 +891,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.adapterRegistry = adapterRegistry
         self.typedAppleScriptExecutor = typedAppleScriptExecutor
         self.foregroundApplication = foregroundApplication
+        self.searchFieldResolver = searchFieldResolver ?? accessibilityController
+        self.focusedElementInspector = focusedElementInspector ?? accessibilityController
+        self.searchTextTyper = searchTextTyper ?? inputController
     }
 
     public func execute(
@@ -934,7 +943,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                     allowRawCoordinate: false
                 )
             case .some("visual"):
-                guard selector.tier != .accessibility else {
+                guard selector.addressability != .accessibility else {
                     throw TaskActionExecutionError.unsupported("visual_route_requires_visual_selector")
                 }
                 semantic = try semanticActionRouter.perform(
@@ -946,7 +955,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                     allowRawCoordinate: action.parameters["allow_raw_coordinate"]?.boolValue == true
                 )
             case .some("accessibility"):
-                guard selector.tier == .accessibility else {
+                guard selector.addressability == .accessibility else {
                     throw TaskActionExecutionError.unsupported("accessibility_route_requires_accessibility_selector")
                 }
                 guard let application = try context.requireAuthority(), let pid = application.processID else {
@@ -984,7 +993,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             }
             switch try recoveryRoute(context) {
             case .some("accessibility"):
-                guard let selector = action.selector, selector.tier == .accessibility else {
+                guard let selector = action.selector, selector.addressability == .accessibility else {
                     throw TaskActionExecutionError.unsupported("accessibility_route_requires_accessibility_selector")
                 }
                 _ = try context.revalidateBeforeAction(includeTarget: true)
@@ -1006,6 +1015,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             _ = try context.revalidateBeforeAction(includeTarget: true)
             try inputController.type(text)
             return report(route: "keyboard", application: application)
+        case .search:
+            return try executeSearch(action, context: context)
         case .key:
             try requireRecoveryRoute(context, allowed: ["keyboard"])
             let key = try requiredParameter(action, key: "key")
@@ -1028,14 +1039,14 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 targetFingerprint: ControlTargetFingerprints.make(application: result.targetApplication, focus: nil)
             )
         case .scroll:
-            try requireRecoveryRoute(context, allowed: ["keyboard"])
+            try requireRecoveryRoute(context, allowed: ["input_scroll", "keyboard"])
             let application = try context.requireAuthority()
             guard application != nil else { throw TaskControlError.leaseRequired }
             let direction = try requiredParameter(action, key: "direction")
             let amount = Int32(action.parameters["amount"]?.intValue ?? 3)
             _ = try context.revalidateBeforeAction(includeTarget: true)
-            try inputController.scroll(amount: amount, direction: direction)
-            return report(route: "keyboard", application: application)
+            let inputReport = try inputController.scroll(amount: amount, direction: direction)
+            return report(route: inputReport.route, application: application)
         case .waitFor:
             try requireRecoveryRoute(context, allowed: ["native"])
             let seconds = min(max(action.parameters["seconds"]?.doubleValue ?? 0.2, 0), 30)
@@ -1052,6 +1063,148 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             return TaskActionExecutionReport(route: "native")
         case .adapter:
             return try executeAdapter(action, context: context)
+        }
+    }
+
+    private func executeSearch(
+        _ action: ActionSpec,
+        context: TaskActionContext
+    ) throws -> TaskActionExecutionReport {
+        try requireRecoveryRoute(context, allowed: ["keyboard"])
+        let parameters: SearchActionParameters
+        do {
+            parameters = try SearchActionContract.parameters(for: action)
+        } catch {
+            throw TaskActionExecutionError.blocked("search_contract_invalid")
+        }
+        guard let selector = action.selector else {
+            throw TaskActionExecutionError.blocked("missing_search_selector")
+        }
+        guard let query = context.ephemeralInputs[parameters.inputKey] else {
+            throw TaskActionExecutionError.blocked("missing_ephemeral_input")
+        }
+        guard let authority = context.authority,
+              let leaseToken = authority.leaseToken else {
+            throw TaskControlError.leaseRequired
+        }
+        guard let application = try context.requireAuthority(),
+              let pid = application.processID else {
+            throw TaskControlError.leaseRequired
+        }
+        _ = try context.revalidateBeforeAction(includeTarget: true)
+
+        do {
+            try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
+        } catch AccessibilityControllerError.ambiguousMatch {
+            throw TaskActionExecutionError.blocked("ambiguous_search_field")
+        } catch AccessibilityControllerError.elementNotFound {
+            throw TaskActionExecutionError.blocked("search_field_unavailable")
+        } catch AccessibilityControllerError.permissionDenied {
+            throw TaskActionExecutionError.permissionMissing("Accessibility")
+        }
+
+        let focus = try readSearchFocus(application: application)
+        if !SearchActionContract.matches(selector: selector, focus: focus) {
+            let semantic: SemanticActionReport
+            do {
+                semantic = try semanticActionRouter.perform(
+                    command: .search,
+                    selector: nil,
+                    leaseToken: leaseToken,
+                    count: 1,
+                    interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
+                    allowRawCoordinate: false,
+                    requestedRoute: .keyboard
+                )
+            } catch let error as TaskControlError {
+                throw error
+            } catch KeyboardControlError.permissionDenied(let permission) {
+                throw TaskActionExecutionError.permissionMissing(permission)
+            } catch KeyboardControlError.fullKeyboardAccessDisabled {
+                throw TaskActionExecutionError.permissionMissing("Full Keyboard Access")
+            } catch {
+                throw TaskActionExecutionError.uncertain("search_shortcut_dispatch")
+            }
+            guard semantic.verification.state == .passed,
+                  let verifiedFocus = semantic.verification.focusAfter,
+                  SearchActionContract.matches(selector: selector, focus: verifiedFocus) else {
+                throw TaskActionExecutionError.uncertain("search_focus_not_verified")
+            }
+        }
+
+        _ = try context.revalidateBeforeAction(includeTarget: true)
+        let focusedBeforeTyping: FocusedElementSnapshot
+        do {
+            try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
+            focusedBeforeTyping = try readSearchFocus(application: application)
+        } catch is TaskActionExecutionError {
+            throw TaskActionExecutionError.uncertain("search_focus_not_verified")
+        } catch {
+            throw TaskActionExecutionError.uncertain("search_target_revalidation")
+        }
+        guard SearchActionContract.matches(selector: selector, focus: focusedBeforeTyping) else {
+            throw TaskActionExecutionError.uncertain("search_focus_not_verified")
+        }
+
+        if parameters.replaceExisting {
+            do {
+                _ = try keyboardAccessController.sendRaw(
+                    keys: ["cmd+a", "delete"],
+                    targetApplication: application,
+                    leaseExpiresAt: authority.leaseExpiresAt ?? context.deadline,
+                    interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
+                    beforeEach: { [context, application] _ in
+                        _ = try context.revalidateBeforeAction(includeTarget: true)
+                        let currentFocus = try self.readSearchFocus(application: application)
+                        guard SearchActionContract.matches(selector: selector, focus: currentFocus) else {
+                            throw TaskActionExecutionError.uncertain("search_focus_changed_before_clear")
+                        }
+                    }
+                )
+            } catch let error as TaskControlError {
+                throw error
+            } catch let error as TaskActionExecutionError {
+                throw error
+            } catch {
+                throw TaskActionExecutionError.uncertain("search_clear_not_verified")
+            }
+        }
+
+        _ = try context.revalidateBeforeAction(includeTarget: true)
+        let currentFocus = try readSearchFocus(application: application)
+        guard SearchActionContract.matches(selector: selector, focus: currentFocus) else {
+            throw TaskActionExecutionError.uncertain("search_focus_changed_before_type")
+        }
+        do {
+            try searchTextTyper.type(query)
+        } catch {
+            throw TaskActionExecutionError.uncertain("search_query_dispatch")
+        }
+        _ = try context.revalidateBeforeAction(includeTarget: true)
+        let finalFocus: FocusedElementSnapshot
+        do {
+            finalFocus = try readSearchFocus(application: application)
+        } catch {
+            throw TaskActionExecutionError.uncertain("search_focus_not_verified_after_type")
+        }
+        guard SearchActionContract.matches(selector: selector, focus: finalFocus) else {
+            throw TaskActionExecutionError.uncertain("search_focus_not_verified_after_type")
+        }
+        return report(route: "keyboard", application: application)
+    }
+
+    private func readSearchFocus(application: AppInfo) throws -> FocusedElementSnapshot {
+        guard let pid = application.processID else {
+            throw TaskActionExecutionError.blocked("foreground_unavailable")
+        }
+        do {
+            return try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+        } catch AccessibilityControllerError.permissionDenied {
+            throw TaskActionExecutionError.permissionMissing("Accessibility")
+        } catch AccessibilityControllerError.unreadableFocus {
+            throw TaskActionExecutionError.blocked("focus_unreadable")
+        } catch {
+            throw TaskActionExecutionError.blocked("focus_observation_failed")
         }
     }
 
@@ -1365,7 +1518,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
 
     private func recoveryRoute(_ context: TaskActionContext) throws -> String? {
         guard let route = context.recoveryRoute else { return nil }
-        guard ["native", "accessibility", "keyboard", "visual", "apple_script"].contains(route) else {
+        guard ["native", "accessibility", "keyboard", "input_scroll", "visual", "apple_script"].contains(route) else {
             throw TaskActionExecutionError.unsupported("unsupported_recovery_route")
         }
         return route
@@ -1451,11 +1604,13 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         switch error {
         case .permissionDenied:
             return .permissionMissing("Accessibility")
+        case .applicationNotRunning:
+            return .blocked("application_not_running")
         case .ambiguousMatch:
             return .blocked("ambiguous_target")
         case .elementNotFound, .unreadableFocus:
             return .blocked("focus_unreadable")
-        case .actionFailed, .boundsUnavailable:
+        case .actionFailed, .boundsUnavailable, .scrollTargetRequired, .scrollUnavailable:
             return .blocked("accessibility_observation_failed")
         }
     }

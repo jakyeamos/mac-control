@@ -224,6 +224,7 @@ public struct TaskPlan: Codable, Equatable {
     public let summary: String
     public let surface: SurfaceKind
     public let focusPolicy: FocusPolicy
+    public let keyboardFreezeRequired: Bool
     public let steps: [TaskStep]
     public let totalTimeout: TimeInterval
     public let maxActions: Int
@@ -235,6 +236,7 @@ public struct TaskPlan: Codable, Equatable {
         summary: String,
         surface: SurfaceKind = .macApp,
         focusPolicy: FocusPolicy = .foreground,
+        keyboardFreezeRequired: Bool = false,
         steps: [TaskStep],
         totalTimeout: TimeInterval = 300,
         maxActions: Int = 128,
@@ -245,6 +247,7 @@ public struct TaskPlan: Codable, Equatable {
         self.summary = summary
         self.surface = surface
         self.focusPolicy = focusPolicy
+        self.keyboardFreezeRequired = keyboardFreezeRequired
         self.steps = steps
         self.totalTimeout = totalTimeout
         self.maxActions = maxActions
@@ -252,7 +255,7 @@ public struct TaskPlan: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, summary, surface, focusPolicy, steps, totalTimeout, maxActions, recipe
+        case id, name, summary, surface, focusPolicy, keyboardFreezeRequired, steps, totalTimeout, maxActions, recipe
     }
 
     public init(from decoder: Decoder) throws {
@@ -264,6 +267,13 @@ public struct TaskPlan: Codable, Equatable {
         focusPolicy = try (container.decodeIfPresent(FocusPolicy.self, forKey: TaskCodingKey(stringValue: "focusPolicy")!)
             ?? container.decodeIfPresent(FocusPolicy.self, forKey: TaskCodingKey(stringValue: "focus_policy")!))
             ?? .foreground
+        keyboardFreezeRequired = try container.decodeIfPresent(
+            Bool.self,
+            forKey: TaskCodingKey(stringValue: "keyboardFreezeRequired")!
+        ) ?? container.decodeIfPresent(
+            Bool.self,
+            forKey: TaskCodingKey(stringValue: "keyboard_freeze_required")!
+        ) ?? false
         steps = try container.decode([TaskStep].self, forKey: TaskCodingKey(stringValue: "steps")!)
         totalTimeout = try (container.decodeIfPresent(TimeInterval.self, forKey: TaskCodingKey(stringValue: "totalTimeout")!)
             ?? container.decodeIfPresent(TimeInterval.self, forKey: TaskCodingKey(stringValue: "total_timeout")!))
@@ -281,7 +291,7 @@ public struct TaskPlan: Codable, Equatable {
     public func requiresInputAuthority(using adapterRegistry: AppAdapterRegistry?) -> Bool {
         steps.contains { step in
             switch step.action.kind {
-            case .click, .type, .key, .scroll, .activateWindow, .adapter:
+            case .click, .type, .key, .search, .scroll, .activateWindow, .adapter:
                 if step.action.kind == .adapter {
                     if let adapterRegistry,
                        let adapterID = step.action.parameters["adapter_id"]?.stringValue,
@@ -317,6 +327,7 @@ public struct TaskPlan: Codable, Equatable {
             summary: summary,
             surface: surface,
             focusPolicy: focusPolicy,
+            keyboardFreezeRequired: keyboardFreezeRequired,
             steps: Array(steps.dropFirst(max(0, stepIndex))),
             totalTimeout: totalTimeout,
             maxActions: maxActions,
@@ -370,10 +381,6 @@ public enum TaskPlanValidator {
         if !(1...maximumActions).contains(plan.maxActions) {
             errors.append("Task action budget must be between 1 and \(maximumActions)")
         }
-        if plan.surface == .iphoneMirroring {
-            errors.append("Task runner does not unify with iPhone Mirroring")
-        }
-
         var ids = Set<String>()
         for (index, step) in plan.steps.enumerated() {
             let trimmedID = step.id.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -394,6 +401,10 @@ public enum TaskPlanValidator {
                     errors.append("Sensitive step \(trimmedID) must declare approval_reason")
                 }
             }
+            if step.action.parameters["physical_input_mode"]?.stringValue?.lowercased() == "suppressed",
+               !plan.keyboardFreezeRequired {
+                errors.append("Suppressed physical keyboard input step \(trimmedID) requires keyboard_freeze_required=true")
+            }
             if step.recovery.maxAttempts != nil, step.recovery.maxAttempts! < 1 {
                 errors.append("Step \(trimmedID) recovery max_attempts must be positive")
             }
@@ -407,6 +418,10 @@ public enum TaskPlanValidator {
                 if !knownRecoveryRoutes.contains(route) {
                     errors.append("Step \(trimmedID) recovery route is unsupported: \(route)")
                 }
+            }
+            if step.action.kind == .search,
+               step.recovery.alternateRoutes.contains(where: { $0 != "keyboard" }) {
+                errors.append("Step \(trimmedID) search recovery may only use the keyboard route")
             }
             let inferredRisk = minimumRisk(for: step.action, adapterRegistry: adapterRegistry)
             if rank(step.risk) < rank(inferredRisk) {
@@ -438,7 +453,7 @@ public enum TaskPlanValidator {
             if action.selector?.hasTarget != true && !hasCoordinate {
                 errors.append("Step \(stepID) click needs a target")
             }
-            if action.selector?.tier == .rawCoordinate,
+            if action.selector?.addressability == .rawCoordinate,
                action.parameters["coordinate_mode"]?.stringValue != "raw" {
                 errors.append("Step \(stepID) raw coordinates require coordinate_mode=raw")
             }
@@ -448,6 +463,12 @@ public enum TaskPlanValidator {
             }
             if action.parameters["input_key"]?.stringValue == nil {
                 errors.append("Step \(stepID) type must name an ephemeral input_key")
+            }
+        case .search:
+            do {
+                _ = try SearchActionContract.parameters(for: action)
+            } catch {
+                errors.append("Step \(stepID) search is invalid: \(error.localizedDescription)")
             }
         case .key:
             guard let key = action.parameters["key"]?.stringValue else {
@@ -630,6 +651,33 @@ public struct TaskCheckpoint: Codable, Equatable {
         case schemaVersion, taskID, planDigest, currentStepID, lastStepID, stepIndex, state
         case route, attempts, targetFingerprint, preconditionHash, postconditionHash
         case verificationResult, lastErrorCode, createdAt, updatedAt, startedAt
+        case startedAtUnixSeconds
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(taskID, forKey: .taskID)
+        try container.encode(planDigest, forKey: .planDigest)
+        try container.encodeIfPresent(currentStepID, forKey: .currentStepID)
+        try container.encodeIfPresent(lastStepID, forKey: .lastStepID)
+        try container.encode(stepIndex, forKey: .stepIndex)
+        try container.encode(state, forKey: .state)
+        try container.encodeIfPresent(route, forKey: .route)
+        try container.encode(attempts, forKey: .attempts)
+        try container.encodeIfPresent(targetFingerprint, forKey: .targetFingerprint)
+        try container.encodeIfPresent(preconditionHash, forKey: .preconditionHash)
+        try container.encodeIfPresent(postconditionHash, forKey: .postconditionHash)
+        try container.encode(verificationResult, forKey: .verificationResult)
+        try container.encodeIfPresent(lastErrorCode, forKey: .lastErrorCode)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        if let startedAt {
+            // Keep the legacy ISO field for older readers while the numeric
+            // projection preserves sub-second timeout state across restarts.
+            try container.encode(startedAt, forKey: .startedAt)
+            try container.encode(startedAt.timeIntervalSince1970, forKey: .startedAtUnixSeconds)
+        }
     }
 
     public init(from decoder: Decoder) throws {
@@ -650,7 +698,11 @@ public struct TaskCheckpoint: Codable, Equatable {
         lastErrorCode = try container.decodeIfPresent(String.self, forKey: .lastErrorCode)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
-        startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        if let unixSeconds = try container.decodeIfPresent(Double.self, forKey: .startedAtUnixSeconds) {
+            startedAt = Date(timeIntervalSince1970: unixSeconds)
+        } else {
+            startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        }
     }
 }
 

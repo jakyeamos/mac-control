@@ -9,8 +9,8 @@ public enum WorkflowExecutionError: Error, LocalizedError {
     case blocked(String)
     case unsafeInput(String)
     case backgroundUnsupported(String)
+    case indeterminate(String)
     case focusChanged(expected: String, actual: String)
-    case mirroringDrivingLeaseRequired
 
     public var errorDescription: String? {
         switch self {
@@ -28,10 +28,10 @@ public enum WorkflowExecutionError: Error, LocalizedError {
             return "Unsafe workflow input: \(message)"
         case .backgroundUnsupported(let message):
             return "Background workflow is unsupported: \(message)"
+        case .indeterminate(let message):
+            return "Workflow action outcome is indeterminate: \(message)"
         case .focusChanged(let expected, let actual):
             return "Background workflow changed foreground focus from \(expected) to \(actual)"
-        case .mirroringDrivingLeaseRequired:
-            return "An explicit user-held iPhone Mirroring driving lease is required before synthetic navigation"
         }
     }
 }
@@ -41,36 +41,70 @@ public final class WorkflowExecutor {
     private let accessibilityController: AccessibilityController
     private let inputController: InputController
     private let captureController: CaptureController
-    private let iphoneController: IPhoneMirroringController
+    private let keyboardAccessController: KeyboardAccessController
+    private let controlSession: ControlSession
+    private let semanticActionRouter: SemanticActionRouter
+    private let searchFieldResolver: SearchFieldResolving
+    private let focusedElementInspector: FocusedElementInspecting
+    private let searchTextTyper: SearchTextTyping
+    private let foregroundApplication: () -> AppInfo?
 
     public init(
         appController: AppController = AppController(),
         accessibilityController: AccessibilityController = AccessibilityController(),
         inputController: InputController = InputController(),
         captureController: CaptureController? = nil,
-        iphoneController: IPhoneMirroringController? = nil
+        keyboardAccessController: KeyboardAccessController = KeyboardAccessController(),
+        keyboardDriveStore: KeyboardDriveStore = KeyboardDriveStore(),
+        controlSession: ControlSession? = nil,
+        semanticActionRouter: SemanticActionRouter? = nil,
+        searchFieldResolver: SearchFieldResolving? = nil,
+        focusedElementInspector: FocusedElementInspecting? = nil,
+        searchTextTyper: SearchTextTyping? = nil,
+        foregroundApplication: (() -> AppInfo?)? = nil,
+        hasPostEventAccess: (() -> Bool)? = nil,
+        fullKeyboardAccessEnabled: (() -> Bool)? = nil
     ) {
         self.appController = appController
         self.accessibilityController = accessibilityController
         self.inputController = inputController
         self.captureController = captureController ?? CaptureController(appController: appController)
-        self.iphoneController = iphoneController ?? IPhoneMirroringController(
-            appController: appController,
-            captureController: self.captureController,
-            inputController: inputController
+        let resolvedForegroundApplication = foregroundApplication ?? { appController.foregroundApplication() }
+        let resolvedFocusedElementInspector = focusedElementInspector ?? accessibilityController
+        let resolvedPostEventAccess = hasPostEventAccess ?? PermissionDiagnostics.hasPostEventAccess
+        let resolvedControlSession = controlSession ?? ControlSession(
+            keyboardDriveStore: keyboardDriveStore,
+            focusedElementInspector: resolvedFocusedElementInspector,
+            foregroundApplication: resolvedForegroundApplication,
+            hasPostEventAccess: resolvedPostEventAccess,
+            fullKeyboardAccessEnabled: fullKeyboardAccessEnabled ?? {
+                keyboardAccessController.status(permissionContext: "workflow").fullKeyboardAccessEnabled == true
+            }
+        )
+        self.keyboardAccessController = keyboardAccessController
+        self.controlSession = resolvedControlSession
+        self.foregroundApplication = resolvedForegroundApplication
+        self.focusedElementInspector = resolvedFocusedElementInspector
+        self.searchFieldResolver = searchFieldResolver ?? accessibilityController
+        self.searchTextTyper = searchTextTyper ?? inputController
+        self.semanticActionRouter = semanticActionRouter ?? SemanticActionRouter(
+            session: resolvedControlSession,
+            keyboardAccessController: keyboardAccessController,
+            accessibilityActionController: accessibilityController,
+            visualActionController: VisualControlFallback(
+                captureController: self.captureController,
+                inputController: inputController
+            )
         )
     }
 
     public func execute(
         _ workflow: WorkflowSpec,
         ephemeralInputs: [String: String] = [:],
-        mirroringDrivingLease: IPhoneMirroringDrivingLease? = nil
+        keyboardLeaseToken: String? = nil
     ) throws -> ExecutionReport {
         let validation = WorkflowRegistry().validate(workflow)
         guard validation.valid else { throw WorkflowExecutionError.invalidWorkflow(validation.errors) }
-        if requiresMirroringDrivingLease(workflow) {
-            try requireDrivingLease(mirroringDrivingLease)
-        }
 
         let runID = UUID().uuidString
         let initialForeground = workflow.focusPolicy == .background
@@ -86,7 +120,7 @@ public final class WorkflowExecutor {
                 action,
                 ephemeralInputs: ephemeralInputs,
                 focusPolicy: workflow.focusPolicy,
-                mirroringDrivingLease: mirroringDrivingLease
+                keyboardLeaseToken: keyboardLeaseToken
             )
             evidence.append(contentsOf: actionResult.evidence)
             for (key, value) in actionResult.result {
@@ -97,39 +131,6 @@ public final class WorkflowExecutor {
             if workflow.focusPolicy == .background {
                 try ensureFocusPreserved(initialForeground)
             }
-        }
-
-        if workflow.recipe == "iphone-open-tinder" {
-            let match = try iphoneController.openMirroredApp(
-                "Tinder",
-                drivingLease: mirroringDrivingLease
-            )
-            result["mirrored_app"] = .string("Tinder")
-            evidence.append(Evidence(
-                kind: "mirroring_driving_lease",
-                message: "Synthetic Mirroring navigation ran under an active user-held exclusive driving lease",
-                source: "macctld"
-            ))
-            evidence.append(Evidence(
-                kind: "ocr_anchor",
-                message: "Located the requested mirrored app using an on-demand OCR anchor",
-                source: "iPhone Mirroring",
-                metadata: [
-                    "selector_tier": .number(Double(SelectorTier.visual.rawValue)),
-                    "anchor_width": .number(Double(match.bounds.width)),
-                    "anchor_height": .number(Double(match.bounds.height))
-                ]
-            ))
-            do {
-                _ = try iphoneController.verifyMirroredAppVisible("Tinder")
-            } catch IPhoneMirroringError.appNotVisible {
-                _ = try iphoneController.verifyMirroredAppForeground("Tinder")
-            }
-            evidence.append(Evidence(
-                kind: "assertion",
-                message: "Verified the requested mirrored app remains foregrounded in iPhone Mirroring",
-                source: "iPhone Mirroring"
-            ))
         }
 
         if workflow.recipe == "approval-smoke" {
@@ -194,13 +195,177 @@ public final class WorkflowExecutor {
         }
     }
 
+    private func executeSearch(
+        _ action: ActionSpec,
+        ephemeralInputs: [String: String],
+        focusPolicy: FocusPolicy,
+        keyboardLeaseToken: String?
+    ) throws -> ActionResult {
+        guard focusPolicy == .foreground else {
+            throw WorkflowExecutionError.backgroundUnsupported(
+                "search requires foreground focus"
+            )
+        }
+        let parameters: SearchActionParameters
+        do {
+            parameters = try SearchActionContract.parameters(for: action)
+        } catch {
+            throw WorkflowExecutionError.unsafeInput("search action contract is invalid")
+        }
+        guard let query = ephemeralInputs[parameters.inputKey] else {
+            throw WorkflowExecutionError.unsafeInput("search input is missing")
+        }
+        guard let keyboardLeaseToken,
+              !keyboardLeaseToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw KeyboardControlError.leaseRequired
+        }
+
+        let context = try controlSession.beginAction(
+            leaseToken: keyboardLeaseToken,
+            requireFullKeyboardAccess: true
+        )
+        guard let pid = context.foregroundApplication.processID,
+              let selector = action.selector else {
+            throw WorkflowExecutionError.blocked("search target is unavailable")
+        }
+        if let requestedApp = action.parameters["app"]?.stringValue,
+           !matchesApplication(context.foregroundApplication, name: requestedApp) {
+            throw WorkflowExecutionError.blocked("search target is not foreground")
+        }
+
+        do {
+            try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
+        } catch AccessibilityControllerError.ambiguousMatch {
+            throw WorkflowExecutionError.blocked("ambiguous search field")
+        } catch AccessibilityControllerError.elementNotFound {
+            throw WorkflowExecutionError.blocked("search field is unavailable")
+        } catch AccessibilityControllerError.permissionDenied {
+            throw KeyboardControlError.permissionDenied("Accessibility")
+        }
+
+        var dispatchedShortcut = false
+        let initialFocus = try readSearchFocus(application: context.foregroundApplication)
+        if !SearchActionContract.matches(selector: selector, focus: initialFocus) {
+            let semantic = try semanticActionRouter.perform(
+                command: .search,
+                selector: nil,
+                leaseToken: keyboardLeaseToken,
+                count: 1,
+                interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
+                allowRawCoordinate: false,
+                requestedRoute: .keyboard
+            )
+            dispatchedShortcut = true
+            guard semantic.verification.state == .passed,
+                  let focusAfter = semantic.verification.focusAfter,
+                  SearchActionContract.matches(selector: selector, focus: focusAfter) else {
+                throw WorkflowExecutionError.indeterminate("search focus was not verified")
+            }
+        }
+
+        let currentContext = try controlSession.beginAction(
+            leaseToken: keyboardLeaseToken,
+            requireFullKeyboardAccess: true
+        )
+        guard let currentPID = currentContext.foregroundApplication.processID else {
+            throw WorkflowExecutionError.indeterminate("search foreground was lost")
+        }
+        do {
+            try searchFieldResolver.requireUniqueSearchField(pid: currentPID, selector: selector)
+        } catch {
+            if dispatchedShortcut {
+                throw WorkflowExecutionError.indeterminate("search target changed after shortcut")
+            }
+            throw WorkflowExecutionError.blocked("search field changed before input")
+        }
+        let focusedBeforeTyping = try readSearchFocus(application: currentContext.foregroundApplication)
+        guard SearchActionContract.matches(selector: selector, focus: focusedBeforeTyping) else {
+            if dispatchedShortcut {
+                throw WorkflowExecutionError.indeterminate("search focus changed before input")
+            }
+            throw WorkflowExecutionError.blocked("search field is not focused")
+        }
+
+        if parameters.replaceExisting {
+            do {
+                _ = try keyboardAccessController.sendRaw(
+                    keys: ["cmd+a", "delete"],
+                    targetApplication: currentContext.foregroundApplication,
+                    leaseExpiresAt: currentContext.lease.expiresAt,
+                    interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
+                    beforeEach: { [controlSession, currentContext] _ in
+                        _ = try controlSession.revalidate(currentContext)
+                        let focus = try self.readSearchFocus(
+                            application: currentContext.foregroundApplication
+                        )
+                        guard SearchActionContract.matches(selector: selector, focus: focus) else {
+                            throw WorkflowExecutionError.indeterminate("search focus changed while clearing")
+                        }
+                    }
+                )
+            } catch let error as WorkflowExecutionError {
+                throw error
+            } catch {
+                throw WorkflowExecutionError.indeterminate("search clear was not verified")
+            }
+        }
+
+        _ = try controlSession.revalidate(currentContext)
+        let focusBeforeQuery = try readSearchFocus(application: currentContext.foregroundApplication)
+        guard SearchActionContract.matches(selector: selector, focus: focusBeforeQuery) else {
+            throw WorkflowExecutionError.indeterminate("search focus changed before query")
+        }
+        do {
+            try searchTextTyper.type(query)
+        } catch {
+            throw WorkflowExecutionError.indeterminate("search query dispatch was not verified")
+        }
+        _ = try controlSession.revalidate(currentContext)
+        let finalFocus: FocusedElementSnapshot
+        do {
+            finalFocus = try readSearchFocus(application: currentContext.foregroundApplication)
+        } catch {
+            throw WorkflowExecutionError.indeterminate("search focus was not verified after query")
+        }
+        guard SearchActionContract.matches(selector: selector, focus: finalFocus) else {
+            throw WorkflowExecutionError.indeterminate("search focus was not verified after query")
+        }
+        return ActionResult(
+            evidence: [Evidence(
+                kind: "search",
+                message: "Ephemeral query was entered through the verified Accessibility search field",
+                source: currentContext.foregroundApplication.name,
+                metadata: ["route": .string(ControlActionRoute.keyboard.rawValue)]
+            )],
+            result: ["searched": .bool(true)],
+            targetProcessIDs: [currentContext.foregroundApplication.processID].compactMap { $0 }
+        )
+    }
+
+    private func readSearchFocus(application: AppInfo) throws -> FocusedElementSnapshot {
+        guard let pid = application.processID else {
+            throw WorkflowExecutionError.blocked("foreground unavailable")
+        }
+        do {
+            return try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+        } catch AccessibilityControllerError.permissionDenied {
+            throw KeyboardControlError.permissionDenied("Accessibility")
+        } catch {
+            throw WorkflowExecutionError.blocked("search focus is unreadable")
+        }
+    }
+
+    private func matchesApplication(_ application: AppInfo, name: String) -> Bool {
+        application.name.caseInsensitiveCompare(name) == .orderedSame
+            || application.bundleID == name
+    }
+
     private func execute(
         _ action: ActionSpec,
         ephemeralInputs: [String: String],
         focusPolicy: FocusPolicy,
-        mirroringDrivingLease: IPhoneMirroringDrivingLease?
+        keyboardLeaseToken: String?
     ) throws -> ActionResult {
-        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
         switch action.kind {
         case .launchApp:
             let app = try parameter(action, name: "app")
@@ -223,15 +388,14 @@ public final class WorkflowExecutor {
         case .click:
             return try executeClick(
                 action,
-                focusPolicy: focusPolicy,
-                mirroringDrivingLease: mirroringDrivingLease
+                focusPolicy: focusPolicy
             )
         case .type:
             let text = try ephemeralText(action, inputs: ephemeralInputs)
             if focusPolicy == .background {
                 guard action.surface == .macApp,
                       let selector = action.selector,
-                      selector.tier == .accessibility else {
+                      selector.addressability == .accessibility else {
                     throw WorkflowExecutionError.backgroundUnsupported(
                         "type requires an Accessibility selector on a macOS app"
                     )
@@ -251,17 +415,22 @@ public final class WorkflowExecutor {
                     targetProcessIDs: [pid]
                 )
             }
-            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.type(text)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Ephemeral text was typed")],
                 result: ["typed": .bool(true)]
             )
+        case .search:
+            return try executeSearch(
+                action,
+                ephemeralInputs: ephemeralInputs,
+                focusPolicy: focusPolicy,
+                keyboardLeaseToken: keyboardLeaseToken
+            )
         case .key:
             let key = try parameter(action, name: "key")
             if focusPolicy == .background {
                 let pid = try requiredTargetPID(for: action)
-                try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
                 try inputController.key(key, toProcess: pid)
                 return ActionResult(
                     evidence: [Evidence(
@@ -273,7 +442,6 @@ public final class WorkflowExecutor {
                     targetProcessIDs: [pid]
                 )
             }
-            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.key(key)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Keyboard key was sent")],
@@ -285,7 +453,6 @@ public final class WorkflowExecutor {
             }
             let direction = try parameter(action, name: "direction")
             let amount = action.parameters["amount"]?.intValue ?? 3
-            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             try inputController.scroll(amount: Int32(amount), direction: direction)
             return ActionResult(
                 evidence: [Evidence(kind: "input", message: "Scroll event was sent")],
@@ -353,20 +520,17 @@ public final class WorkflowExecutor {
 
     private func executeClick(
         _ action: ActionSpec,
-        focusPolicy: FocusPolicy,
-        mirroringDrivingLease: IPhoneMirroringDrivingLease?
+        focusPolicy: FocusPolicy
     ) throws -> ActionResult {
-        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
         if focusPolicy == .background {
             guard action.surface == .macApp,
                   let selector = action.selector,
-                  selector.tier == .accessibility else {
+                  selector.addressability == .accessibility else {
                 throw WorkflowExecutionError.backgroundUnsupported(
                     "click requires an Accessibility selector on a macOS app"
                 )
             }
             let pid = try requiredTargetPID(for: action)
-            try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
             let bounds = try accessibilityController.press(pid: pid, selector: selector)
             return ActionResult(
                 evidence: [Evidence(
@@ -385,9 +549,8 @@ public final class WorkflowExecutor {
         }
 
         if let selector = action.selector {
-            if selector.tier == .accessibility,
+            if selector.addressability == .accessibility,
                let pid = try targetPID(for: action) {
-                try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
                 let bounds = try accessibilityController.press(pid: pid, selector: selector)
                 return ActionResult(
                     evidence: [Evidence(
@@ -403,16 +566,14 @@ public final class WorkflowExecutor {
                     targetProcessIDs: [pid]
                 )
             }
-            if selector.tier == .visual {
+            if selector.addressability == .visual {
                 let app = action.parameters["app"]?.stringValue
                 let frame = try captureController.capture(surface: action.surface, app: app)
                 if let text = selector.containsText {
                     let ocr = try captureController.ocr(frame)
                     if let match = ocr.matches.first(where: { $0.text.localizedCaseInsensitiveContains(text) }) {
                         try click(
-                            at: CGPoint(x: match.bounds.midX, y: match.bounds.midY),
-                            action: action,
-                            mirroringDrivingLease: mirroringDrivingLease
+                            at: CGPoint(x: match.bounds.midX, y: match.bounds.midY)
                         )
                         return ActionResult(
                             evidence: [Evidence(
@@ -428,9 +589,7 @@ public final class WorkflowExecutor {
                 if let anchorPath = selector.imageAnchor {
                     let match = try captureController.findImageAnchor(in: frame, path: anchorPath)
                     try click(
-                        at: CGPoint(x: match.bounds.midX, y: match.bounds.midY),
-                        action: action,
-                        mirroringDrivingLease: mirroringDrivingLease
+                        at: CGPoint(x: match.bounds.midX, y: match.bounds.midY)
                     )
                     return ActionResult(
                         evidence: [Evidence(
@@ -447,11 +606,11 @@ public final class WorkflowExecutor {
                 }
                 throw WorkflowExecutionError.blocked("visual selector was not found")
             }
-            if selector.tier == .normalizedCoordinate,
+            if selector.addressability == .normalizedCoordinate,
                let x = selector.normalizedX,
                let y = selector.normalizedY {
                 let point = try normalizedPoint(for: action, x: x, y: y)
-                try click(at: point, action: action, mirroringDrivingLease: mirroringDrivingLease)
+                try click(at: point)
                 return ActionResult(
                     evidence: [Evidence(
                         kind: "click",
@@ -461,14 +620,12 @@ public final class WorkflowExecutor {
                     result: ["selector_tier": .number(Double(SelectorTier.normalizedCoordinate.rawValue))]
                 )
             }
-            if selector.tier == .rawCoordinate,
+            if selector.addressability == .rawCoordinate,
                let x = selector.rawX,
                let y = selector.rawY,
                action.parameters["coordinate_mode"]?.stringValue == "raw" {
                 try click(
-                    at: CGPoint(x: x, y: y),
-                    action: action,
-                    mirroringDrivingLease: mirroringDrivingLease
+                    at: CGPoint(x: x, y: y)
                 )
                 return ActionResult(
                     evidence: [Evidence(
@@ -484,7 +641,7 @@ public final class WorkflowExecutor {
            let y = action.parameters["y"]?.doubleValue,
            action.parameters["coordinate_mode"]?.stringValue == "normalized" {
             let point = try normalizedPoint(for: action, x: x, y: y)
-            try click(at: point, action: action, mirroringDrivingLease: mirroringDrivingLease)
+            try click(at: point)
             return ActionResult(
                 evidence: [Evidence(
                     kind: "click",
@@ -497,49 +654,8 @@ public final class WorkflowExecutor {
         throw WorkflowExecutionError.blocked("click has no usable selector")
     }
 
-    private func click(
-        at point: CGPoint,
-        action: ActionSpec,
-        mirroringDrivingLease: IPhoneMirroringDrivingLease?
-    ) throws {
-        try requireDrivingLeaseIfNeeded(for: action, lease: mirroringDrivingLease)
+    private func click(at point: CGPoint) throws {
         try inputController.click(at: point)
-    }
-
-    private func requiresMirroringDrivingLease(_ workflow: WorkflowSpec) -> Bool {
-        workflow.recipe == "iphone-open-tinder"
-            || workflow.actions.contains { action in
-                action.surface == .iphoneMirroring && isSyntheticMirroringInput(action.kind)
-            }
-    }
-
-    private func requireDrivingLeaseIfNeeded(
-        for action: ActionSpec,
-        lease: IPhoneMirroringDrivingLease?
-    ) throws {
-        guard action.surface == .iphoneMirroring,
-              isSyntheticMirroringInput(action.kind) else { return }
-        try requireDrivingLease(lease)
-    }
-
-    private func requireDrivingLease(_ lease: IPhoneMirroringDrivingLease?) throws {
-        guard let lease else {
-            throw WorkflowExecutionError.mirroringDrivingLeaseRequired
-        }
-        do {
-            try lease.requireHeld()
-        } catch {
-            throw WorkflowExecutionError.mirroringDrivingLeaseRequired
-        }
-    }
-
-    private func isSyntheticMirroringInput(_ kind: ActionKind) -> Bool {
-        switch kind {
-        case .click, .type, .key, .scroll:
-            return true
-        default:
-            return false
-        }
     }
 
     private func verify(_ assertion: AssertionSpec, focusPolicy: FocusPolicy) throws {
@@ -554,13 +670,6 @@ public final class WorkflowExecutor {
                 throw WorkflowExecutionError.assertionFailed(
                     "foreground app was \(actual ?? "unknown"), expected \(assertion.expected ?? "unknown")"
                 )
-            }
-        case "iphoneMirroringForeground":
-            if focusPolicy == .background {
-                throw WorkflowExecutionError.backgroundUnsupported("iPhone Mirroring requires foreground focus")
-            }
-            guard iphoneController.state().foreground else {
-                throw WorkflowExecutionError.assertionFailed("iPhone Mirroring is not foreground")
             }
         case "ocrContains":
             if focusPolicy == .background {
@@ -645,21 +754,12 @@ public final class WorkflowExecutor {
             let resolved = try appController.resolve(app)
             if requiresRunning, !resolved.isRunning { return nil }
             return resolved.processID
-        case .iphoneMirroring:
-            return try appController.resolve("iPhone Mirroring").processID
         }
     }
 
     private func normalizedPoint(for action: ActionSpec, x: Double, y: Double) throws -> CGPoint {
         if action.surface == .macDesktop {
             return try CoordinateMapper.mainDisplayPoint(NormalizedPoint(x: x, y: y))
-        }
-        if action.surface == .iphoneMirroring,
-           let frame = try? captureController.capture(surface: .iphoneMirroring) {
-            return try CoordinateMapper.windowPoint(
-                normalized: NormalizedPoint(x: x, y: y),
-                in: frame.bounds
-            )
         }
         if let pid = try targetPID(for: action),
            let bounds = accessibilityController.windowBounds(pid: pid) {

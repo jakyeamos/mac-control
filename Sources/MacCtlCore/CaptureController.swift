@@ -98,8 +98,8 @@ public final class CaptureController {
                 windowID: nil,
                 source: "main_display"
             )
-        case .macApp, .iphoneMirroring:
-            let appName = app ?? (surface == .iphoneMirroring ? "iPhone Mirroring" : "")
+        case .macApp:
+            let appName = app ?? ""
             guard let window = visibleWindow(for: appName) else {
                 throw CaptureControllerError.windowUnavailable(appName)
             }
