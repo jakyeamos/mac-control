@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "System Settings",
+      "comparison_id": "focus-system-settings-batch-2-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-2a46c336-cli-cf1c776c",
+        "implementation_id": "mac-control-batch",
+        "lane": "mac-control",
+        "median_ms": 182.8
+      },
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "comparable",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control-batch-2",
+      "timing_scope": "command_round_trip",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "macos-system-events-26.5.2",
+          "implementation_id": "system-events-batch",
+          "lane": "agent-baseline",
+          "median_ms": 630.367,
+          "p95_ms": 690.784,
+          "provenance": "direct_ui_scripting",
+          "recoveries": 0,
+          "route": "system-events-batch",
+          "samples": 7,
+          "verified": 7
+        },
+        {
+          "build_id": "mac-control-daemon-2a46c336-cli-cf1c776c",
+          "implementation_id": "mac-control-batch",
+          "lane": "mac-control",
+          "median_ms": 182.8,
+          "p95_ms": 369.984,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "batch",
+          "samples": 7,
+          "verified": 7
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T15:48:31.185643Z",
+  "groups": [
+    {
+      "app": "System Settings",
+      "build_id": "macos-system-events-26.5.2",
+      "comparison_id": "focus-system-settings-batch-2-v1",
+      "expand_to_seven": false,
+      "implementation_id": "system-events-batch",
+      "interpretation": "passed",
+      "lane": "agent-baseline",
+      "mean_tool_calls": 1,
+      "median_ms": 630.367,
+      "p95_ms": 690.784,
+      "provenance": "direct_ui_scripting",
+      "range_ms": 98.056,
+      "recoveries": 0,
+      "route": "system-events-batch",
+      "samples": 7,
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control-batch-2",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 7
+    },
+    {
+      "app": "System Settings",
+      "build_id": "mac-control-daemon-2a46c336-cli-cf1c776c",
+      "comparison_id": "focus-system-settings-batch-2-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control-batch",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 182.8,
+      "p95_ms": 369.984,
+      "provenance": "daemon_executed",
+      "range_ms": 248.562,
+      "recoveries": 0,
+      "route": "batch",
+      "samples": 7,
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control-batch-2",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 7
+    }
+  ],
+  "schema_version": 2
+}

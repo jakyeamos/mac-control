@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "Finder",
+      "comparison_id": "scroll-finder-e2e-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-fe988b-cli-b20e3b",
+        "implementation_id": "mac-control",
+        "lane": "mac-control",
+        "median_ms": 553.985
+      },
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "comparable",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "end_to_end_verified_action",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000550",
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 12885.493,
+          "p95_ms": 13202.724,
+          "provenance": "computer_use",
+          "recoveries": 0,
+          "route": "computer-use",
+          "samples": 3,
+          "verified": 3
+        },
+        {
+          "build_id": "mac-control-daemon-fe988b-cli-b20e3b",
+          "implementation_id": "mac-control",
+          "lane": "mac-control",
+          "median_ms": 553.985,
+          "p95_ms": 558.488,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "scroll",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T18:53:06.037512Z",
+  "groups": [
+    {
+      "app": "Finder",
+      "build_id": "computer-use-1.0.1000550",
+      "comparison_id": "scroll-finder-e2e-v1",
+      "expand_to_seven": false,
+      "implementation_id": "computer-use-agent",
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 3,
+      "median_ms": 12885.493,
+      "p95_ms": 13202.724,
+      "provenance": "computer_use",
+      "range_ms": 3338.112,
+      "recoveries": 0,
+      "route": "computer-use",
+      "samples": 3,
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "end_to_end_verified_action",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "app": "Finder",
+      "build_id": "mac-control-daemon-fe988b-cli-b20e3b",
+      "comparison_id": "scroll-finder-e2e-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 553.985,
+      "p95_ms": 558.488,
+      "provenance": "daemon_executed",
+      "range_ms": 36.457,
+      "recoveries": 0,
+      "route": "scroll",
+      "samples": 3,
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "end_to_end_verified_action",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 2
+}

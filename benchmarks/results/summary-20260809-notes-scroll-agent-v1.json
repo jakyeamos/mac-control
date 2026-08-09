@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "Notes",
+      "comparison_id": "scroll-notes-agent-v1",
+      "fastest": {
+        "build_id": "computer-use-1.0.1000550",
+        "implementation_id": "computer-use-agent",
+        "lane": "generic-gui",
+        "median_ms": 33254.181
+      },
+      "state_fingerprint": "notes-main-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "notes-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "agent_action_plus_verification",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000550",
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 33254.181,
+          "p95_ms": 35550.423,
+          "provenance": "computer_use",
+          "recoveries": 0,
+          "route": "computer-use",
+          "samples": 7,
+          "verified": 7
+        },
+        {
+          "build_id": "mac-control-daemon-2a46c336-cli-cf1c776",
+          "implementation_id": "mac-control-daemon",
+          "lane": "mac-control",
+          "median_ms": null,
+          "p95_ms": null,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "scroll",
+          "samples": 0,
+          "verified": 0
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T16:56:47.643779Z",
+  "groups": [
+    {
+      "app": "Notes",
+      "build_id": "computer-use-1.0.1000550",
+      "comparison_id": "scroll-notes-agent-v1",
+      "expand_to_seven": false,
+      "implementation_id": "computer-use-agent",
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 3,
+      "median_ms": 33254.181,
+      "p95_ms": 35550.423,
+      "provenance": "computer_use",
+      "range_ms": 4349.267,
+      "recoveries": 0,
+      "route": "computer-use",
+      "samples": 7,
+      "state_fingerprint": "notes-main-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "notes-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 7
+    },
+    {
+      "app": "Notes",
+      "build_id": "mac-control-daemon-2a46c336-cli-cf1c776",
+      "comparison_id": "scroll-notes-agent-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control-daemon",
+      "interpretation": "blocked before measurement: Live AX target was resolved but action_unavailable; no local fallback dispatched; recommended_provider computer_use; not a latency sample",
+      "lane": "mac-control",
+      "mean_tool_calls": null,
+      "median_ms": null,
+      "p95_ms": null,
+      "provenance": "daemon_executed",
+      "range_ms": null,
+      "recoveries": 0,
+      "route": "scroll",
+      "samples": 0,
+      "state_fingerprint": "notes-main-ready-v1",
+      "status": "blocked",
+      "target_fingerprint": "notes-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 0
+    }
+  ],
+  "schema_version": 2
+}

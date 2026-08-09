@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "macOS",
+      "comparison_id": "fka-status-v1",
+      "fastest": {
+        "build_id": "macos-defaults-26.5.2",
+        "implementation_id": "defaults",
+        "lane": "agent-baseline",
+        "median_ms": 10.333
+      },
+      "state_fingerprint": "login-session-v1",
+      "status": "comparable",
+      "target_fingerprint": "fka-v1",
+      "task": "inspect-full-keyboard-access",
+      "timing_scope": "command_round_trip",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "macos-defaults-26.5.2",
+          "implementation_id": "defaults",
+          "lane": "agent-baseline",
+          "median_ms": 10.333,
+          "p95_ms": 15.237,
+          "provenance": "direct_system",
+          "recoveries": 0,
+          "route": "defaults",
+          "samples": 10,
+          "verified": 10
+        },
+        {
+          "build_id": "mac-control-daemon-11acba20-cli-49bfb94b",
+          "implementation_id": "macctld",
+          "lane": "mac-control",
+          "median_ms": 65.142,
+          "p95_ms": 70.657,
+          "provenance": "live_cli_round_trip",
+          "recoveries": 0,
+          "route": "macctld",
+          "samples": 10,
+          "verified": 10
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T05:02:53.293676Z",
+  "groups": [
+    {
+      "app": "macOS",
+      "build_id": "macos-defaults-26.5.2",
+      "comparison_id": "fka-status-v1",
+      "expand_to_seven": false,
+      "implementation_id": "defaults",
+      "interpretation": "passed",
+      "lane": "agent-baseline",
+      "mean_tool_calls": 1,
+      "median_ms": 10.333,
+      "p95_ms": 15.237,
+      "provenance": "direct_system",
+      "range_ms": 5.945,
+      "recoveries": 0,
+      "route": "defaults",
+      "samples": 10,
+      "state_fingerprint": "login-session-v1",
+      "status": "passed",
+      "target_fingerprint": "fka-v1",
+      "task": "inspect-full-keyboard-access",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 10
+    },
+    {
+      "app": "macOS",
+      "build_id": "mac-control-daemon-11acba20-cli-49bfb94b",
+      "comparison_id": "fka-status-v1",
+      "expand_to_seven": false,
+      "implementation_id": "macctld",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 65.142,
+      "p95_ms": 70.657,
+      "provenance": "live_cli_round_trip",
+      "range_ms": 8.57,
+      "recoveries": 0,
+      "route": "macctld",
+      "samples": 10,
+      "state_fingerprint": "login-session-v1",
+      "status": "passed",
+      "target_fingerprint": "fka-v1",
+      "task": "inspect-full-keyboard-access",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 10
+    }
+  ],
+  "schema_version": 2
+}

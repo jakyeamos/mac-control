@@ -1,0 +1,111 @@
+{
+  "comparisons": [
+    {
+      "app": "Finder",
+      "comparison_id": "scroll-finder-agent-v1",
+      "fastest": {
+        "build_id": "computer-use-1.0.1000550",
+        "implementation_id": "computer-use-agent",
+        "lane": "generic-gui",
+        "median_ms": 8640.627
+      },
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "agent_action_plus_verification",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000550",
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 8640.627,
+          "p95_ms": 11155.266,
+          "provenance": "computer_use",
+          "recoveries": 0,
+          "route": "computer-use",
+          "samples": 7,
+          "verified": 7
+        }
+      ]
+    },
+    {
+      "app": "Finder",
+      "comparison_id": "scroll-finder-agent-v1",
+      "fastest": null,
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "daemon_executed_verified_action",
+      "variant_count": 0,
+      "variants": [
+        {
+          "build_id": "mac-control-daemon-631848-cli-dd378e",
+          "implementation_id": "mac-control-daemon",
+          "lane": "mac-control",
+          "median_ms": null,
+          "p95_ms": null,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "scroll",
+          "samples": 0,
+          "verified": 0
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T18:15:58.854080Z",
+  "groups": [
+    {
+      "app": "Finder",
+      "build_id": "computer-use-1.0.1000550",
+      "comparison_id": "scroll-finder-agent-v1",
+      "expand_to_seven": false,
+      "implementation_id": "computer-use-agent",
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 3,
+      "median_ms": 8640.627,
+      "p95_ms": 11155.266,
+      "provenance": "computer_use",
+      "range_ms": 3896.475,
+      "recoveries": 0,
+      "route": "computer-use",
+      "samples": 7,
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 7
+    },
+    {
+      "app": "Finder",
+      "build_id": "mac-control-daemon-631848-cli-dd378e",
+      "comparison_id": "scroll-finder-agent-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control-daemon",
+      "interpretation": "blocked before measurement: Daemon route benchmark failed during required reset with AXScrollUpByPage; no sample duration recorded; blocked before measurement",
+      "lane": "mac-control",
+      "mean_tool_calls": null,
+      "median_ms": null,
+      "p95_ms": null,
+      "provenance": "daemon_executed",
+      "range_ms": null,
+      "recoveries": 0,
+      "route": "scroll",
+      "samples": 0,
+      "state_fingerprint": "finder-main-ready-v1",
+      "status": "blocked",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "task": "scroll-main",
+      "timing_scope": "daemon_executed_verified_action",
+      "user_help": 0,
+      "verified": 0
+    }
+  ],
+  "schema_version": 2
+}

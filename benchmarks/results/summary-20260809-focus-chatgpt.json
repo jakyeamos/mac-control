@@ -1,0 +1,62 @@
+{
+  "comparisons": [
+    {
+      "app": "ChatGPT",
+      "comparison_id": "focus-chatgpt-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-7160db61-cli-89277a6d",
+        "implementation_id": "mac-control",
+        "lane": "mac-control",
+        "median_ms": 214.527
+      },
+      "state_fingerprint": "chatgpt-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "chatgpt-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "command_round_trip",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "mac-control-daemon-7160db61-cli-89277a6d",
+          "implementation_id": "mac-control",
+          "lane": "mac-control",
+          "median_ms": 214.527,
+          "p95_ms": 291.738,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "keyboard",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T04:44:16.503819Z",
+  "groups": [
+    {
+      "app": "ChatGPT",
+      "build_id": "mac-control-daemon-7160db61-cli-89277a6d",
+      "comparison_id": "focus-chatgpt-v1",
+      "expand_to_seven": true,
+      "implementation_id": "mac-control",
+      "interpretation": "expand to 7 samples",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 214.527,
+      "p95_ms": 291.738,
+      "provenance": "daemon_executed",
+      "range_ms": 115.536,
+      "recoveries": 0,
+      "route": "keyboard",
+      "samples": 3,
+      "state_fingerprint": "chatgpt-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "chatgpt-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 2
+}

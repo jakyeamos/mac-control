@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "System Settings",
+      "comparison_id": "focus-system-settings-e2e-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-11acba20-cli-49bfb94b",
+        "implementation_id": "macctld",
+        "lane": "mac-control",
+        "median_ms": 132.466
+      },
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "comparable",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "command_round_trip",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "macos-system-events-26.5.2",
+          "implementation_id": "system-events",
+          "lane": "agent-baseline",
+          "median_ms": 542.906,
+          "p95_ms": 556.338,
+          "provenance": "direct_ui_scripting",
+          "recoveries": 0,
+          "route": "system-events",
+          "samples": 3,
+          "verified": 3
+        },
+        {
+          "build_id": "mac-control-daemon-11acba20-cli-49bfb94b",
+          "implementation_id": "macctld",
+          "lane": "mac-control",
+          "median_ms": 132.466,
+          "p95_ms": 139.841,
+          "provenance": "live_cli_round_trip",
+          "recoveries": 0,
+          "route": "keyboard",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-09T05:12:58.253548Z",
+  "groups": [
+    {
+      "app": "System Settings",
+      "build_id": "macos-system-events-26.5.2",
+      "comparison_id": "focus-system-settings-e2e-v1",
+      "expand_to_seven": false,
+      "implementation_id": "system-events",
+      "interpretation": "passed",
+      "lane": "agent-baseline",
+      "mean_tool_calls": 1,
+      "median_ms": 542.906,
+      "p95_ms": 556.338,
+      "provenance": "direct_ui_scripting",
+      "range_ms": 18.09,
+      "recoveries": 0,
+      "route": "system-events",
+      "samples": 3,
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "app": "System Settings",
+      "build_id": "mac-control-daemon-11acba20-cli-49bfb94b",
+      "comparison_id": "focus-system-settings-e2e-v1",
+      "expand_to_seven": false,
+      "implementation_id": "macctld",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 132.466,
+      "p95_ms": 139.841,
+      "provenance": "live_cli_round_trip",
+      "range_ms": 13.957,
+      "recoveries": 0,
+      "route": "keyboard",
+      "samples": 3,
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "command_round_trip",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 2
+}
