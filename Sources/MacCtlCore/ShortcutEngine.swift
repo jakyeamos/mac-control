@@ -143,9 +143,12 @@ public final class ShortcutEngine {
             let associated = bindings.first { $0.target == target }
             let disposition: ShortcutAuditDisposition
             let reason: String
-            if !item.enabled || item.hidden || item.dynamic {
+            if item.hidden || item.dynamic {
                 disposition = .unsupported
                 reason = item.dynamic ? "dynamic menu item" : "disabled or hidden menu item"
+            } else if !item.enabled {
+                disposition = .needsPostcondition
+                reason = "contextual menu item is currently disabled; explicit proposal requires a declared postcondition and execution-time enablement"
             } else if leafCounts[item.path.last ?? "", default: 0] > 1 {
                 disposition = .conflict
                 reason = "ambiguous leaf title"
@@ -198,8 +201,13 @@ public final class ShortcutEngine {
             guard application.isRunning else { throw ShortcutError.appNotRunning(application.name) }
             guard let path = target.menuPath else { throw ShortcutError.invalidTarget("menu path missing") }
             let item = try menus.inspect(application: application, path: path)
-            guard item.enabled, !item.hidden else { throw ShortcutError.menuItemDisabled(path) }
+            guard !item.hidden else { throw ShortcutError.menuItemDisabled(path) }
             guard !item.dynamic else { throw ShortcutError.dynamicMenuItem(path) }
+            if !item.enabled, declaredPostconditions.isEmpty {
+                throw ShortcutError.verificationUnavailable(
+                    "contextual menu item is currently disabled; declare a behavior postcondition before provisioning it"
+                )
+            }
             let audited = try menus.audit(application: application, maxItems: 512).0
             appChords = audited.compactMap(\.keyEquivalent)
             priorChord = item.keyEquivalent

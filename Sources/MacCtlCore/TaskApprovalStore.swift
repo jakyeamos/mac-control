@@ -55,7 +55,7 @@ public final class TaskApprovalStore {
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
 
-    public init(lifetime: TimeInterval = 120, now: @escaping () -> Date = Date.init) {
+    public init(lifetime: TimeInterval = 300, now: @escaping () -> Date = Date.init) {
         self.lifetime = min(max(lifetime, 0.001), 300)
         self.now = now
     }
@@ -74,6 +74,7 @@ public final class TaskApprovalStore {
             risk: plan.steps.map(\.risk).max(by: { rank($0) < rank($1) }) ?? .safe,
             focusPolicy: plan.focusPolicy,
             keyboardFreezeRequired: plan.keyboardFreezeRequired,
+            handoffTarget: ApprovalHandoffTargetResolver.resolve(for: plan),
             expiresAt: now().addingTimeInterval(lifetime)
         )
         let prepared = PreparedTaskApproval(
@@ -142,6 +143,29 @@ public final class TaskApprovalStore {
 
     /// Consuming is a one-way boundary.  Resume therefore always requires a
     /// newly prepared and approved token bound to the remaining plan.
+    public func validateApproved(
+        token: String,
+        plan: TaskPlan,
+        ephemeralInputs: [String: String]
+    ) throws -> PreparedTaskApproval {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entry = entries[token] else { throw TaskApprovalStoreError.notFound }
+        guard entry.state == .approved else {
+            if entry.state == .expired { throw TaskApprovalStoreError.expired }
+            throw TaskApprovalStoreError.alreadyUsed
+        }
+        guard entry.prepared.record.expiresAt > now() else {
+            entry.state = .expired
+            entries[token] = entry
+            throw TaskApprovalStoreError.expired
+        }
+        guard TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs) == entry.prepared.planDigest else {
+            throw TaskApprovalStoreError.mismatch
+        }
+        return entry.prepared
+    }
+
     public func consume(
         token: String,
         plan: TaskPlan,

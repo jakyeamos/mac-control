@@ -5,12 +5,14 @@ public enum ApprovalStoreError: Error, LocalizedError, Equatable {
     case notFound
     case expired
     case alreadyUsed
+    case mismatch
 
     public var errorDescription: String? {
         switch self {
         case .notFound: return "Approval token was not found"
         case .expired: return "Approval token has expired"
         case .alreadyUsed: return "Approval token was already used"
+        case .mismatch: return "Approval token did not match the exact prepared workflow"
         }
     }
 }
@@ -43,6 +45,7 @@ public final class ApprovalStore {
     private enum State {
         case pending
         case approved
+        case consumed
         case denied
         case expired
     }
@@ -51,8 +54,8 @@ public final class ApprovalStore {
     private let lock = NSLock()
     private let lifetime: TimeInterval
 
-    public init(lifetime: TimeInterval = 120) {
-        self.lifetime = lifetime
+    public init(lifetime: TimeInterval = 300) {
+        self.lifetime = min(max(lifetime, 0.001), 300)
     }
 
     public func prepare(
@@ -71,6 +74,7 @@ public final class ApprovalStore {
             risk: ActionRiskClassifier.classify(workflow),
             focusPolicy: workflow.focusPolicy,
             keyboardFreezeRequired: workflow.keyboardFreezeRequired,
+            handoffTarget: ApprovalHandoffTargetResolver.resolve(for: workflow),
             expiresAt: expiresAt
         )
         let prepared = PreparedApproval(
@@ -135,6 +139,54 @@ public final class ApprovalStore {
         entry.state = .denied
         entries[token] = entry
         return entry.prepared.record
+    }
+
+    public func consume(
+        token: String,
+        workflow: WorkflowSpec,
+        ephemeralInputs: [String: String]
+    ) throws -> PreparedApproval {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entry = entries[token] else { throw ApprovalStoreError.notFound }
+        guard entry.state == .approved else {
+            if entry.state == .expired { throw ApprovalStoreError.expired }
+            throw ApprovalStoreError.alreadyUsed
+        }
+        guard entry.prepared.record.expiresAt > Date() else {
+            entry.state = .expired
+            entries[token] = entry
+            throw ApprovalStoreError.expired
+        }
+        guard Self.digest(workflow, ephemeralInputs: ephemeralInputs) == entry.prepared.planDigest else {
+            throw ApprovalStoreError.mismatch
+        }
+        entry.state = .consumed
+        entries[token] = entry
+        return entry.prepared
+    }
+
+    public func validateApproved(
+        token: String,
+        workflow: WorkflowSpec,
+        ephemeralInputs: [String: String]
+    ) throws -> PreparedApproval {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entry = entries[token] else { throw ApprovalStoreError.notFound }
+        guard entry.state == .approved else {
+            if entry.state == .expired { throw ApprovalStoreError.expired }
+            throw ApprovalStoreError.alreadyUsed
+        }
+        guard entry.prepared.record.expiresAt > Date() else {
+            entry.state = .expired
+            entries[token] = entry
+            throw ApprovalStoreError.expired
+        }
+        guard Self.digest(workflow, ephemeralInputs: ephemeralInputs) == entry.prepared.planDigest else {
+            throw ApprovalStoreError.mismatch
+        }
+        return entry.prepared
     }
 
     public static func digest(_ workflow: WorkflowSpec) -> String {

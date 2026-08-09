@@ -6,6 +6,7 @@ public struct TaskExecutionAuthority {
     public let leaseToken: String?
     public let leaseExpiresAt: Date?
     public let fresh: Bool
+    public let inputChannel: TaskInputChannel?
 
     private let revalidateHandler: () throws -> AppInfo?
     private let fingerprintHandler: () -> String?
@@ -14,12 +15,14 @@ public struct TaskExecutionAuthority {
         leaseToken: String?,
         leaseExpiresAt: Date? = nil,
         fresh: Bool = true,
+        inputChannel: TaskInputChannel? = nil,
         revalidate: @escaping () throws -> AppInfo?,
         fingerprint: @escaping () -> String? = { nil }
     ) {
         self.leaseToken = leaseToken
         self.leaseExpiresAt = leaseExpiresAt
         self.fresh = fresh
+        self.inputChannel = inputChannel
         self.revalidateHandler = revalidate
         self.fingerprintHandler = fingerprint
     }
@@ -32,6 +35,19 @@ public struct TaskExecutionAuthority {
     public func fingerprint() -> String? {
         fingerprintHandler()
     }
+
+    public func validateBinding(
+        taskID: String,
+        planDigest: String,
+        focusPolicy: FocusPolicy
+    ) throws {
+        guard let inputChannel else { return }
+        guard inputChannel.taskID == taskID,
+              inputChannel.planDigest == planDigest,
+              inputChannel.focusPolicy == focusPolicy else {
+            throw TaskControlError.leaseRequired
+        }
+    }
 }
 
 public struct TaskActionContext {
@@ -39,6 +55,7 @@ public struct TaskActionContext {
     public let stepID: String
     public let target: TaskTargetIdentity?
     public let focusPolicy: FocusPolicy
+    public let planDigest: String
     public let ephemeralInputs: [String: String]
     public let deadline: Date
     public let authority: TaskExecutionAuthority?
@@ -52,6 +69,7 @@ public struct TaskActionContext {
         stepID: String,
         target: TaskTargetIdentity?,
         focusPolicy: FocusPolicy,
+        planDigest: String = "unavailable",
         ephemeralInputs: [String: String],
         deadline: Date,
         authority: TaskExecutionAuthority?,
@@ -64,6 +82,7 @@ public struct TaskActionContext {
         self.stepID = stepID
         self.target = target
         self.focusPolicy = focusPolicy
+        self.planDigest = planDigest
         self.ephemeralInputs = ephemeralInputs
         self.deadline = deadline
         self.authority = authority
@@ -79,6 +98,7 @@ public struct TaskActionContext {
             stepID: stepID,
             target: target,
             focusPolicy: focusPolicy,
+            planDigest: planDigest,
             ephemeralInputs: ephemeralInputs,
             deadline: deadline,
             authority: authority,
@@ -95,6 +115,7 @@ public struct TaskActionContext {
         guard !isCancelled() else { throw TaskControlError.cancelled }
         guard now() < deadline else { throw TaskControlError.timedOut }
         guard authority.fresh else { throw TaskControlError.leaseRequired }
+        try authority.validateBinding(taskID: taskID, planDigest: planDigest, focusPolicy: focusPolicy)
         if let expiresAt = authority.leaseExpiresAt, now() >= expiresAt {
             throw TaskControlError.leaseExpired
         }
@@ -107,6 +128,7 @@ public struct TaskActionContext {
         guard now() < deadline else { throw TaskControlError.timedOut }
         if let authority {
             guard authority.fresh else { throw TaskControlError.leaseRequired }
+            try authority.validateBinding(taskID: taskID, planDigest: planDigest, focusPolicy: focusPolicy)
             if let expiresAt = authority.leaseExpiresAt, now() >= expiresAt {
                 throw TaskControlError.leaseExpired
             }
@@ -357,20 +379,25 @@ public final class TaskRunner {
             guard let authority, authority.fresh else { throw TaskControlError.leaseRequired }
         }
         let approvalPlan = resuming ? plan.remaining(from: checkpoint.stepIndex) : plan
-        do {
-            _ = try approvalStore.consume(
-                token: approvalToken,
-                plan: approvalPlan,
-                ephemeralInputs: ephemeralInputs
-            )
-        } catch TaskApprovalStoreError.notFound {
-            throw TaskControlError.approvalRequired
-        } catch TaskApprovalStoreError.expired {
-            throw TaskControlError.leaseExpired
-        } catch TaskApprovalStoreError.mismatch {
-            throw TaskControlError.approvalMismatch
-        } catch TaskApprovalStoreError.alreadyUsed {
-            throw TaskControlError.approvalRequired
+        var approvalConsumed = false
+        let consumeApprovalAtDispatch = {
+            guard !approvalConsumed else { return }
+            do {
+                _ = try self.approvalStore.consume(
+                    token: approvalToken,
+                    plan: approvalPlan,
+                    ephemeralInputs: ephemeralInputs
+                )
+                approvalConsumed = true
+            } catch TaskApprovalStoreError.notFound {
+                throw TaskControlError.approvalRequired
+            } catch TaskApprovalStoreError.expired {
+                throw TaskControlError.leaseExpired
+            } catch TaskApprovalStoreError.mismatch {
+                throw TaskControlError.approvalMismatch
+            } catch TaskApprovalStoreError.alreadyUsed {
+                throw TaskControlError.approvalRequired
+            }
         }
 
         let startedAt = now()
@@ -406,6 +433,7 @@ public final class TaskRunner {
                     stepID: step.id,
                     target: step.target,
                     focusPolicy: plan.focusPolicy,
+                    planDigest: expectedDigest,
                     ephemeralInputs: ephemeralInputs,
                     deadline: minDate(deadline, now().addingTimeInterval(step.timeout)),
                     authority: authority,
@@ -422,7 +450,8 @@ public final class TaskRunner {
                     deadline: deadline,
                     maxActions: plan.maxActions,
                     attempts: &stepAttempts,
-                    route: &stepRoute
+                    route: &stepRoute,
+                    consumeApprovalAtDispatch: consumeApprovalAtDispatch
                 )
                 current = checkpointCopy(
                     current,
@@ -441,23 +470,51 @@ public final class TaskRunner {
                 )
                 try saveCheckpoint(current)
             } catch let error as TaskControlError {
-                current = try persistFailure(
-                    checkpoint: current,
-                    step: step,
-                    error: error,
-                    attempts: stepAttempts,
-                    route: stepRoute
-                )
+                if approvalConsumed {
+                    current = try persistFailure(
+                        checkpoint: current,
+                        step: step,
+                        error: error,
+                        attempts: stepAttempts,
+                        route: stepRoute
+                    )
+                } else {
+                    current = checkpointCopy(
+                        current,
+                        state: .prepared,
+                        currentStepID: step.id,
+                        route: stepRoute,
+                        attempts: current.attempts + stepAttempts,
+                        verificationResult: "pre_dispatch_failed",
+                        lastErrorCode: errorCode(for: error),
+                        updatedAt: now()
+                    )
+                    try saveCheckpoint(current)
+                }
                 throw error
             } catch {
                 let taskError = TaskControlError.blocked(errorCode(for: error))
-                current = try persistFailure(
-                    checkpoint: current,
-                    step: step,
-                    error: taskError,
-                    attempts: stepAttempts,
-                    route: stepRoute
-                )
+                if approvalConsumed {
+                    current = try persistFailure(
+                        checkpoint: current,
+                        step: step,
+                        error: taskError,
+                        attempts: stepAttempts,
+                        route: stepRoute
+                    )
+                } else {
+                    current = checkpointCopy(
+                        current,
+                        state: .prepared,
+                        currentStepID: step.id,
+                        route: stepRoute,
+                        attempts: current.attempts + stepAttempts,
+                        verificationResult: "pre_dispatch_failed",
+                        lastErrorCode: errorCode(for: taskError),
+                        updatedAt: now()
+                    )
+                    try saveCheckpoint(current)
+                }
                 throw taskError
             }
         }
@@ -487,7 +544,8 @@ public final class TaskRunner {
         deadline: Date,
         maxActions: Int,
         attempts: inout Int,
-        route: inout String?
+        route: inout String?,
+        consumeApprovalAtDispatch: () throws -> Void
     ) throws -> StepResult {
         let maximumAttempts = TaskPlanValidator.maximumAttempts(for: step.risk, recovery: step.recovery)
         var lastReport: TaskActionExecutionReport?
@@ -522,6 +580,7 @@ public final class TaskRunner {
                 _ = try attemptContext.revalidateBeforeAction(
                     includeTarget: requiresTargetRevalidation(for: step.action)
                 )
+                try consumeApprovalAtDispatch()
                 try saveCheckpoint(checkpointCopy(
                     current,
                     state: .running,
@@ -869,6 +928,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let searchFieldResolver: SearchFieldResolving
     private let focusedElementInspector: FocusedElementInspecting
     private let searchTextTyper: SearchTextTyping
+    private let backgroundPress: (pid_t, Selector) throws -> Void
+    private let backgroundSetValue: (pid_t, Selector, String) throws -> Void
+    private let backgroundSendKey: (String, pid_t) throws -> Void
 
     public init(
         appController: AppController,
@@ -881,7 +943,10 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor(),
         searchFieldResolver: SearchFieldResolving? = nil,
         focusedElementInspector: FocusedElementInspecting? = nil,
-        searchTextTyper: SearchTextTyping? = nil
+        searchTextTyper: SearchTextTyping? = nil,
+        backgroundPress: ((pid_t, Selector) throws -> Void)? = nil,
+        backgroundSetValue: ((pid_t, Selector, String) throws -> Void)? = nil,
+        backgroundSendKey: ((String, pid_t) throws -> Void)? = nil
     ) {
         self.appController = appController
         self.accessibilityController = accessibilityController
@@ -894,6 +959,15 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.searchFieldResolver = searchFieldResolver ?? accessibilityController
         self.focusedElementInspector = focusedElementInspector ?? accessibilityController
         self.searchTextTyper = searchTextTyper ?? inputController
+        self.backgroundPress = backgroundPress ?? { pid, selector in
+            _ = try accessibilityController.press(pid: pid, selector: selector)
+        }
+        self.backgroundSetValue = backgroundSetValue ?? { pid, selector, value in
+            _ = try accessibilityController.setValue(pid: pid, selector: selector, value: value)
+        }
+        self.backgroundSendKey = backgroundSendKey ?? { specification, pid in
+            try inputController.key(specification, toProcess: pid)
+        }
     }
 
     public func execute(
@@ -916,6 +990,28 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         case .click:
             guard let selector = action.selector else {
                 throw TaskActionExecutionError.blocked("missing_selector")
+            }
+            if context.focusPolicy == .background {
+                try requireRecoveryRoute(context, allowed: ["accessibility"])
+                guard selector.addressability == .accessibility,
+                      context.authority?.inputChannel?.permits(.accessibility) == true else {
+                    throw TaskActionExecutionError.unsupported("background_click_requires_task_accessibility_channel")
+                }
+                guard let application = try context.requireAuthority(), let pid = application.processID else {
+                    throw TaskControlError.leaseRequired
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                do {
+                    try backgroundPress(pid, selector)
+                } catch AccessibilityControllerError.ambiguousMatch {
+                    throw TaskActionExecutionError.blocked("ambiguous_target")
+                } catch AccessibilityControllerError.elementNotFound {
+                    throw TaskActionExecutionError.blocked("target_unavailable")
+                } catch AccessibilityControllerError.permissionDenied {
+                    throw TaskActionExecutionError.permissionMissing("Accessibility")
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                return report(route: "task_input_accessibility", application: application)
             }
             guard let leaseToken = context.authority?.leaseToken else {
                 throw TaskControlError.leaseRequired
@@ -987,6 +1083,29 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             guard let text = context.ephemeralInputs[inputKey] else {
                 throw TaskActionExecutionError.blocked("missing_ephemeral_input")
             }
+            if context.focusPolicy == .background {
+                try requireRecoveryRoute(context, allowed: ["accessibility"])
+                guard let selector = action.selector,
+                      selector.addressability == .accessibility,
+                      context.authority?.inputChannel?.permits(.accessibility) == true else {
+                    throw TaskActionExecutionError.unsupported("background_type_requires_task_accessibility_channel")
+                }
+                guard let application = try context.requireAuthority(), let pid = application.processID else {
+                    throw TaskControlError.leaseRequired
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                do {
+                    try backgroundSetValue(pid, selector, text)
+                } catch AccessibilityControllerError.ambiguousMatch {
+                    throw TaskActionExecutionError.blocked("ambiguous_target")
+                } catch AccessibilityControllerError.elementNotFound {
+                    throw TaskActionExecutionError.blocked("target_unavailable")
+                } catch AccessibilityControllerError.permissionDenied {
+                    throw TaskActionExecutionError.permissionMissing("Accessibility")
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                return report(route: "task_input_accessibility", application: application)
+            }
             let application = try context.requireAuthority()
             guard let application, let pid = application.processID else {
                 throw TaskControlError.leaseRequired
@@ -1022,6 +1141,18 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         case .key:
             try requireRecoveryRoute(context, allowed: ["keyboard"])
             let key = try requiredParameter(action, key: "key")
+            if context.focusPolicy == .background {
+                guard context.authority?.inputChannel?.permits(.processDirected) == true else {
+                    throw TaskActionExecutionError.unsupported("background_key_requires_task_process_channel")
+                }
+                guard let application = try context.requireAuthority(), let pid = application.processID else {
+                    throw TaskControlError.leaseRequired
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                try backgroundSendKey(key, pid)
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                return report(route: "task_input_process", application: application)
+            }
             guard let authority = context.authority else { throw TaskControlError.leaseRequired }
             guard let application = try context.requireAuthority(), let leaseToken = authority.leaseToken else {
                 throw TaskControlError.leaseRequired

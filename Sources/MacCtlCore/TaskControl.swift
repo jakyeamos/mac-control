@@ -337,6 +337,46 @@ public struct TaskPlan: Codable, Equatable {
     }
 }
 
+public enum TaskInputChannelRoute: String, Codable, Equatable, CaseIterable {
+    case accessibility
+    case processDirected = "process_directed"
+}
+
+/// An in-memory input authority bound to one approved background task and one
+/// running application process. It is not a system-wide virtual HID device and
+/// cannot be reused by another task or plan digest.
+public struct TaskInputChannel: Codable, Equatable {
+    public let channelID: String
+    public let taskID: String
+    public let planDigest: String
+    public let focusPolicy: FocusPolicy
+    public let targetApplication: AppInfo
+    public let routes: [TaskInputChannelRoute]
+    public let expiresAt: Date
+
+    public init(
+        channelID: String = "input_\(UUID().uuidString)",
+        taskID: String,
+        planDigest: String,
+        focusPolicy: FocusPolicy,
+        targetApplication: AppInfo,
+        routes: [TaskInputChannelRoute],
+        expiresAt: Date
+    ) {
+        self.channelID = channelID
+        self.taskID = taskID
+        self.planDigest = planDigest
+        self.focusPolicy = focusPolicy
+        self.targetApplication = targetApplication
+        self.routes = routes
+        self.expiresAt = expiresAt
+    }
+
+    public func permits(_ route: TaskInputChannelRoute) -> Bool {
+        routes.contains(route)
+    }
+}
+
 public struct TaskPlanValidation: Codable, Equatable {
     public let taskID: String
     public let valid: Bool
@@ -437,8 +477,58 @@ public enum TaskPlanValidator {
             validatePredicates(step.preconditions, label: "precondition", stepID: trimmedID, errors: &errors)
             validatePredicates(step.postconditions, label: "postcondition", stepID: trimmedID, errors: &errors)
         }
+        if plan.focusPolicy == .background {
+            validateBackgroundInputChannel(plan, errors: &errors)
+        }
         let risk = plan.steps.map(\.risk).max(by: { rank($0) < rank($1) }) ?? .safe
         return TaskPlanValidation(taskID: plan.id, valid: errors.isEmpty, risk: risk, errors: errors)
+    }
+
+    private static func validateBackgroundInputChannel(
+        _ plan: TaskPlan,
+        errors: inout [String]
+    ) {
+        var inputTargets = Set<String>()
+        for step in plan.steps {
+            switch step.action.kind {
+            case .click, .type:
+                if step.action.surface != .macApp {
+                    errors.append("Background step \(step.id) must target a macOS app")
+                }
+                if step.action.selector?.addressability != .accessibility {
+                    errors.append("Background step \(step.id) requires an Accessibility selector")
+                }
+                collectBackgroundTarget(step, targets: &inputTargets, errors: &errors)
+            case .key:
+                if step.action.surface != .macApp {
+                    errors.append("Background step \(step.id) must target a macOS app")
+                }
+                collectBackgroundTarget(step, targets: &inputTargets, errors: &errors)
+            case .launchApp, .waitFor, .assert:
+                break
+            case .activateWindow, .scroll, .search, .command, .capture, .ocr, .adapter:
+                errors.append("Background step \(step.id) cannot use \(step.action.kind.rawValue)")
+            }
+            if step.action.parameters["physical_input_mode"]?.stringValue?.lowercased() == "suppressed" {
+                errors.append("Background step \(step.id) cannot suppress the physical keyboard")
+            }
+        }
+        if inputTargets.count > 1 {
+            errors.append("A background task input channel must target exactly one application")
+        }
+    }
+
+    private static func collectBackgroundTarget(
+        _ step: TaskStep,
+        targets: inout Set<String>,
+        errors: inout [String]
+    ) {
+        let target = step.target?.bundleID ?? step.target?.application
+        guard let target, !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errors.append("Background step \(step.id) must name its target application")
+            return
+        }
+        targets.insert(target.lowercased())
     }
 
     private static func validateAction(

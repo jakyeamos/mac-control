@@ -691,24 +691,24 @@ public final class ReleaseGate {
                     && receipt.status == .prepared
                     && receipt.approvalState == "prepared"
             }),
-            ("approved_by_hud", { receipt in
+            ("approved_by_control_center", { receipt in
                 receipt.method == "approval.approve"
                     && receipt.workflowID == approvalWorkflow
-                    && receipt.source == "hud"
+                    && receipt.source == "control_center"
                     && receipt.status == .succeeded
                     && receipt.approvalState == "approved"
             }),
-            ("denied_by_hud", { receipt in
+            ("denied_by_control_center", { receipt in
                 receipt.method == "approval.deny"
                     && receipt.workflowID == approvalWorkflow
-                    && receipt.source == "hud"
+                    && receipt.source == "control_center"
                     && receipt.status == .succeeded
                     && receipt.approvalState == "denied"
             }),
             ("expired", { receipt in
                 receipt.method == "approval.approve"
                     && receipt.workflowID == approvalWorkflow
-                    && (receipt.source == "hud" || receipt.source == "cli" || receipt.source == nil)
+                    && (receipt.source == "control_center" || receipt.source == "cli" || receipt.source == nil)
                     && receipt.status == .blocked
                     && receipt.approvalState == "required"
                     && receipt.verificationResult == "blocked"
@@ -731,7 +731,7 @@ public final class ReleaseGate {
             id: "approval.safety",
             state: missing.isEmpty ? .passed : .blocked,
             message: missing.isEmpty
-                ? "Approval HUD, denial, expiry, and fail-closed evidence is fresh"
+                ? "Menu-bar approval, denial, expiry, and fail-closed evidence is fresh"
                 : "Approval safety evidence is missing",
             details: [
                 "workflow": .string(approvalWorkflow),

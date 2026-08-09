@@ -828,6 +828,16 @@ public struct DaemonStatus: Codable, Equatable {
     }
 }
 
+public struct ApprovalHandoffTarget: Codable, Equatable {
+    public let applicationName: String
+    public let bundleID: String?
+
+    public init(applicationName: String, bundleID: String? = nil) {
+        self.applicationName = applicationName
+        self.bundleID = bundleID
+    }
+}
+
 public struct ApprovalRecord: Codable, Equatable {
     public let token: String
     public let operationID: String
@@ -836,6 +846,7 @@ public struct ApprovalRecord: Codable, Equatable {
     public let risk: RiskLevel
     public let focusPolicy: FocusPolicy
     public let keyboardFreezeRequired: Bool
+    public let handoffTarget: ApprovalHandoffTarget?
     public let expiresAt: Date
 
     public init(
@@ -846,6 +857,7 @@ public struct ApprovalRecord: Codable, Equatable {
         risk: RiskLevel,
         focusPolicy: FocusPolicy = .foreground,
         keyboardFreezeRequired: Bool = false,
+        handoffTarget: ApprovalHandoffTarget? = nil,
         expiresAt: Date
     ) {
         self.token = token
@@ -855,6 +867,7 @@ public struct ApprovalRecord: Codable, Equatable {
         self.risk = risk
         self.focusPolicy = focusPolicy
         self.keyboardFreezeRequired = keyboardFreezeRequired
+        self.handoffTarget = handoffTarget
         self.expiresAt = expiresAt
     }
 
@@ -867,6 +880,7 @@ public struct ApprovalRecord: Codable, Equatable {
         case focusPolicy
         case keyboardFreezeRequired
         case keyboardFreezeRequiredSnake = "keyboard_freeze_required"
+        case handoffTarget
         case expiresAt
     }
 
@@ -881,6 +895,7 @@ public struct ApprovalRecord: Codable, Equatable {
         self.keyboardFreezeRequired = try container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequired)
             ?? container.decodeIfPresent(Bool.self, forKey: .keyboardFreezeRequiredSnake)
             ?? false
+        self.handoffTarget = try container.decodeIfPresent(ApprovalHandoffTarget.self, forKey: .handoffTarget)
         self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
     }
 
@@ -893,6 +908,7 @@ public struct ApprovalRecord: Codable, Equatable {
         try container.encode(risk, forKey: .risk)
         try container.encode(focusPolicy, forKey: .focusPolicy)
         try container.encode(keyboardFreezeRequired, forKey: .keyboardFreezeRequired)
+        try container.encodeIfPresent(handoffTarget, forKey: .handoffTarget)
         try container.encode(expiresAt, forKey: .expiresAt)
     }
 }
@@ -957,6 +973,7 @@ public enum MacCtlErrorCode: String {
     case approvalNotFound = "approval_not_found"
     case approvalExpired = "approval_expired"
     case approvalAlreadyUsed = "approval_already_used"
+    case approvalMismatch = "approval_mismatch"
     case operationFailed = "operation_failed"
     case controlVerificationUnavailable = "control_verification_unavailable"
     case invalidSelector = "invalid_selector"

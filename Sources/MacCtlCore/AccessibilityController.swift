@@ -303,7 +303,11 @@ public final class AccessibilityController: FocusedElementInspecting {
         let role = attribute(focused, kAXRoleAttribute) as? String
         let subrole = attribute(focused, kAXSubroleAttribute) as? String
         let identifier = attribute(focused, kAXIdentifierAttribute) as? String
-        let title = attribute(focused, kAXTitleAttribute) as? String
+        let title = AccessibilitySelectorLabel.preferred(
+            title: attribute(focused, kAXTitleAttribute) as? String,
+            description: attribute(focused, kAXDescriptionAttribute) as? String,
+            help: attribute(focused, kAXHelpAttribute) as? String
+        )
         let frame = (try? bounds(of: focused)).map {
             "\($0.origin.x),\($0.origin.y),\($0.size.width),\($0.size.height)"
         }

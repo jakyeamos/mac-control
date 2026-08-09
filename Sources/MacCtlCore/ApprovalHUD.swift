@@ -1,12 +1,7 @@
 import AppKit
 import Foundation
 
-private final class MacCtlPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
-
-private final class ApprovalButton: NSButton {
+private final class MouseOnlyButton: NSButton {
     private var receivedMouseDown = false
 
     override func mouseDown(with event: NSEvent) {
@@ -14,9 +9,7 @@ private final class ApprovalButton: NSButton {
         super.mouseDown(with: event)
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        false
-    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool { false }
 
     func consumeMouseClick() -> Bool {
         defer { receivedMouseDown = false }
@@ -24,17 +17,22 @@ private final class ApprovalButton: NSButton {
     }
 }
 
+/// Ambient, state-aware menu-bar control center for approvals and active input authority.
+/// Approval tokens remain confined to the private action map and never enter the snapshot,
+/// status-item labels, tooltips, or accessibility presentation.
 public final class ApprovalHUD: NSObject {
     public var approveHandler: ((String) -> ResponseEnvelope)?
     public var denyHandler: ((String) -> ResponseEnvelope)?
+    public var stopHandler: (() -> ResponseEnvelope)?
     public var approvalPendingHandler: ((String) -> Bool)?
+    public var pendingApprovalsHandler: (() -> [ApprovalRecord])?
+    public var snapshotHandler: (() -> ControlCenterSnapshot)?
 
-    private var panel: MacCtlPanel?
     private var statusItem: NSStatusItem?
-    private var currentApproval: ApprovalRecord?
-    private var statusLabel: NSTextField?
-    private var expiryTimer: Timer?
-    private var pendingStateTimer: Timer?
+    private let popover = NSPopover()
+    private var displayTimer: Timer?
+    private var tokenByOperationID: [String: String] = [:]
+    private var actionError: String?
     private let capsLockMonitor: CapsLockMonitor
 
     public init(capsLockMonitor: CapsLockMonitor = CapsLockMonitor()) {
@@ -42,104 +40,342 @@ public final class ApprovalHUD: NSObject {
         super.init()
     }
 
-    public func start() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.start() }
-            return
-        }
-        NSApplication.shared.setActivationPolicy(.accessory)
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "macctl"
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show pending approval", action: #selector(showPending), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit daemon", action: #selector(quitDaemon), keyEquivalent: "q"))
-        menu.items.forEach { $0.target = self }
-        item.menu = menu
-        statusItem = item
-        capsLockMonitor.onDoubleTap = { [weak self] in self?.bringToFront() }
-        _ = capsLockMonitor.start()
+    deinit {
+        displayTimer?.invalidate()
+        capsLockMonitor.stop()
     }
 
+    public func start() {
+        onMain { [weak self] in
+            guard let self, self.statusItem == nil else { return }
+            NSApplication.shared.setActivationPolicy(.accessory)
+            self.popover.behavior = .transient
+            self.popover.animates = true
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            item.button?.target = self
+            item.button?.action = #selector(self.toggleControlCenter)
+            item.button?.sendAction(on: [.leftMouseUp])
+            self.statusItem = item
+            self.capsLockMonitor.onDoubleTap = { [weak self] in
+                guard let self, !self.pendingApprovals().isEmpty else { return }
+                self.showControlCenter()
+            }
+            _ = self.capsLockMonitor.start()
+            self.displayTimer = Timer.scheduledTimer(
+                withTimeInterval: 1,
+                repeats: true
+            ) { [weak self] _ in self?.refresh() }
+            self.refresh()
+        }
+    }
+
+    /// Approval arrivals are ambient. They update the menu-bar item but never
+    /// activate the app, open the popover, post a notification, or steal focus.
     public func present(_ approval: ApprovalRecord) {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.present(approval) }
-            return
-        }
-        expiryTimer?.invalidate()
-        expiryTimer = nil
-        pendingStateTimer?.invalidate()
-        pendingStateTimer = nil
-        guard approval.expiresAt > Date() else {
-            dismissCurrentApproval()
-            return
-        }
-        currentApproval = approval
-        let window = makePanelIfNeeded()
-        let content = makeContent(for: approval)
-        window.contentView = content
-        position(window)
-        window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        _ = window.makeFirstResponder(nil)
-        scheduleExpiry(for: approval)
-        schedulePendingStateCheck(for: approval)
+        _ = approval
+        refresh()
     }
 
     public func bringToFront() {
-        guard let panel, currentApproval != nil else { return }
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.bringToFront() }
+        guard !pendingApprovals().isEmpty else { return }
+        showControlCenter()
+    }
+
+    public func refresh() {
+        onMain { [weak self] in self?.refreshOnMain() }
+    }
+
+    @objc private func toggleControlCenter() {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            showControlCenter()
+        }
+    }
+
+    private func showControlCenter() {
+        onMain { [weak self] in
+            guard let self, let button = self.statusItem?.button else { return }
+            self.refreshOnMain()
+            self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+    }
+
+    private func refreshOnMain() {
+        let approvals = pendingApprovals()
+        tokenByOperationID = Dictionary(
+            uniqueKeysWithValues: approvals.map { ($0.operationID, $0.token) }
+        )
+        let snapshot = snapshotHandler?() ?? ControlCenterSnapshot(
+            approvals: approvals.map(ControlCenterApproval.init),
+            execution: nil,
+            permissions: []
+        )
+        let presentation = ControlCenterPresentation.make(snapshot: snapshot)
+        updateStatusItem(presentation)
+        if popover.isShown {
+            popover.contentViewController = makePopover(snapshot: snapshot, approvals: approvals)
+        }
+    }
+
+    private func pendingApprovals() -> [ApprovalRecord] {
+        let now = Date()
+        return (pendingApprovalsHandler?() ?? [])
+            .filter { $0.expiresAt > now }
+            .sorted {
+                if $0.expiresAt == $1.expiresAt { return $0.operationID < $1.operationID }
+                return $0.expiresAt < $1.expiresAt
+            }
+    }
+
+    private func updateStatusItem(_ presentation: ControlCenterPresentation) {
+        guard let item = statusItem, let button = item.button else { return }
+        let compact = presentation.state == .idle
+        let width = compact ? 30.0 : min(max(86, CGFloat(presentation.label.count * 7 + 48)), 190)
+        item.length = width
+        button.title = ""
+        button.imagePosition = .imageOnly
+        button.image = statusImage(presentation: presentation, size: NSSize(width: width - 4, height: 24))
+        button.toolTip = presentation.tooltip
+        button.setAccessibilityLabel(presentation.accessibilityLabel)
+        button.setAccessibilityHelp("Click to open the macctl control center")
+    }
+
+    private func statusImage(
+        presentation: ControlCenterPresentation,
+        size: NSSize
+    ) -> NSImage {
+        let image = NSImage(size: size, flipped: false) { rect in
+            let fill: NSColor
+            switch presentation.state {
+            case .idle: fill = NSColor.controlAccentColor.withAlphaComponent(0.16)
+            case .approval: fill = NSColor.systemOrange.withAlphaComponent(0.92)
+            case .leased: fill = NSColor.systemBlue.withAlphaComponent(0.90)
+            case .frozen: fill = NSColor.systemPurple.withAlphaComponent(0.92)
+            case .stopping, .degraded: fill = NSColor.systemRed.withAlphaComponent(0.90)
+            }
+            let pill = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 11, yRadius: 11)
+            fill.setFill()
+            pill.fill()
+
+            let ringRect = NSRect(x: 6, y: 5, width: 14, height: 14)
+            NSColor.white.withAlphaComponent(0.35).setStroke()
+            let track = NSBezierPath(ovalIn: ringRect)
+            track.lineWidth = 2
+            track.stroke()
+            if let fraction = presentation.ringFraction {
+                let ring = NSBezierPath()
+                let center = NSPoint(x: ringRect.midX, y: ringRect.midY)
+                ring.appendArc(
+                    withCenter: center,
+                    radius: ringRect.width / 2,
+                    startAngle: 90,
+                    endAngle: 90 - CGFloat(360 * fraction),
+                    clockwise: true
+                )
+                NSColor.white.setStroke()
+                ring.lineWidth = 2
+                ring.lineCapStyle = .round
+                ring.stroke()
+            }
+
+            if presentation.state == .idle {
+                NSColor.labelColor.setFill()
+                NSBezierPath(ovalIn: NSRect(x: rect.midX - 3, y: rect.midY - 3, width: 6, height: 6)).fill()
+            } else {
+                let textRect = NSRect(x: 27, y: 4, width: rect.width - 34, height: 16)
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.lineBreakMode = .byTruncatingTail
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: NSColor.white,
+                    .paragraphStyle: paragraph
+                ]
+                (presentation.label as NSString).draw(in: textRect, withAttributes: attributes)
+                if presentation.pendingCount > 0,
+                   [.leased, .frozen, .stopping].contains(presentation.state) {
+                    let badgeRect = NSRect(x: rect.maxX - 14, y: rect.maxY - 10, width: 12, height: 10)
+                    NSColor.systemOrange.setFill()
+                    NSBezierPath(roundedRect: badgeRect, xRadius: 5, yRadius: 5).fill()
+                }
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    private func makePopover(
+        snapshot: ControlCenterSnapshot,
+        approvals: [ApprovalRecord]
+    ) -> NSViewController {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 10
+        root.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let heading = NSTextField(labelWithString: "Mac Control")
+        heading.font = .systemFont(ofSize: 15, weight: .semibold)
+        root.addArrangedSubview(heading)
+
+        let missing = snapshot.permissions.filter { $0.state == "missing" || $0.state == "unknown" }
+        let health = missing.isEmpty
+            ? "Daemon ready · permissions available"
+            : "Needs attention · " + missing.map(\.name).joined(separator: ", ")
+        let healthLabel = secondaryLabel(health)
+        healthLabel.textColor = missing.isEmpty ? .secondaryLabelColor : .systemRed
+        root.addArrangedSubview(healthLabel)
+
+        if let error = actionError {
+            let errorLabel = wrappingLabel(error)
+            errorLabel.textColor = .systemRed
+            root.addArrangedSubview(errorLabel)
+        }
+
+        if let execution = snapshot.execution {
+            root.addArrangedSubview(separator())
+            root.addArrangedSubview(sectionLabel(execution.stopping ? "STOPPING" : "ACTIVE CONTROL"))
+            let target = execution.applicationName.map { " · \($0)" } ?? ""
+            root.addArrangedSubview(wrappingLabel(execution.summary + target))
+            let input = execution.physicalInputMode == .suppressed
+                ? "Physical keyboard frozen"
+                : "Keyboard shared"
+            root.addArrangedSubview(secondaryLabel(
+                "\(input) · \(durationLabel(execution.expiresAt.timeIntervalSinceNow)) remaining"
+            ))
+            let stop = MouseOnlyButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
+            stop.bezelStyle = .rounded
+            stop.contentTintColor = .systemRed
+            stop.setAccessibilityLabel("Stop active Mac Control task and release input authority")
+            root.addArrangedSubview(stop)
+        }
+
+        root.addArrangedSubview(separator())
+        root.addArrangedSubview(sectionLabel("APPROVALS · \(approvals.count)"))
+        if approvals.isEmpty {
+            root.addArrangedSubview(secondaryLabel("No approvals are waiting."))
+        } else {
+            for approval in approvals {
+                root.addArrangedSubview(approvalRow(approval))
+            }
+        }
+
+        root.addArrangedSubview(separator())
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.distribution = .fill
+        let available = secondaryLabel(snapshot.execution == nil ? "Computer available" : "Computer leased")
+        footer.addArrangedSubview(available)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        footer.addArrangedSubview(spacer)
+        let quit = MouseOnlyButton(title: "Quit daemon", target: self, action: #selector(quitDaemon(_:)))
+        quit.bezelStyle = .inline
+        footer.addArrangedSubview(quit)
+        root.addArrangedSubview(footer)
+
+        let controller = NSViewController()
+        controller.view = root
+        NSLayoutConstraint.activate([
+            root.widthAnchor.constraint(equalToConstant: 360)
+        ])
+        root.layoutSubtreeIfNeeded()
+        let contentHeight = min(max(root.fittingSize.height, 180), 620)
+        controller.preferredContentSize = NSSize(width: 392, height: contentHeight)
+        return controller
+    }
+
+    private func approvalRow(_ approval: ApprovalRecord) -> NSView {
+        let card = NSStackView()
+        card.orientation = .vertical
+        card.alignment = .leading
+        card.spacing = 5
+        card.edgeInsets = NSEdgeInsets(top: 9, left: 10, bottom: 9, right: 10)
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 8
+        card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let title = wrappingLabel(approval.summary)
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        card.addArrangedSubview(title)
+        var detail = "\(approval.risk.rawValue.capitalized) · expires in \(durationLabel(approval.expiresAt.timeIntervalSinceNow))"
+        if approval.keyboardFreezeRequired { detail += " · keyboard freeze approved" }
+        card.addArrangedSubview(secondaryLabel(detail))
+
+        let actions = NSStackView()
+        actions.orientation = .horizontal
+        actions.spacing = 7
+        let approvalTitle = approval.handoffTarget.map { "Approve & Focus \($0.applicationName)" } ?? "Approve"
+        let approve = MouseOnlyButton(title: approvalTitle, target: self, action: #selector(approve(_:)))
+        approve.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
+        approve.bezelStyle = .rounded
+        approve.keyEquivalent = ""
+        approve.setAccessibilityLabel(approvalTitle + ", mouse activation required")
+        let deny = MouseOnlyButton(title: "Deny", target: self, action: #selector(deny(_:)))
+        deny.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
+        deny.bezelStyle = .inline
+        deny.keyEquivalent = ""
+        deny.setAccessibilityLabel("Deny approval, mouse activation required")
+        actions.addArrangedSubview(approve)
+        actions.addArrangedSubview(deny)
+        card.addArrangedSubview(actions)
+        return card
+    }
+
+    @objc private func approve(_ sender: MouseOnlyButton) {
+        guard sender.consumeMouseClick(),
+              let operationID = sender.identifier?.rawValue,
+              let token = tokenByOperationID[operationID] else {
+            rejectNonMouse("approve")
             return
         }
-        panel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        let response = approveHandler?(token)
+        actionError = response?.status == .succeeded
+            ? nil
+            : response?.error?.message ?? "Approval failed; the request remains pending"
+        refresh()
     }
 
-    @objc private func showPending() {
-        if currentApproval != nil { bringToFront() }
+    @objc private func deny(_ sender: MouseOnlyButton) {
+        guard sender.consumeMouseClick(),
+              let operationID = sender.identifier?.rawValue,
+              let token = tokenByOperationID[operationID] else {
+            rejectNonMouse("deny")
+            return
+        }
+        let response = denyHandler?(token)
+        actionError = response?.status == .succeeded ? nil : response?.error?.message ?? "Deny failed"
+        refresh()
     }
 
-    @objc private func quitDaemon() {
+    @objc private func stopAndRelease(_ sender: MouseOnlyButton) {
+        guard sender.consumeMouseClick() else {
+            rejectNonMouse("stop")
+            return
+        }
+        let response = stopHandler?()
+        actionError = response?.status == .succeeded
+            ? nil
+            : response?.error?.message ?? "Could not stop the active execution"
+        refresh()
+    }
+
+    @objc private func quitDaemon(_ sender: MouseOnlyButton) {
+        guard sender.consumeMouseClick() else {
+            rejectNonMouse("quit")
+            return
+        }
         NSApplication.shared.terminate(nil)
     }
 
-    @objc private func approve(_ sender: NSButton) {
-        guard let token = currentApproval?.token else { return }
-        guard (sender as? ApprovalButton)?.consumeMouseClick() == true else {
-            SafeLog().record(event: "approval_hud_rejected", metadata: ["action": "approve", "reason": "non_mouse"])
-            return
-        }
-        SafeLog().record(event: "approval_hud_action", metadata: ["action": "approve"])
-        guard let response = approveHandler?(token) else { return }
-        if Self.shouldDismissAfterAction(
-            response: response,
-            approvalIsPending: approvalPendingHandler?(token)
-        ) {
-            dismissCurrentApproval()
-        } else {
-            statusLabel?.stringValue = response.error?.message ?? "Approval failed; operation was not completed"
-        }
-    }
-
-    @objc private func deny(_ sender: NSButton) {
-        guard let token = currentApproval?.token else { return }
-        guard (sender as? ApprovalButton)?.consumeMouseClick() == true else {
-            SafeLog().record(event: "approval_hud_rejected", metadata: ["action": "deny", "reason": "non_mouse"])
-            return
-        }
-        SafeLog().record(event: "approval_hud_action", metadata: ["action": "deny"])
-        guard let response = denyHandler?(token) else { return }
-        if Self.shouldDismissAfterAction(
-            response: response,
-            approvalIsPending: approvalPendingHandler?(token)
-        ) {
-            dismissCurrentApproval()
-        } else {
-            statusLabel?.stringValue = response.error?.message ?? "Deny failed"
-        }
+    private func rejectNonMouse(_ action: String) {
+        SafeLog().record(
+            event: "control_center_rejected",
+            metadata: ["action": action, "reason": "non_mouse"]
+        )
     }
 
     static func shouldDismissAfterAction(
@@ -149,118 +385,40 @@ public final class ApprovalHUD: NSObject {
         response.status == .succeeded || approvalIsPending == false
     }
 
-    private func scheduleExpiry(for approval: ApprovalRecord) {
-        let interval = approval.expiresAt.timeIntervalSinceNow
-        expiryTimer = Timer.scheduledTimer(
-            withTimeInterval: max(interval, 0.01),
-            repeats: false
-        ) { [weak self] _ in
-            guard let self, self.currentApproval?.token == approval.token else { return }
-            if approval.expiresAt <= Date() {
-                self.dismissCurrentApproval()
-            } else {
-                self.scheduleExpiry(for: approval)
-            }
-        }
+    private func sectionLabel(_ value: String) -> NSTextField {
+        let label = NSTextField(labelWithString: value)
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
     }
 
-    private func schedulePendingStateCheck(for approval: ApprovalRecord) {
-        guard approvalPendingHandler != nil else { return }
-        pendingStateTimer?.invalidate()
-        pendingStateTimer = Timer.scheduledTimer(
-            withTimeInterval: 0.5,
-            repeats: false
-        ) { [weak self] _ in
-            guard let self, self.currentApproval?.token == approval.token else { return }
-            guard let isPending = self.approvalPendingHandler?(approval.token) else { return }
-            if isPending {
-                self.schedulePendingStateCheck(for: approval)
-            } else {
-                self.dismissCurrentApproval()
-            }
-        }
+    private func secondaryLabel(_ value: String) -> NSTextField {
+        let label = wrappingLabel(value)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        return label
     }
 
-    private func dismissCurrentApproval() {
-        expiryTimer?.invalidate()
-        expiryTimer = nil
-        pendingStateTimer?.invalidate()
-        pendingStateTimer = nil
-        currentApproval = nil
-        panel?.orderOut(nil)
+    private func wrappingLabel(_ value: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: value)
+        label.maximumNumberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
     }
 
-    private func makePanelIfNeeded() -> MacCtlPanel {
-        if let panel { return panel }
-        let newPanel = MacCtlPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 190),
-            styleMask: [.titled, .nonactivatingPanel, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-        newPanel.title = "macctl approval"
-        newPanel.defaultButtonCell = nil
-        newPanel.isReleasedWhenClosed = false
-        newPanel.level = .statusBar
-        newPanel.hidesOnDeactivate = false
-        newPanel.isMovableByWindowBackground = true
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        newPanel.backgroundColor = NSColor.windowBackgroundColor
-        panel = newPanel
-        return newPanel
+    private func separator() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        return box
     }
 
-    private func makeContent(for approval: ApprovalRecord) -> NSView {
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .leading
-        root.spacing = 7
-        root.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
-
-        let heading = NSTextField(labelWithString: "Approval required · \(approval.risk.rawValue.uppercased())")
-        heading.font = NSFont.boldSystemFont(ofSize: 13)
-        let summary = NSTextField(wrappingLabelWithString: approval.summary)
-        summary.maximumNumberOfLines = 2
-        let focusLabel = NSTextField(labelWithString: "Focus policy: \(approval.focusPolicy.rawValue)")
-        focusLabel.textColor = .secondaryLabelColor
-        focusLabel.font = NSFont.systemFont(ofSize: 11)
-        let expiry = DateFormatter()
-        expiry.dateStyle = .none
-        expiry.timeStyle = .short
-        let expiryLabel = NSTextField(labelWithString: "Expires at \(expiry.string(from: approval.expiresAt)) · Caps Lock double-tap brings this panel forward")
-        expiryLabel.textColor = .secondaryLabelColor
-        expiryLabel.font = NSFont.systemFont(ofSize: 11)
-        let buttons = NSStackView()
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-        let approveButton = ApprovalButton(title: "Approve exact plan", target: self, action: #selector(approve(_:)))
-        approveButton.bezelStyle = .rounded
-        let denyButton = ApprovalButton(title: "Deny", target: self, action: #selector(deny(_:)))
-        denyButton.bezelStyle = .rounded
-        buttons.addArrangedSubview(approveButton)
-        buttons.addArrangedSubview(denyButton)
-        let status = NSTextField(labelWithString: "")
-        status.textColor = .secondaryLabelColor
-        status.font = NSFont.systemFont(ofSize: 11)
-        statusLabel = status
-
-        root.addArrangedSubview(heading)
-        root.addArrangedSubview(summary)
-        root.addArrangedSubview(focusLabel)
-        root.addArrangedSubview(expiryLabel)
-        root.addArrangedSubview(buttons)
-        root.addArrangedSubview(status)
-        return root
+    private func durationLabel(_ seconds: TimeInterval) -> String {
+        let value = max(0, Int(ceil(seconds)))
+        return value >= 60 ? "\(value / 60)m \(value % 60)s" : "\(value)s"
     }
 
-    private func position(_ window: NSWindow) {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        let frame = screen.frame
-        let size = window.frame.size
-        let origin = NSPoint(
-            x: frame.midX - size.width / 2,
-            y: frame.maxY - size.height - 10
-        )
-        window.setFrameOrigin(origin)
+    private func onMain(_ operation: @escaping () -> Void) {
+        if Thread.isMainThread { operation() } else { DispatchQueue.main.async(execute: operation) }
     }
 }

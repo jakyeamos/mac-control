@@ -288,12 +288,53 @@ final class ShortcutTests: XCTestCase {
         func disposition(_ path: [String]) -> ShortcutAuditDisposition? {
             entries.first(where: { $0.target.menuPath == path })?.disposition
         }
-        XCTAssertEqual(disposition(["File", "Export…"]), .unsupported)
+        XCTAssertEqual(disposition(["File", "Export…"]), .needsPostcondition)
         XCTAssertEqual(disposition(["File", "Open Recent", "Document"]), .unsupported)
         XCTAssertEqual(disposition(["View", "Sidebar"]), .needsPostcondition)
         XCTAssertEqual(disposition(["View", "First", "Duplicate"]), .conflict)
         XCTAssertEqual(disposition(["View", "Second", "Duplicate"]), .conflict)
         XCTAssertEqual(disposition(["View", "Show Sidebar…"]), .eligible)
+    }
+
+    func testContextualStaticMenuItemRequiresPostconditionBeforeProposal() throws {
+        let directory = temporaryDirectory("shortcut-contextual")
+        let app = runningApp()
+        let menu = FakeMenuController(path: ["Tab", "Group Tab"], checked: false)
+        menu.enabled = false
+        let engine = ShortcutEngine(
+            store: ShortcutBindingStore(directory: directory.appendingPathComponent("bindings")),
+            menus: menu,
+            provisioner: FakeShortcutProvisioner(configured: false),
+            keyboard: FakeShortcutKeyboardDispatcher(),
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            foregroundApplication: { app },
+            warmPaths: WarmPathStore(directory: directory.appendingPathComponent("warm"))
+        )
+        let target = CommandTarget.appMenu(
+            applicationName: app.name,
+            bundleID: app.bundleID,
+            menuPath: ["Tab", "Group Tab"]
+        )
+
+        XCTAssertThrowsError(try engine.propose(target: target, requestedChord: nil)) { error in
+            guard case ShortcutError.verificationUnavailable(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertTrue(reason.contains("contextual menu item"))
+        }
+
+        let binding = try engine.propose(
+            target: target,
+            requestedChord: "ctrl+option+cmd+1",
+            postconditions: [TaskPredicate(
+                kind: .elementExists,
+                application: app.name,
+                selector: Selector(role: "AXTextField")
+            )]
+        )
+        XCTAssertEqual(binding.status, .proposed)
+        XCTAssertEqual(binding.target.menuPath, ["Tab", "Group Tab"])
     }
 
     func testChromeManifestDiscoveryResolvesLocalizedDeclaredCommand() throws {

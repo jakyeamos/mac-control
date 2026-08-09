@@ -3632,11 +3632,22 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(approval["focusPolicy"]?.stringValue, "background")
         let token = try XCTUnwrap(approval["token"]?.stringValue)
 
-        let executed = service.handle(RequestEnvelope(
+        let approved = service.handle(RequestEnvelope(
             method: "approval.approve",
             params: [
                 "token": .string(token),
                 "source": .string("test")
+            ]
+        ))
+        XCTAssertEqual(approved.status, .succeeded)
+        XCTAssertEqual(approved.result["approved"]?.boolValue, true)
+
+        let executed = service.handle(RequestEnvelope(
+            method: "workflow.run",
+            params: [
+                "workflow": .string("approval.smoke"),
+                "approval_token": .string(token),
+                "focus_policy": .string("background")
             ]
         ))
         XCTAssertEqual(executed.status, .succeeded)
@@ -3650,6 +3661,10 @@ final class MacCtlCoreTests: XCTestCase {
         )
         XCTAssertEqual(
             receipts.first(where: { $0.method == "approval.approve" })?.focusPolicy,
+            .background
+        )
+        XCTAssertEqual(
+            receipts.first(where: { $0.method == "workflow.run" })?.focusPolicy,
             .background
         )
     }
@@ -3709,7 +3724,7 @@ final class MacCtlCoreTests: XCTestCase {
         }
     }
 
-    func testExpiredApprovalReceiptRetainsWorkflowAndHUDProvenance() throws {
+    func testExpiredApprovalReceiptRetainsWorkflowAndControlCenterProvenance() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-expiry-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         let service = MacCtlService(
@@ -3730,7 +3745,7 @@ final class MacCtlCoreTests: XCTestCase {
             method: "approval.approve",
             params: [
                 "token": .string(token),
-                "source": .string("hud")
+                "source": .string("control_center")
             ]
         ))
 
@@ -3744,7 +3759,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(preparedReceipt.approvalState, "prepared")
         let receipt = try XCTUnwrap(receipts.first { $0.method == "approval.approve" })
         XCTAssertEqual(receipt.workflowID, "approval.smoke")
-        XCTAssertEqual(receipt.source, "hud")
+        XCTAssertEqual(receipt.source, "control_center")
         XCTAssertEqual(receipt.status, .blocked)
         XCTAssertEqual(receipt.approvalState, "required")
         XCTAssertEqual(receipt.errorCode, MacCtlErrorCode.approvalExpired.rawValue)
@@ -4134,6 +4149,204 @@ final class MacCtlCoreTests: XCTestCase {
             steps: legacy.steps
         )
         XCTAssertNotEqual(firstDigest, TaskPlan.digest(changed))
+    }
+
+    func testBackgroundTaskValidationAcceptsTaskScopedRoutesAndRejectsGlobalInput() {
+        let target = TaskTargetIdentity(
+            application: "TextEdit",
+            selector: Selector(role: "AXTextField", identifier: "document")
+        )
+        let typeAction = ActionSpec(
+            kind: .type,
+            surface: .macApp,
+            selector: target.selector,
+            parameters: [
+                "text_source": .string("ephemeral"),
+                "input_key": .string("body")
+            ]
+        )
+        let valid = TaskPlan(
+            id: "background.type",
+            name: "Background type",
+            summary: "Set a named field without foreground input",
+            focusPolicy: .background,
+            steps: [TaskStep(
+                id: "type",
+                action: typeAction,
+                target: target,
+                approvalReason: "Set the approved field"
+            )]
+        )
+        XCTAssertTrue(TaskPlanValidator.validate(valid).valid)
+
+        let global = TaskPlan(
+            id: "background.global",
+            name: "Global type",
+            summary: "Attempt an unscoped background type",
+            focusPolicy: .background,
+            steps: [TaskStep(
+                id: "type",
+                action: ActionSpec(
+                    kind: .type,
+                    surface: .macApp,
+                    parameters: [
+                        "text_source": .string("ephemeral"),
+                        "input_key": .string("body")
+                    ]
+                ),
+                approvalReason: "Test rejection"
+            )]
+        )
+        let invalid = TaskPlanValidator.validate(global)
+        XCTAssertFalse(invalid.valid)
+        XCTAssertTrue(invalid.errors.contains { $0.contains("Accessibility selector") })
+        XCTAssertTrue(invalid.errors.contains { $0.contains("target application") })
+    }
+
+    func testTaskInputChannelCannotBeReusedByAnotherTaskOrPlanDigest() throws {
+        let target = AppInfo(
+            name: "TextEdit",
+            bundleID: "com.apple.TextEdit",
+            path: "/System/Applications/TextEdit.app",
+            isRunning: true,
+            processID: 401
+        )
+        let channel = TaskInputChannel(
+            channelID: "input-test",
+            taskID: "task-a",
+            planDigest: "digest-a",
+            focusPolicy: .background,
+            targetApplication: target,
+            routes: [.processDirected],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let authority = TaskExecutionAuthority(
+            leaseToken: nil,
+            leaseExpiresAt: channel.expiresAt,
+            inputChannel: channel,
+            revalidate: { target }
+        )
+        let wrongTask = TaskActionContext(
+            taskID: "task-b",
+            stepID: "key",
+            target: TaskTargetIdentity(application: "TextEdit"),
+            focusPolicy: .background,
+            planDigest: "digest-a",
+            ephemeralInputs: [:],
+            deadline: Date().addingTimeInterval(30),
+            authority: authority
+        )
+        XCTAssertThrowsError(try wrongTask.requireAuthority()) { error in
+            XCTAssertEqual(error as? TaskControlError, .leaseRequired)
+        }
+
+        let wrongDigest = TaskActionContext(
+            taskID: "task-a",
+            stepID: "key",
+            target: TaskTargetIdentity(application: "TextEdit"),
+            focusPolicy: .background,
+            planDigest: "digest-b",
+            ephemeralInputs: [:],
+            deadline: Date().addingTimeInterval(30),
+            authority: authority
+        )
+        XCTAssertThrowsError(try wrongDigest.requireAuthority()) { error in
+            XCTAssertEqual(error as? TaskControlError, .leaseRequired)
+        }
+    }
+
+    func testBackgroundTaskKeyUsesProcessDirectedChannelWithoutKeyboardLease() throws {
+        let target = AppInfo(
+            name: "TextEdit",
+            bundleID: "com.apple.TextEdit",
+            path: "/System/Applications/TextEdit.app",
+            isRunning: true,
+            processID: 402
+        )
+        let foreground = AppInfo(
+            name: "Finder",
+            bundleID: "com.apple.finder",
+            path: "/System/Library/CoreServices/Finder.app",
+            isRunning: true,
+            processID: 403
+        )
+        let focus = FocusedElementSnapshot(
+            targetApplication: foreground,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "front",
+            title: "Front"
+        )
+        let store = KeyboardDriveStore()
+        let keyboard = KeyboardAccessController(
+            eventSender: RecordingKeyboardEventSender(),
+            preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+        )
+        let session = ControlSession(
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { foreground },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true },
+            postActionTimeout: 0
+        )
+        let router = SemanticActionRouter(
+            session: session,
+            keyboardAccessController: keyboard,
+            accessibilityActionController: TestAccessibilityActionPerformer(),
+            visualActionController: TestVisualActionPerformer()
+        )
+        var sent: (String, pid_t)?
+        let executor = MacTaskActionExecutor(
+            appController: AppController(),
+            accessibilityController: AccessibilityController(),
+            inputController: InputController(),
+            keyboardAccessController: keyboard,
+            semanticActionRouter: router,
+            adapterRegistry: AppAdapterRegistry(),
+            foregroundApplication: { foreground },
+            backgroundSendKey: { specification, pid in
+                sent = (specification, pid)
+            }
+        )
+        let channel = TaskInputChannel(
+            channelID: "input-key-test",
+            taskID: "background.key",
+            planDigest: "digest-key",
+            focusPolicy: .background,
+            targetApplication: target,
+            routes: [.processDirected],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let context = TaskActionContext(
+            taskID: channel.taskID,
+            stepID: "escape",
+            target: TaskTargetIdentity(application: "TextEdit", processID: target.processID),
+            focusPolicy: .background,
+            planDigest: channel.planDigest,
+            ephemeralInputs: [:],
+            deadline: channel.expiresAt,
+            authority: TaskExecutionAuthority(
+                leaseToken: nil,
+                leaseExpiresAt: channel.expiresAt,
+                inputChannel: channel,
+                revalidate: { target }
+            )
+        )
+
+        let report = try executor.execute(
+            action: ActionSpec(
+                kind: .key,
+                surface: .macApp,
+                parameters: ["key": .string("escape")]
+            ),
+            context: context
+        )
+
+        XCTAssertNil(context.authority?.leaseToken)
+        XCTAssertEqual(sent?.0, "escape")
+        XCTAssertEqual(sent?.1, target.processID)
+        XCTAssertEqual(report.route, "task_input_process")
     }
 
     func testTaskPlanValidatorRejectsRawScriptsPrivateAdapterInputsAndUnknownOperations() {
@@ -4686,6 +4899,171 @@ final class MacCtlCoreTests: XCTestCase {
         })
     }
 
+    func testTaskServiceCreatesBackgroundInputChannelWithoutKeyboardLease() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-receipts-(UUID().uuidString)")
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: receiptDirectory)
+            try? FileManager.default.removeItem(at: checkpointDirectory)
+        }
+        let target = AppInfo(
+            name: "TextEdit",
+            bundleID: "com.apple.TextEdit",
+            path: "/System/Applications/TextEdit.app",
+            isRunning: true,
+            processID: 501
+        )
+        let foreground = AppInfo(
+            name: "Finder",
+            bundleID: "com.apple.finder",
+            path: "/System/Library/CoreServices/Finder.app",
+            isRunning: true,
+            processID: 502
+        )
+        let approvals = TaskApprovalStore()
+        let checkpoints = TaskCheckpointStore(directory: checkpointDirectory)
+        let keyboardLeases = KeyboardDriveStore()
+        let runner = TaskRunner(
+            checkpointStore: checkpoints,
+            approvalStore: approvals,
+            actionExecutor: TestTaskActionExecutor(),
+            targetRevalidator: { _ in nil }
+        )
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "test",
+            keyboardDriveStore: keyboardLeases,
+            taskApprovalStore: approvals,
+            taskCheckpointStore: checkpoints,
+            taskRunner: runner,
+            foregroundApplication: { foreground },
+            resolveApplication: { name in
+                guard name == "TextEdit" || name == "com.apple.TextEdit" else {
+                    throw AppControllerError.appNotFound(name)
+                }
+                return target
+            },
+            hasPostEventAccess: { true }
+        )
+        let plan = TaskPlan(
+            id: "service.background.key",
+            name: "Background key",
+            summary: "Send a process-directed key without taking the shared keyboard",
+            focusPolicy: .background,
+            steps: [TaskStep(
+                id: "escape",
+                action: ActionSpec(
+                    kind: .key,
+                    surface: .macApp,
+                    parameters: ["key": .string("escape")]
+                ),
+                target: TaskTargetIdentity(application: "TextEdit", processID: target.processID),
+                approvalReason: "Dismiss the approved background surface"
+            )]
+        )
+        let planValue = try JSONValue.fromEncodable(plan)
+        let prepared = service.handle(RequestEnvelope(
+            method: "task.prepare",
+            params: ["plan": planValue]
+        ))
+        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
+        XCTAssertEqual(
+            service.handle(RequestEnvelope(
+                method: "approval.approve",
+                params: ["token": .string(token)]
+            )).status,
+            .succeeded
+        )
+
+        let run = service.handle(RequestEnvelope(
+            method: "task.run",
+            params: [
+                "plan": planValue,
+                "approval_token": .string(token)
+            ]
+        ))
+
+        XCTAssertEqual(run.status, .succeeded)
+        XCTAssertNil(keyboardLeases.activeLease())
+        XCTAssertEqual(run.result["input_channel"]?["task_id"]?.stringValue, plan.id)
+        XCTAssertEqual(run.result["input_channel"]?["focus_policy"]?.stringValue, "background")
+        XCTAssertEqual(
+            run.result["input_channel"]?["routes"]?.arrayValue?.compactMap(\.stringValue),
+            ["process_directed"]
+        )
+        XCTAssertTrue(run.evidence.contains { $0.kind == "task_input_channel" })
+    }
+
+    func testTaskServiceRejectsBackgroundChannelWhenTargetOwnsForeground() throws {
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-foreground-(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
+        let target = AppInfo(
+            name: "TextEdit",
+            bundleID: "com.apple.TextEdit",
+            path: "/System/Applications/TextEdit.app",
+            isRunning: true,
+            processID: 503
+        )
+        let approvals = TaskApprovalStore()
+        let checkpoints = TaskCheckpointStore(directory: checkpointDirectory)
+        let keyboardLeases = KeyboardDriveStore()
+        let runner = TaskRunner(
+            checkpointStore: checkpoints,
+            approvalStore: approvals,
+            actionExecutor: TestTaskActionExecutor(),
+            targetRevalidator: { _ in nil }
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardDriveStore: keyboardLeases,
+            taskApprovalStore: approvals,
+            taskCheckpointStore: checkpoints,
+            taskRunner: runner,
+            foregroundApplication: { target },
+            resolveApplication: { _ in target },
+            hasPostEventAccess: { true }
+        )
+        let plan = TaskPlan(
+            id: "service.background.foreground",
+            name: "Unsafe background key",
+            summary: "Reject a channel that could interleave with physical input",
+            focusPolicy: .background,
+            steps: [TaskStep(
+                id: "escape",
+                action: ActionSpec(
+                    kind: .key,
+                    surface: .macApp,
+                    parameters: ["key": .string("escape")]
+                ),
+                target: TaskTargetIdentity(application: "TextEdit", processID: target.processID),
+                approvalReason: "Test foreground isolation"
+            )]
+        )
+        let planValue = try JSONValue.fromEncodable(plan)
+        let prepared = service.handle(RequestEnvelope(
+            method: "task.prepare",
+            params: ["plan": planValue]
+        ))
+        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
+        _ = service.handle(RequestEnvelope(
+            method: "approval.approve",
+            params: ["token": .string(token)]
+        ))
+
+        let run = service.handle(RequestEnvelope(
+            method: "task.run",
+            params: [
+                "plan": planValue,
+                "approval_token": .string(token)
+            ]
+        ))
+
+        XCTAssertEqual(run.status, .blocked)
+        XCTAssertNil(run.result["input_channel"])
+        XCTAssertNil(keyboardLeases.activeLease())
+        XCTAssertEqual(run.error?.code, MacCtlErrorCode.taskBlocked.rawValue)
+    }
+
     func testTaskTargetChangesAndModalStatePauseBeforeDispatch() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-target-(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -4726,7 +5104,12 @@ final class MacCtlCoreTests: XCTestCase {
             XCTAssertEqual(error as? TaskControlError, .preconditionFailed("modal_dialog"))
         }
         XCTAssertEqual(executor.executeCount, 0)
-        XCTAssertEqual(try runner.status(taskID: plan.id).state, .paused)
+        XCTAssertEqual(try runner.status(taskID: plan.id).state, .prepared)
+        XCTAssertNotNil(try approvals.validateApproved(
+            token: prepared.approval.token,
+            plan: plan,
+            ephemeralInputs: [:]
+        ))
     }
 
     func testReleaseGateRequiresEveryTierOneEvidenceDimension() {
@@ -4895,8 +5278,8 @@ final class MacCtlCoreTests: XCTestCase {
             receipt(method: "workflow.run", workflowID: $0, status: .succeeded, verificationResult: "passed")
         } + [
             receipt(method: "workflow.prepare", workflowID: "approval.smoke", status: .prepared, approvalState: "prepared"),
-            receipt(method: "approval.approve", workflowID: "approval.smoke", status: .succeeded, source: "hud", approvalState: "approved"),
-            receipt(method: "approval.deny", workflowID: "approval.smoke", status: .succeeded, source: "hud", approvalState: "denied"),
+            receipt(method: "approval.approve", workflowID: "approval.smoke", status: .succeeded, source: "control_center", approvalState: "approved"),
+            receipt(method: "approval.deny", workflowID: "approval.smoke", status: .succeeded, source: "control_center", approvalState: "denied"),
             receipt(
                 method: "approval.approve",
                 workflowID: "approval.smoke",

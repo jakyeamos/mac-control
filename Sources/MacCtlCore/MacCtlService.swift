@@ -117,6 +117,43 @@ private struct CapabilityAuditExecution {
 }
 
 public final class MacCtlService {
+    private struct ActiveControlExecution {
+        let executionID: String
+        let taskID: String?
+        let summary: String
+        let applicationName: String?
+        let leaseToken: String
+        let leaseOwnedByDaemon: Bool
+        let physicalInputMode: KeyboardPhysicalInputMode
+        let acquiredAt: Date
+        let expiresAt: Date
+        var stopping: Bool
+
+        var snapshot: ControlCenterExecution {
+            ControlCenterExecution(
+                executionID: executionID,
+                taskID: taskID,
+                summary: summary,
+                applicationName: applicationName,
+                physicalInputMode: physicalInputMode,
+                acquiredAt: acquiredAt,
+                expiresAt: expiresAt,
+                stopping: stopping
+            )
+        }
+    }
+
+    private struct TaskAuthorityReservation {
+        let authority: TaskExecutionAuthority?
+        let lease: KeyboardDriveLease?
+        let ownedByDaemon: Bool
+    }
+
+    private struct WorkflowLeaseReservation {
+        let lease: KeyboardDriveLease?
+        let ownedByDaemon: Bool
+    }
+
     private let appController: AppController
     private let workflowRegistry: WorkflowRegistry
     private let workflowExecutor: WorkflowExecutor
@@ -149,10 +186,14 @@ public final class MacCtlService {
     private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
     private let executionLock = NSLock()
+    private let controlCenterLock = NSLock()
     // Access is serialized by executionLock. The cache is deliberately held
     // only by a single keyboard lease and re-runs permission selection on
     // every action, so a warm manifest cannot bypass a changed permission gate.
     private var routeSelectionCache: RouteSelectionCacheEntry?
+    private var activeControlExecution: ActiveControlExecution?
+
+    public var controlCenterStateChanged: (() -> Void)?
 
     public init(
         appController: AppController = AppController(),
@@ -401,12 +442,17 @@ public final class MacCtlService {
             }
         }
         recordReceipt(for: request, response: response, startedAt: startedAt)
+        controlCenterStateChanged?()
         return response
     }
 
     public func shutdown() {
         routeSelectionCache = nil
+        controlCenterLock.lock()
+        activeControlExecution = nil
+        controlCenterLock.unlock()
         keyboardDriveStore.shutdown()
+        controlCenterStateChanged?()
     }
 
     private func execute(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -449,6 +495,8 @@ public final class MacCtlService {
                 return try resumeTask(request)
             case "task.cancel":
                 return try cancelTask(request)
+            case "control.stop_active":
+                return try stopActiveControl(request)
             case "adapter.capabilities":
                 return try success(
                     request,
@@ -464,6 +512,8 @@ public final class MacCtlService {
                 )
             case "control.status":
                 return try controlStatus(request)
+            case "control.center.snapshot":
+                return try success(request, value: controlCenterSnapshot())
             case "control.perform":
                 return try performControlAction(request)
             case "control.batch":
@@ -559,6 +609,46 @@ public final class MacCtlService {
     public func isApprovalPending(token: String) -> Bool {
         approvalStore.list().contains { $0.token == token }
             || taskApprovalStore.list().contains { $0.token == token }
+    }
+
+    public func pendingApprovalRecords() -> [ApprovalRecord] {
+        (approvalStore.list() + taskApprovalStore.list()).sorted {
+            if $0.expiresAt == $1.expiresAt { return $0.operationID < $1.operationID }
+            return $0.expiresAt < $1.expiresAt
+        }
+    }
+
+    public func controlCenterSnapshot() -> ControlCenterSnapshot {
+        let approvals = pendingApprovalRecords().map(ControlCenterApproval.init)
+        controlCenterLock.lock()
+        let activeExecution = activeControlExecution?.snapshot
+        controlCenterLock.unlock()
+        let execution: ControlCenterExecution?
+        if let activeExecution {
+            execution = activeExecution
+        } else if let lease = keyboardDriveStore.activeLease() {
+            execution = ControlCenterExecution(
+                executionID: "manual-lease",
+                taskID: nil,
+                summary: lease.physicalInputMode == .suppressed
+                    ? "Physical keyboard suppression"
+                    : "Keyboard control lease",
+                applicationName: lease.application?.name,
+                physicalInputMode: lease.physicalInputMode,
+                acquiredAt: lease.acquiredAt,
+                expiresAt: lease.expiresAt
+            )
+        } else {
+            execution = nil
+        }
+        let permissions = permissionContext == "daemon"
+            ? PermissionDiagnostics.report()
+            : PermissionDiagnostics.unknownReport()
+        return ControlCenterSnapshot(
+            approvals: approvals,
+            execution: execution,
+            permissions: permissions
+        )
     }
 
     private func shortcutAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -3374,16 +3464,42 @@ public final class MacCtlService {
         let plan = try taskPlan(from: request)
         let token = try requiredString(request, key: "approval_token")
         let inputs = try ephemeralInputs(from: request)
-        let authority = try taskAuthority(for: plan, request: request, force: false)
+        let reservation = try taskAuthority(
+            for: plan,
+            request: request,
+            approvalToken: token,
+            ephemeralInputs: inputs,
+            force: false
+        )
+        let executionID = reservation.lease.map {
+            beginControlCenterExecution(
+                taskID: plan.id,
+                summary: plan.summary,
+                applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
+                lease: $0,
+                leaseOwnedByDaemon: reservation.ownedByDaemon
+            )
+        }
+        defer {
+            if reservation.ownedByDaemon, let lease = reservation.lease {
+                keyboardDriveStore.invalidate(token: lease.token)
+            }
+            if let executionID { finishControlCenterExecution(executionID: executionID) }
+        }
         let report = try withExecutionLock {
             try taskRunner.run(
                 plan: plan,
                 approvalToken: token,
                 ephemeralInputs: inputs,
-                authority: authority
+                authority: reservation.authority
             )
         }
-        return try taskResponse(request, report: report, message: "Task completed")
+        return try taskResponse(
+            request,
+            report: report,
+            message: "Task completed",
+            inputChannel: reservation.authority?.inputChannel
+        )
     }
 
     private func statusTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -3396,8 +3512,29 @@ public final class MacCtlService {
         let plan = try taskPlan(from: request)
         let token = try requiredString(request, key: "approval_token")
         let inputs = try ephemeralInputs(from: request)
-        let authority = try taskAuthority(for: plan, request: request, force: true)
-        guard let authority else { throw TaskControlError.leaseRequired }
+        let reservation = try taskAuthority(
+            for: plan,
+            request: request,
+            approvalToken: token,
+            ephemeralInputs: inputs,
+            force: true
+        )
+        guard let authority = reservation.authority else { throw TaskControlError.leaseRequired }
+        let executionID = reservation.lease.map {
+            beginControlCenterExecution(
+                taskID: plan.id,
+                summary: plan.summary,
+                applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
+                lease: $0,
+                leaseOwnedByDaemon: reservation.ownedByDaemon
+            )
+        }
+        defer {
+            if reservation.ownedByDaemon, let lease = reservation.lease {
+                keyboardDriveStore.invalidate(token: lease.token)
+            }
+            if let executionID { finishControlCenterExecution(executionID: executionID) }
+        }
         let report = try withExecutionLock {
             try taskRunner.resume(
                 plan: plan,
@@ -3406,7 +3543,12 @@ public final class MacCtlService {
                 authority: authority
             )
         }
-        return try taskResponse(request, report: report, message: "Task resumed and completed")
+        return try taskResponse(
+            request,
+            report: report,
+            message: "Task resumed and completed",
+            inputChannel: authority.inputChannel
+        )
     }
 
     private func cancelTask(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -3416,6 +3558,80 @@ public final class MacCtlService {
         // action.  TaskRunner owns its checkpoint/cancellation synchronization.
         let report = try taskRunner.cancel(taskID: taskID)
         return try taskResponse(request, report: report, message: "Task cancellation requested")
+    }
+
+    private func stopActiveControl(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        controlCenterLock.lock()
+        let execution = activeControlExecution
+        if var stopping = execution {
+            stopping.stopping = true
+            activeControlExecution = stopping
+        }
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+
+        var cancellationRequested = false
+        if let taskID = execution?.taskID {
+            cancellationRequested = (try? taskRunner.cancel(taskID: taskID)) != nil
+        }
+        let leaseToken = execution?.leaseToken ?? keyboardDriveStore.activeLease()?.token
+        let released = leaseToken.map { keyboardDriveStore.invalidate(token: $0) } ?? false
+        if let leaseToken, routeSelectionCache?.leaseToken == leaseToken {
+            routeSelectionCache = nil
+        }
+        if execution == nil {
+            controlCenterLock.lock()
+            activeControlExecution = nil
+            controlCenterLock.unlock()
+        }
+        return try success(
+            request,
+            result: [
+                "cancellation_requested": .bool(cancellationRequested),
+                "released": .bool(released)
+            ],
+            evidence: [Evidence(
+                kind: "control_stop",
+                message: "Active execution was marked cancelled and its input authority was invalidated",
+                source: "macctld"
+            )]
+        )
+    }
+
+    @discardableResult
+    private func beginControlCenterExecution(
+        taskID: String?,
+        summary: String,
+        applicationName: String?,
+        lease: KeyboardDriveLease,
+        leaseOwnedByDaemon: Bool
+    ) -> String {
+        let executionID = UUID().uuidString
+        controlCenterLock.lock()
+        activeControlExecution = ActiveControlExecution(
+            executionID: executionID,
+            taskID: taskID,
+            summary: summary,
+            applicationName: applicationName,
+            leaseToken: lease.token,
+            leaseOwnedByDaemon: leaseOwnedByDaemon,
+            physicalInputMode: lease.physicalInputMode,
+            acquiredAt: lease.acquiredAt,
+            expiresAt: lease.expiresAt,
+            stopping: false
+        )
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+        return executionID
+    }
+
+    private func finishControlCenterExecution(executionID: String) {
+        controlCenterLock.lock()
+        if activeControlExecution?.executionID == executionID {
+            activeControlExecution = nil
+        }
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
     }
 
     private func taskPlan(from request: RequestEnvelope) throws -> TaskPlan {
@@ -3435,31 +3651,164 @@ public final class MacCtlService {
     private func taskAuthority(
         for plan: TaskPlan,
         request: RequestEnvelope,
+        approvalToken: String,
+        ephemeralInputs: [String: String],
         force: Bool
-    ) throws -> TaskExecutionAuthority? {
-        guard force || plan.requiresInputAuthority(using: adapterRegistry) else { return nil }
-        guard let token = request.params["lease_token"]?.stringValue, !token.isEmpty else {
-            throw TaskControlError.leaseRequired
+    ) throws -> TaskAuthorityReservation {
+        _ = try taskApprovalStore.validateApproved(
+            token: approvalToken,
+            plan: plan,
+            ephemeralInputs: ephemeralInputs
+        )
+        if plan.focusPolicy == .background {
+            guard force || plan.requiresInputAuthority(using: adapterRegistry) else {
+                return TaskAuthorityReservation(authority: nil, lease: nil, ownedByDaemon: false)
+            }
+            return TaskAuthorityReservation(
+                authority: try backgroundTaskAuthority(for: plan, ephemeralInputs: ephemeralInputs),
+                lease: nil,
+                ownedByDaemon: false
+            )
+        }
+        if let target = ApprovalHandoffTargetResolver.resolve(for: plan) {
+            _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
+        }
+        let requiredMode: KeyboardPhysicalInputMode = plan.keyboardFreezeRequired ? .suppressed : .shared
+        let suppliedToken = request.params["lease_token"]?.stringValue
+        let lease: KeyboardDriveLease
+        let ownedByDaemon: Bool
+        if let suppliedToken, !suppliedToken.isEmpty {
+            lease = try keyboardDriveStore.lease(for: suppliedToken)
+            guard lease.scope == .session, lease.physicalInputMode == requiredMode else {
+                throw TaskControlError.leaseRequired
+            }
+            ownedByDaemon = false
+        } else {
+            guard hasPostEventAccess() else {
+                throw KeyboardControlError.permissionDenied("Post Events")
+            }
+            lease = try keyboardDriveStore.acquire(
+                scope: .session,
+                application: nil,
+                seconds: min(plan.totalTimeout, KeyboardDriveStore.maximumLifetime),
+                confirm: true,
+                physicalInputMode: requiredMode,
+                freezeReason: requiredMode == .suppressed
+                    ? "Exact approved task requires physical keyboard suppression"
+                    : nil
+            )
+            ownedByDaemon = true
         }
         let requiresFullKeyboardAccess = plan.steps.contains {
             $0.action.kind == .key || $0.action.kind == .search
         }
-        let context = try controlSession.beginAction(
-            leaseToken: token,
-            requireFullKeyboardAccess: requiresFullKeyboardAccess
+        do {
+            let context = try controlSession.beginAction(
+                leaseToken: lease.token,
+                requireFullKeyboardAccess: requiresFullKeyboardAccess
+            )
+            let authority = TaskExecutionAuthority(
+                leaseToken: lease.token,
+                leaseExpiresAt: context.lease.expiresAt,
+                fresh: true,
+                revalidate: { [controlSession] in
+                    try controlSession.revalidate(context)
+                },
+                fingerprint: { [controlSession] in
+                    let application = try? controlSession.revalidate(context)
+                    return application.map { ControlTargetFingerprints.make(application: $0, focus: nil) }
+                }
+            )
+            return TaskAuthorityReservation(
+                authority: authority,
+                lease: lease,
+                ownedByDaemon: ownedByDaemon
+            )
+        } catch {
+            if ownedByDaemon { keyboardDriveStore.invalidate(token: lease.token) }
+            throw error
+        }
+    }
+
+    private func backgroundTaskAuthority(
+        for plan: TaskPlan,
+        ephemeralInputs: [String: String]
+    ) throws -> TaskExecutionAuthority {
+        let inputSteps = plan.steps.filter {
+            [.click, .type, .key].contains($0.action.kind)
+        }
+        let targetNames = Set(inputSteps.compactMap {
+            $0.target?.bundleID ?? $0.target?.application
+        })
+        guard targetNames.count == 1, let targetName = targetNames.first else {
+            throw TaskControlError.leaseRequired
+        }
+        let targetApplication = try resolveApplication(targetName)
+        guard targetApplication.isRunning, let targetPID = targetApplication.processID else {
+            throw TaskControlError.blocked("background_target_not_running")
+        }
+        guard inputSteps.allSatisfy({ step in
+            step.target?.processID.map { $0 == targetPID } ?? true
+        }) else {
+            throw TaskControlError.blocked("background_target_process_changed")
+        }
+        guard let initialForeground = foregroundApplication() else {
+            throw TaskControlError.blocked("foreground_unavailable")
+        }
+        guard !Self.sameTaskApplication(initialForeground, targetApplication) else {
+            throw TaskControlError.blocked("background_target_is_foreground")
+        }
+        if inputSteps.contains(where: { $0.action.kind == .key }), !hasPostEventAccess() {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+
+        var routes: [TaskInputChannelRoute] = []
+        if inputSteps.contains(where: { [.click, .type].contains($0.action.kind) }) {
+            routes.append(.accessibility)
+        }
+        if inputSteps.contains(where: { $0.action.kind == .key }) {
+            routes.append(.processDirected)
+        }
+        let planDigest = TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs)
+        let channel = TaskInputChannel(
+            taskID: plan.id,
+            planDigest: planDigest,
+            focusPolicy: .background,
+            targetApplication: targetApplication,
+            routes: routes,
+            expiresAt: Date().addingTimeInterval(
+                min(plan.totalTimeout, KeyboardDriveStore.maximumLifetime)
+            )
         )
         return TaskExecutionAuthority(
-            leaseToken: token,
-            leaseExpiresAt: context.lease.expiresAt,
+            leaseToken: nil,
+            leaseExpiresAt: channel.expiresAt,
             fresh: true,
-            revalidate: { [controlSession] in
-                try controlSession.revalidate(context)
+            inputChannel: channel,
+            revalidate: { [resolveApplication, foregroundApplication] in
+                let currentTarget = try resolveApplication(targetName)
+                guard currentTarget.processID == targetPID,
+                      currentTarget.isRunning else {
+                    throw TaskControlError.blocked("background_target_process_changed")
+                }
+                guard let currentForeground = foregroundApplication(),
+                      Self.sameTaskApplication(currentForeground, initialForeground),
+                      !Self.sameTaskApplication(currentForeground, currentTarget) else {
+                    throw TaskControlError.blocked("background_foreground_changed")
+                }
+                return currentTarget
             },
-            fingerprint: { [controlSession] in
-                let application = try? controlSession.revalidate(context)
-                return application.map { ControlTargetFingerprints.make(application: $0, focus: nil) }
+            fingerprint: {
+                ControlTargetFingerprints.make(application: targetApplication, focus: nil)
             }
         )
+    }
+
+    private static func sameTaskApplication(_ lhs: AppInfo, _ rhs: AppInfo) -> Bool {
+        if let lhsBundleID = lhs.bundleID, let rhsBundleID = rhs.bundleID {
+            return lhsBundleID == rhsBundleID
+        }
+        return lhs.path == rhs.path || lhs.name == rhs.name
     }
 
     private static func validateTaskTarget(
@@ -3514,7 +3863,8 @@ public final class MacCtlService {
     private func taskResponse(
         _ request: RequestEnvelope,
         report: TaskStatusReport,
-        message: String
+        message: String,
+        inputChannel: TaskInputChannel? = nil
     ) throws -> ResponseEnvelope {
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["task_id"] = .string(report.taskID)
@@ -3524,16 +3874,43 @@ public final class MacCtlService {
             result["last_step_id"] = .string(lastStepID)
         }
         result["message"] = .string(message)
+        var evidence = [Evidence(
+            kind: "task_checkpoint",
+            message: "Task status was derived from a redacted durable checkpoint",
+            source: "macctld",
+            metadata: ["lifecycle_state": .string(report.state.rawValue)]
+        )]
+        if let inputChannel {
+            result["input_channel"] = .object([
+                "channel_id": .string(inputChannel.channelID),
+                "task_id": .string(inputChannel.taskID),
+                "plan_digest": .string(inputChannel.planDigest),
+                "focus_policy": .string(inputChannel.focusPolicy.rawValue),
+                "target": .object([
+                    "name": .string(inputChannel.targetApplication.name),
+                    "bundle_id": inputChannel.targetApplication.bundleID.map(JSONValue.string) ?? .null,
+                    "process_id": inputChannel.targetApplication.processID
+                        .map { .number(Double($0)) } ?? .null
+                ]),
+                "routes": .array(inputChannel.routes.map { .string($0.rawValue) }),
+                "expires_at_unix_seconds": .number(inputChannel.expiresAt.timeIntervalSince1970)
+            ])
+            evidence.append(Evidence(
+                kind: "task_input_channel",
+                message: "Background input was bound to the approved task and target process",
+                source: "macctld",
+                metadata: [
+                    "task_id": .string(inputChannel.taskID),
+                    "focus_policy": .string(inputChannel.focusPolicy.rawValue),
+                    "routes": .array(inputChannel.routes.map { .string($0.rawValue) })
+                ]
+            ))
+        }
         return try success(
             request,
             status: taskOperationStatus(report.state),
             result: result,
-            evidence: [Evidence(
-                kind: "task_checkpoint",
-                message: "Task status was derived from a redacted durable checkpoint",
-                source: "macctld",
-                metadata: ["lifecycle_state": .string(report.state.rawValue)]
-            )]
+            evidence: evidence
         )
     }
 
@@ -3652,7 +4029,11 @@ public final class MacCtlService {
                     ]
                 )
             }
-            let prepared = try approvalStore.approve(token: token)
+            let prepared = try approvalStore.validateApproved(
+                token: token,
+                workflow: workflow,
+                ephemeralInputs: suppliedInputs
+            )
             guard requestedPolicy == nil || requestedPolicy == prepared.workflow.focusPolicy else {
                 return failure(
                     request,
@@ -3698,6 +4079,10 @@ public final class MacCtlService {
         let token = try requiredString(request, key: "token")
         if token.hasPrefix("mct_") {
             do {
+                if request.params["source"]?.stringValue == "control_center",
+                   let target = taskApprovalStore.record(for: token)?.handoffTarget {
+                    _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
+                }
                 let prepared = try taskApprovalStore.approve(token: token)
                 logger.record(event: "task_approval_approved", metadata: [
                     "task_id": prepared.plan.id,
@@ -3723,11 +4108,29 @@ public final class MacCtlService {
             }
         }
         do {
+            if request.params["source"]?.stringValue == "control_center",
+               let target = approvalStore.record(for: token)?.handoffTarget {
+                _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
+            }
             let prepared = try approvalStore.approve(token: token)
-            return try executePrepared(
+            logger.record(event: "workflow_approval_approved", metadata: [
+                "workflow": prepared.workflow.id,
+                "operation_id": prepared.record.operationID
+            ])
+            return try success(
                 request,
-                prepared: prepared,
-                keyboardLeaseToken: request.params["lease_token"]?.stringValue
+                operationID: prepared.record.operationID,
+                result: [
+                    "approved": .bool(true),
+                    "workflow_id": .string(prepared.workflow.id),
+                    "plan_digest": .string(prepared.planDigest),
+                    "approval": try JSONValue.fromEncodable(prepared.record)
+                ],
+                evidence: [Evidence(
+                    kind: "approval",
+                    message: "Workflow approval was bound to the exact serialized plan",
+                    source: "macctld"
+                )]
             )
         } catch let error as ApprovalStoreError {
             return approvalFailure(request, token: token, error: error)
@@ -3774,10 +4177,34 @@ public final class MacCtlService {
                 operationID: prepared.record.operationID
             )
         }
+        let reservation = try approvedWorkflowLease(
+            workflow: prepared.workflow,
+            suppliedToken: keyboardLeaseToken ?? request.params["lease_token"]?.stringValue
+        )
+        let executionID = reservation.lease.map {
+            beginControlCenterExecution(
+                taskID: nil,
+                summary: prepared.workflow.summary,
+                applicationName: prepared.record.handoffTarget?.applicationName,
+                lease: $0,
+                leaseOwnedByDaemon: reservation.ownedByDaemon
+            )
+        }
+        defer {
+            if reservation.ownedByDaemon, let lease = reservation.lease {
+                keyboardDriveStore.invalidate(token: lease.token)
+            }
+            if let executionID { finishControlCenterExecution(executionID: executionID) }
+        }
+        _ = try approvalStore.consume(
+            token: prepared.record.token,
+            workflow: prepared.workflow,
+            ephemeralInputs: prepared.ephemeralInputs
+        )
         let report = try executeWorkflow(
             prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs,
-            keyboardLeaseToken: keyboardLeaseToken ?? request.params["lease_token"]?.stringValue
+            keyboardLeaseToken: reservation.lease?.token
         )
         let source = request.params["source"]?.stringValue ?? "cli"
         logger.record(event: "approved_workflow_succeeded", metadata: [
@@ -3797,6 +4224,40 @@ public final class MacCtlService {
             result: result,
             evidence: report.evidence
         )
+    }
+
+    private func approvedWorkflowLease(
+        workflow: WorkflowSpec,
+        suppliedToken: String?
+    ) throws -> WorkflowLeaseReservation {
+        guard workflow.focusPolicy == .foreground else {
+            return WorkflowLeaseReservation(lease: nil, ownedByDaemon: false)
+        }
+        if let target = ApprovalHandoffTargetResolver.resolve(for: workflow) {
+            _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
+        }
+        let requiredMode: KeyboardPhysicalInputMode = workflow.keyboardFreezeRequired ? .suppressed : .shared
+        if let suppliedToken, !suppliedToken.isEmpty {
+            let lease = try keyboardDriveStore.lease(for: suppliedToken)
+            guard lease.scope == .session, lease.physicalInputMode == requiredMode else {
+                throw TaskControlError.leaseRequired
+            }
+            return WorkflowLeaseReservation(lease: lease, ownedByDaemon: false)
+        }
+        guard hasPostEventAccess() else {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+        let lease = try keyboardDriveStore.acquire(
+            scope: .session,
+            application: nil,
+            seconds: KeyboardDriveStore.maximumLifetime,
+            confirm: true,
+            physicalInputMode: requiredMode,
+            freezeReason: requiredMode == .suppressed
+                ? "Exact approved workflow requires physical keyboard suppression"
+                : nil
+        )
+        return WorkflowLeaseReservation(lease: lease, ownedByDaemon: true)
     }
 
     private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -3893,7 +4354,7 @@ public final class MacCtlService {
                 "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression",
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
                 "keyboard.navigate", "keyboard.send",
-                "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome",
+                "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
                 "task.resume", "task.cancel", "adapter.capabilities",
@@ -4410,6 +4871,7 @@ public final class MacCtlService {
         case .notFound: code = .approvalNotFound
         case .expired: code = .approvalExpired
         case .alreadyUsed: code = .approvalAlreadyUsed
+        case .mismatch: code = .approvalMismatch
         }
         return failure(
             request,
@@ -4738,6 +5200,7 @@ public final class MacCtlService {
             case .notFound: code = .approvalNotFound
             case .expired: code = .approvalExpired
             case .alreadyUsed: code = .approvalAlreadyUsed
+            case .mismatch: code = .approvalMismatch
             }
         case let error as TaskApprovalStoreError:
             status = .blocked
