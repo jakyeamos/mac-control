@@ -1,0 +1,26 @@
+{
+  "schema": "agent-usability/v1",
+  "reviewed_at": "2026-08-09",
+  "applicability": "applicable",
+  "tools": [
+    {
+      "id": "macctl",
+      "kind": "cli-and-native-control",
+      "documentation": [
+        ".agents/context/commands.md"
+      ],
+      "skills": [
+        "mac-control"
+      ],
+      "behavior_evidence": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "mac-control",
+      "family": "mac-control",
+      "source": "hosted",
+      "contract_path": "skills/mac-control/SKILL.md"
+    }
+  ]
+}
