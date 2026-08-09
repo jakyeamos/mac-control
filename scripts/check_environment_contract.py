@@ -126,10 +126,10 @@ def _errors_for_mac_control_skill() -> list[str]:
         errors.append("Mac Control skill frontmatter is invalid")
     required_skill_markers = (
         "mature direct CLI, API, typed connector, or browser DOM route",
-        "Mac Control adapter or semantic Accessibility target",
-        "named Mac Control keyboard action",
-        "generic Accessibility GUI control",
-        "screenshot, OCR, or coordinates",
+        "task-specific rather than a fixed",
+        "fresh manifest exists for the exact app identity",
+        "selector's addressability metadata",
+        "Visual and coordinate candidates require explicit task-manifest opt-in",
         "keyboard_focus_changed",
         "lease_released",
         "result.verification.state",
@@ -137,9 +137,6 @@ def _errors_for_mac_control_skill() -> list[str]:
     missing = [marker for marker in required_skill_markers if marker not in skill]
     if missing:
         errors.append(f"Mac Control skill missing markers: {', '.join(missing)}")
-    route_positions = [skill.find(marker) for marker in required_skill_markers[:5]]
-    if -1 not in route_positions and route_positions != sorted(route_positions):
-        errors.append("Mac Control route order is not strongest-to-weakest")
     for marker in ("Positive and negative examples", "Ambiguous cases", "Evidence basis"):
         if marker not in routing:
             errors.append(f"Mac Control routing reference missing marker: {marker}")

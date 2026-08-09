@@ -81,7 +81,6 @@ Useful read-only commands include:
 ~/.local/bin/macctl status --json
 ~/.local/bin/macctl app list --json
 ~/.local/bin/macctl workflow list --json
-~/.local/bin/macctl iphone status --json
 ~/.local/bin/macctl receipts status --json
 ~/.local/bin/macctl receipts list --json
 ~/.local/bin/macctl release check --json
@@ -89,9 +88,9 @@ Useful read-only commands include:
 
 `macctl release check --json` is the Tier-1 machine-readable gate. It checks
 the packaged launchd identity, live daemon permissions, owner-only transport,
-receipt storage/retention, fresh Mac GUI smoke receipts, fresh iPhone
-Mirroring Tinder evidence, and approval/fail-closed evidence. It does not run
-workflows as a side effect; missing live evidence is reported as `blocked`.
+receipt storage/retention, fresh Mac GUI smoke receipts, and approval/fail-closed
+evidence. It does not run workflows as a side effect; missing live evidence is
+reported as `blocked`.
 
 Receipts are schema-versioned JSON records in
 `~/Library/Application Support/macctl/receipts/`. The daemon retains the
@@ -127,8 +126,8 @@ action. The focus policy is part of the approval digest and is preserved in
 execution reports and receipts.
 
 The background validator rejects activation, scroll, desktop capture/OCR,
-iPhone Mirroring, visual selectors, coordinate fallbacks, and foreground
-assertions. This keeps a workflow from silently falling back to global mouse or
+visual selectors, coordinate fallbacks, and foreground assertions. This keeps a
+workflow from silently falling back to global mouse or
 keyboard input. Background window capture/OCR is available only when it names a
 macOS app explicitly. The mode still requires a logged-in Aqua session and the
 user-granted Accessibility, Input Monitoring, Post Events, and Screen Recording
@@ -211,8 +210,24 @@ An app lease binds to the named foreground application and its process. A
 session lease follows foreground application changes, but blocks when the
 foreground process cannot be read. Every key in a sequence revalidates the
 lease, Post Events permission, and the applicable foreground condition. The
-lease is a logical safety boundary; it cannot stop a person from pressing a
-physical key at the same time.
+default `shared` mode is a logical safety boundary; it leaves the physical
+keyboard available and cannot stop a person from pressing a key at the same
+time. For an intentional, interactive session you can opt into software
+suppression of physical keyboard events:
+
+```sh
+~/.local/bin/macctl keyboard lease acquire \
+  --scope session --seconds 120 --suppress-physical-keyboard \
+  --reason "interactive keyboard freeze" --confirm --json
+```
+
+Suppression is session-scoped and is available only on a session lease. It
+requires user-granted Accessibility and Input Monitoring access, fails closed
+if macOS cannot install the event tap, and ends on release, lease expiry, or
+daemon shutdown. It is not a hardware or driver lock: the mouse remains
+available for the status-item `Quit daemon` emergency path, and synthetic
+`macctl` keyboard events are marked so the agent's own input can still run.
+Use the default shared mode for app-scoped or unattended workflows.
 
 Named navigation commands use Apple's Full Keyboard Access sequences:
 
@@ -263,22 +278,177 @@ fail closed with `keyboard_focus_changed`.
   --app "System Settings" --confirm --json
 ```
 
-Routing is ordered by confidence: an Accessibility selector is attempted
-first; if the target is not found, the named keyboard command is used; visual
-text/image or normalized-coordinate selectors are the last fallback. Raw
-coordinates require `--allow-raw-coordinate`. The response reports the route,
-whether fallback was used, and redacted focus/foreground verification metadata
-without persisting selector values, AX values, private text, screenshots, or
-raw key sequences.
+Mac Control does not assume one route is fastest for every app. For a known
+task, execute bounded daemon samples for the exact app version, target
+fingerprint, action, route, and verification oracle, then inspect the selected
+route:
+
+```sh
+~/.local/bin/macctl route benchmark --app "System Settings" \
+  --task focus-next-control --target-fingerprint "settings-pane" \
+  --action next-control --route keyboard \
+  --verification-oracle "focus changed" --samples 5 --warmups 1 \
+  --confirm --json
+~/.local/bin/macctl route inspect --app "System Settings" \
+  --task focus-next-control --target-fingerprint "settings-pane" --json
+```
+
+Semantic scroll routes can be benchmarked by the daemon as well. Use a unique, readable
+`AXScrollArea` identifier and reset to the opposite direction before each repeated invocation:
+
+```sh
+~/.local/bin/macctl route benchmark --app "Chrome" \
+  --task scroll-main --target-fingerprint "scroll-v1" \
+  --action scroll --route scroll --role AXScrollArea --identifier main-scroll \
+  --direction down --amount 1 --reset-direction up --reset-amount 1 \
+  --verification-oracle "viewport changed" --samples 5 --warmups 1 \
+  --confirm --json
+```
+
+The benchmark measures the daemon's semantic AX scroll route, verifies every bounded invocation,
+and persists no warm-path manifest when reset or measured scrolling is unverified.
+
+Safety, permission, target-uniqueness, freshness, and verification gates run
+before speed ranking. The fastest fresh measured candidate wins by complete
+action latency, then p95 latency and recoveries. Unmeasured or stale paths are
+unproven and require rebenchmarking. Visual and coordinate routes require
+explicit manifest opt-in. Only a declared pre-action target-not-found failure
+may advance through a fallback chain; possible side effects and failed
+verification stop the action. Every response reports the selected route and
+fallback chain without persisting selector values, AX values, private text,
+screenshots, OCR, or raw key sequences.
+
+Use `route register` only for explicitly caller-supplied external metadata; it
+is not equivalent to the daemon-executed benchmark.
+
+Agents can inspect the route contract before acting and batch verified navigation
+within one foreground app:
+
+```sh
+~/.local/bin/macctl control capabilities --app "Chrome" \
+  --task focus-next --target-fingerprint focus-v1 --json
+~/.local/bin/macctl control capability-audit --app "Chrome" \
+  --max-nodes 500 --max-depth 8 --json
+~/.local/bin/macctl control capability-audit-batch --all-applicable --json
+printf '%s\n' '[{"action":"next-control"},{"action":"next-control"}]' | \
+  ~/.local/bin/macctl control batch --app "Chrome" --actions-stdin --confirm --json
+```
+
+The fast capability probe reports app archetype plus fresh measured, stale, and
+caller-supplied route inventory and may read a cached broad profile without
+walking AX. The separate `capability-audit` command performs one bounded,
+read-only AX/provider audit and persists a profile keyed by app install
+identity/version, OS/provider state, and UI-tree signature. It stores stable
+redacted locator descriptors rather than raw AX elements. Positive, negative,
+and ambiguous evidence promotes, demotes, or leaves capabilities as candidates;
+task verification can update or invalidate the profile after execution. The
+archetype is descriptive and never grants provider parity. Do not run the deep
+audit before every action. After recursive retries reach the fixed ceiling, a
+    separate bounded window-aware/page traversal may inspect up to 8 windows, 256
+top-level pages, and 16,000 total nodes. Only complete coverage promotes the
+profile; omitted or truncated pages keep it stale and are reported as evidence.
+A batch holds one bounded app lease, revalidates
+every step, stops on an unverified step, and releases the lease. Scroll is
+intentionally kept on `control perform` so a provider handoff remains explicit.
+
+For a machine-wide inventory, `capability-audit-batch --all-applicable` selects
+up to 24 installed user-facing applications from the catalog and audits only
+applications that are already running. It never launches an app or dispatches
+input. Each app gets a durable redacted receipt and an unresolved or failed app
+remains resumable with `--run-id`; AX access is serialized for predictable
+provider behavior. Use `--apps` to provide an explicit subset.
+
+Every control response exposes a provider-neutral `outcome`. Only
+`verified_success` with `verification: passed` is completion. For semantic
+scroll failures that recommend Computer Use, the agent must call
+`get_app_state`, locate a fresh unique scroll target, use `sky.scroll`, and
+verify a changed state; it must not replay a stale AX target or treat a
+dispatched event as success.
+
+For a bounded structural Accessibility check, inspect or audit the running app
+without reading AX values or private content:
+
+```sh
+~/.local/bin/macctl accessibility tree --app "System Settings" --json
+~/.local/bin/macctl accessibility audit --app "System Settings" \
+  --manifest ./accessibility-manifest.json --json
+```
+
+### Mac Control ideal-state audits
+
+Repositories that expose a supported Mac Control task surface can own a
+versioned `.mac-control/ideal-state.json` manifest. The manifest describes the
+stable target, semantic action, observable postcondition, state contract,
+navigation strategy, and eligible routes for each supported task. Validate the
+manifest without touching a running app:
+
+```sh
+~/.local/bin/macctl ideal-state validate \
+  --manifest /path/to/repository/.mac-control/ideal-state.json --json
+```
+
+An explicitly authorized live structural lane validates the manifest and
+checks its declared Accessibility controls in the named app. It returns only
+redacted structural findings:
+
+```sh
+~/.local/bin/macctl ideal-state audit \
+  --app "System Settings" \
+  --manifest /path/to/repository/.mac-control/ideal-state.json --json
+```
+
+This audit does not invent task success from a tree inspection. Measured task
+attempts, selected routes, and readable postconditions remain backed by the
+normal approval-gated `task.*` or route receipts. Quality Runner consumes those
+redacted measurements as `mac-control-task-evidence/v1` sidecars and keeps the
+static, live structural, and task-execution evidence distinct.
+
+When a target lives inside a readable scroll container, use semantic scrolling
+with a unique `AXScrollArea` identifier and verify that the container can still
+be resolved after the action:
+
+```sh
+~/.local/bin/macctl control perform scroll --app "System Settings" \
+  --role AXScrollArea --identifier settings-list --direction down \
+  --amount 1 --confirm --json
+```
+
+If AX cannot perform the action or cannot verify a changed viewport, the response is blocked
+with machine-readable `failure_class`, `fallback_allowed`, and (when appropriate)
+`recommended_provider: computer_use` plus `fresh_state_required: true`. The agent should then
+refresh app state, find a fresh scrollable element, use Computer Use scroll, and verify the
+changed state. The Mac Control low-level input route is opt-in and fail-closed:
+
+```sh
+~/.local/bin/macctl control perform scroll --app "System Settings" \
+  --role AXScrollArea --identifier settings-list --direction down \
+  --amount 1 --fallback input-scroll --confirm --json
+```
+
+An input event that was merely dispatched is reported as unverified; it is not treated as
+completion unless the returned verification state is `passed`.
+
+Repeated keyboard navigation remains available when a fresh warm path proves
+it is the fastest verified route. The named `search` and `commands-help`
+actions cover command-palette or keyboard-help surfaces when an app exposes
+them; app-specific command-palette identifiers belong in that app's manifest.
+
+For a searchable native list, prefer the generic atomic `search` action when a
+redacted Accessibility tree or manifest exposes one unique `AXTextField` with
+subrole `AXSearchField`. It uses the named `Tab-F` shortcut only when the
+declared keyboard route is eligible, replaces ephemeral query text by default,
+and verifies `search_field_focused`. Missing or ambiguous fields and failed
+focus verification block the action; serial `Tab` traversal is never an
+implicit fallback. Result finding, selection, and opening remain separate
+declared task actions or predicates.
 
 For safe manual smoke evidence, put Chrome or System Settings in the
 foreground, acquire a short app lease, run `commands-help` or
 `next-control`, inspect focus, close any help UI with `Escape`, and release
 the lease. Keep this separate in the evidence record: XCTest proves source
 behavior, daemon receipts prove lease/input/redaction events, and the manual
-GUI run proves the current Mac actually responded. Browser DOM automation is
-outside `mac-control`; iPhone Mirroring is a separate shared-input surface
-with its own lease and evidence boundary.
+ GUI run proves the current Mac actually responded. Browser DOM automation is
+ outside `mac-control`.
 
 ## Checkpointed task control
 
@@ -337,8 +507,6 @@ the same lease, foreground, process, window, focused-element, and per-action
 revalidation boundary as keyboard control. Credentials and private
 document/message content remain ephemeral. Browser DOM automation remains
 outside this project: Chrome and Safari are controlled through visible UI.
-iPhone Mirroring remains a separate shared-input lease and evidence surface.
-
 For task evidence, keep XCTest behavior, daemon receipts/checkpoint records,
 and manual GUI response as separate proof layers. A safe manual smoke can use
 Finder or System Settings plus a TextEdit document with no private content,
@@ -352,21 +520,6 @@ After migrating from an older bare `macctld` executable, remove the old
 it remains, then add `~/.local/share/macctl/macctld.app` to each list and
 restart the daemon. TCC permissions are attached to the packaged application
 identity, not granted automatically by the installer.
-
-The iPhone Mirroring backend is intentionally layered on top of the same
-Accessibility, window capture, OCR, and normalized-coordinate primitives. It
-does not treat `devicectl` as the consumer iPhone control path.
-
-The user-gated smoke path is:
-
-```sh
-~/.local/bin/macctl workflow run iphone.open-tinder --json
-```
-
-It activates iPhone Mirroring, locates Tinder through an ephemeral OCR frame,
-and verifies visibility. It does not swipe, message, purchase, or submit. If
-Screen Recording, input, or a paired Mirroring session is unavailable, it
-returns a blocked result instead of attempting a best-effort click.
 
 The approval-evidence path is:
 

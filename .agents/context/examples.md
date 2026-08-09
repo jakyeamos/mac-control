@@ -16,4 +16,4 @@ Use these maintained surfaces as references rather than copying ad hoc code:
 An implementation is canonical when it preserves the package boundary,
 returns a stable status/reason, records provenance without sensitive payloads,
 and has a focused regression test. Do not treat a passing unit test as proof
-of a live TCC, launchd, Aqua, or iPhone Mirroring condition.
+of a live TCC, launchd, Aqua, or installed-app condition.

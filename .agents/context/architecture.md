@@ -12,8 +12,9 @@ AppKit, ApplicationServices, CoreGraphics, ScreenCaptureKit, Vision, and
 Foundation. There are no third-party runtime dependencies in the baseline.
 
 The workflow boundary is `prepare -> approve -> execute -> verify`. Receipts
-are the durable evidence boundary. TCC permissions, launchd, the Aqua session,
-and paired iPhone Mirroring remain user-controlled external systems.
+are the durable evidence boundary. TCC permissions, launchd, and the Aqua
+session remain user-controlled external systems; unsupported providers are not
+silently substituted into this boundary.
 
 Do not make AIOS, Career Ops, a remote API, or a TCP listener a runtime
 dependency. Callers may invoke this local control plane; ownership of their

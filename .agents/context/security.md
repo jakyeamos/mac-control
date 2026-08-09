@@ -9,7 +9,7 @@ them.
 Sensitive workflows require `prepare -> approve -> execute -> verify` with a
 short-lived, single-use token. Background mode must name a target app and
 must preserve the foreground application; it cannot fall back to global input,
-activation, coordinate clicks, or iPhone Mirroring. Ephemeral text may arrive
+activation, or coordinate clicks. Ephemeral text may arrive
 only over the owner-only socket and must not be returned or persisted.
 
 Direct keyboard navigation is a separate fast path bounded by an explicit,
@@ -22,9 +22,23 @@ Bare printable keys are rejected from raw keyboard sequences so text and
 credentials remain on ephemeral-input plus approval. Focus inspection returns
 only role, subrole, identifier, title, and target application.
 
+An opt-in physical-input mode is available only on a session lease. It uses a
+bounded macOS session event tap, requires user-granted Accessibility and Input
+Monitoring access, fails closed when the tap cannot be installed, and releases
+on lease cleanup or daemon shutdown. It is not a hardware lock; mouse input
+remains available for the status-item emergency quit path, and agent-generated
+events are explicitly marked to pass through the tap.
+
 Receipts and logs are owner-only, atomic, retention-bounded, and redacted.
 Never persist credentials, OCR text, screenshots, image bytes, message bodies,
 sources for permissions or secrets.
 
-Browser DOM automation is outside mac-control. iPhone Mirroring is a separate
-shared-input surface with its own lease and does not inherit keyboard leases.
+Warm-path manifests are owner-only, app/task/version/target scoped, and retain
+only route metrics, permission names, freshness, and verification metadata.
+Unmeasured or stale candidates are not eligible. Accessibility tree and audit
+responses are bounded and redacted; AX values, private text, screenshots, and
+OCR are excluded, and receipt persistence retains only their evidence kinds.
+
+Browser DOM automation is outside mac-control. iPhone Mirroring is not a
+supported mac-control surface; do not infer provider parity or lease ownership
+for it.

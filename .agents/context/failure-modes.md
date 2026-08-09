@@ -2,9 +2,9 @@
 
 Expected safety outcomes are explicit:
 
-- `blocked`: a required permission, approval, live receipt, Aqua session, or
-  Mirroring connection is unavailable. Preserve the reason and obtain the
-  missing user-controlled evidence before retrying.
+- `blocked`: a required permission, approval, live receipt, or Aqua session is
+  unavailable. Preserve the reason and obtain the missing user-controlled
+  evidence before retrying.
 - `unknown`: the daemon or socket cannot establish authoritative state. Do not
   infer permission or successful execution from a CLI fallback.
 - `approval_expired` or `approval_denied`: create a new plan; never reuse or
@@ -20,6 +20,6 @@ Expected safety outcomes are explicit:
 Use `doctor --json`, `status --json`, `receipts status --json`, and
 `release check --json` for diagnosis. Recovery may rebuild/reinstall the
 packaged daemon and restart the user LaunchAgent, but must not manufacture
-receipts or alter a device/account to make a gate green. The current known
-live gap is iPhone Mirroring when the physical iPhone is in use; lock it and
-rerun the user-gated smoke only when the user controls that session.
+receipts or alter a device/account to make a gate green. Unsupported provider
+surfaces remain blocked; do not replace them with an unverified local route or
+manufacture live evidence.

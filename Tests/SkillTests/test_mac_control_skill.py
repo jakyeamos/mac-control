@@ -14,24 +14,45 @@ INSTALLER = ROOT / "scripts" / "install_mac_control_skill.py"
 
 
 class MacControlSkillTests(unittest.TestCase):
-    def test_route_order_and_completion_guards_are_explicit(self) -> None:
+    def test_task_specific_route_selection_and_completion_guards_are_explicit(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertNotIn("TODO", text)
-        ordered = [
-            "mature direct CLI, API, typed connector, or browser DOM route",
-            "Mac Control adapter or semantic Accessibility target",
-            "named Mac Control keyboard action",
-            "generic Accessibility GUI control",
-            "screenshot, OCR, or coordinates",
-        ]
-        positions = [text.index(marker) for marker in ordered]
-        self.assertEqual(positions, sorted(positions))
+        for marker in (
+            "task-specific rather than a fixed",
+            "fresh manifest exists for the exact app identity",
+            "selector's addressability metadata",
+            "one unique\n`AXTextField` with subrole `AXSearchField`",
+            "Never fall back to\nrepeated `next-control`/Tab traversal",
+            "Unmeasured or stale candidates are",
+            "unproven and must be rebenchmarked",
+            "Visual and coordinate candidates require explicit task-manifest opt-in",
+            "Only a declared\nfallback may run after a pre-action target-not-found result",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("Apply this order:", text)
         for marker in (
             "keyboard_focus_changed",
             "foreground_only",
             "lease_released",
             "result.verification.state",
             "approval-gated",
+            "skip redundant activation",
+            "daemon-executed",
+            "route register",
+            "action scroll",
+            "reset-direction",
+            "AXScrollArea",
+            "control capabilities",
+            "capability-audit",
+            "fast route probe",
+            "cached broad profile",
+            "control.batch",
+            "provider-neutral `outcome`",
+            "verified_success",
+            "target_ambiguous",
+            "get_app_state",
+            "sky.scroll",
+            "agent.contract",
         ):
             self.assertIn(marker, text)
 
@@ -59,10 +80,26 @@ class MacControlSkillTests(unittest.TestCase):
         for marker in (
             "Read `AppleKeyboardUIMode`",
             "Move focus to the next control",
+            "one unique `AXTextField`/`AXSearchField`",
+            "Do not approximate search with repeated `Tab`/`next-control`",
             "Click a webpage button",
             "Enter a password",
             "A CLI exists but only reads state",
             "verification reports `foreground_only`",
+            "daemon-executed `route benchmark`",
+            "verification.state == passed",
+            "--action scroll --route scroll",
+            "--reset-direction up",
+            "control capabilities",
+            "control capability-audit",
+            "swiftui",
+            "cached broad profile",
+            "control batch",
+            "recommended_provider",
+            "target_ambiguous",
+            "get_app_state",
+            "sky.scroll",
+            "caller-supplied",
         ):
             self.assertIn(marker, text)
 

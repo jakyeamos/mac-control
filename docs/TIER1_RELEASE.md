@@ -23,8 +23,15 @@ swift test
 
 `release check` is read-only. It fails closed when launchd identity, daemon
 permissions, socket ownership, receipt storage, approval safety, Mac GUI
-smokes, or the iPhone Mirroring smoke is missing. It does not launch a workflow
-or alter a device to manufacture evidence.
+smokes are missing. It does not launch a workflow or alter a device to
+manufacture evidence.
+
+The release report also includes `agent.contract`. That check requires the
+provider-neutral outcome surface, capability discovery, bounded control batch,
+and daemon-executed route-benchmark provenance to be present in the live daemon
+capability report. Passing it proves contract exposure only; it does not replace
+the separate live GUI, task-control, keyboard, or approval-HUD evidence
+dimensions below.
 
 ## Stable daemon identity
 
@@ -62,17 +69,9 @@ diagnostics.
 ## Manual live checks
 
 The live gate requires a logged-in Aqua session and user-controlled privacy
-permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome, and
-Notes workflows, then run the user-gated `iphone.open-tinder` workflow only
-when iPhone Mirroring is active and the user has explicitly acquired the
-short-lived driving lease. The lease is an in-memory handoff: after
-`macctl iphone drive begin`, keep hands off the trackpad, pass the returned
-token with `--driving-lease`, and release it with `macctl iphone drive end
-<token>`. The daemon does not infer trackpad activity or claim hardware-level
-input telemetry. The Tinder check verifies foreground/visible state only; it
-does not swipe, message, purchase, submit, or change account state. Missing
-Mirroring, capture, input, window discovery, or driving-lease coordination
-produces a blocked result.
+permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome,
+and Notes workflows. Missing GUI permissions, capture, input, window discovery,
+or verification produces a blocked result.
 
 Approval HUD approve/deny/expiry behavior and Caps Lock double-tap activation
 must be exercised by a user in the GUI session using the built-in
@@ -95,8 +94,8 @@ HUD forward and never approves an operation.
 
 ## Keyboard-first evidence
 
-The keyboard release dimension is separate from generic workflow-key approval
-and from iPhone Mirroring shared input. After Full Keyboard Access is enabled
+The keyboard release dimension is separate from generic workflow-key approval.
+After Full Keyboard Access is enabled
 by the user, the live smoke run is:
 
 ```sh
@@ -117,7 +116,24 @@ raw keys, lease tokens, AX values, private text, screenshots, or OCR text.
 Source XCTest results, daemon receipt evidence, and manual GUI response are
 reported as distinct proof layers. The release check is read-only and never
 manufactures keyboard evidence. Browser DOM automation remains outside this
-surface, and iPhone Mirroring remains a separate shared-input product surface.
+surface.
+
+The standard Tier-1 smoke intentionally uses the default `shared` physical
+input mode. Physical keyboard suppression is an opt-in, session-only event-tap
+capability and is not treated as live evidence until a human deliberately
+exercises it. When testing that path, use a short lease and the mouse or the
+status-item `Quit daemon` action as the recovery path:
+
+```sh
+~/.local/bin/macctl keyboard lease acquire \
+  --scope session --seconds 30 --suppress-physical-keyboard \
+  --reason "interactive keyboard freeze test" --confirm --json
+```
+
+The daemon emits the normal `keyboard_lease`,
+`keyboard_physical_suppression`, and `keyboard_freeze` evidence so the
+existing lease gate remains meaningful while the optional behavior is
+identifiable. The compatibility alias is still session-only and reason-bound.
 
 Semantic-control checks are available during manual GUI validation:
 
@@ -135,10 +151,38 @@ request, avoiding foreground handoff between separate client calls:
 ```
 
 These responses distinguish the selected route (`accessibility`, `keyboard`,
-or `visual`) from the post-action verification state. The control session
-revalidates the lease and foreground process before and after each action;
-session leases may follow an app switch, while app leases fail closed. Raw
-coordinate fallback is disabled unless the request explicitly opts in.
+`visual`, `normalized_coordinate`, `raw_coordinate`, or `scroll`) from the
+post-action verification state. A warm-path selection is eligible only when
+the app identity/version, target fingerprint, permissions, freshness, and
+verification oracle match. Only explicitly declared pre-action fallbacks may
+run; ambiguous targets, possible side effects, and failed verification block
+without retry. Raw and visual routes require manifest opt-in.
+
+Tree and audit responses are bounded, redacted, local-only diagnostics. They
+exclude AX values, private text, screenshots, and OCR, and receipts retain only
+the evidence kind. Semantic scroll requires a unique `AXScrollArea` identifier
+and re-resolves the container after the action.
+
+`control.capabilities` is the latency-sensitive route probe: it may read a
+cached broad profile but never walks the Accessibility tree. The separate
+`control.capability_audit` surface performs one bounded, read-only AX/provider
+audit and persists only stable, redacted locator descriptors keyed by app
+identity/version, OS/provider state, and tree signature. It does not dispatch
+actions and is not route-ranking authority.
+
+`control.capability_audit_batch` is a separate bounded inventory surface. It
+audits at most 24 explicit or catalog-selected installed apps, only when they
+are already running; it serializes AX access, persists one redacted resumable
+receipt per app, and never launches applications or dispatches input. An
+unobserved app is resumable, not negative capability evidence.
+
+When semantic scroll returns `scroll_fallback_required` or
+`scroll_verification_unavailable`, the response contains a machine-readable
+provider handoff. For `recommended_provider: computer_use`, the required
+recovery is fresh `get_app_state`, fresh unique scroll-target lookup,
+Computer Use `sky.scroll`, and post-scroll state verification. Ambiguous
+targets and failed verification remain blocked; the release gate does not
+count a dispatched input event as a successful scroll.
 
 ## Checkpointed task and adapter evidence
 
@@ -171,7 +215,7 @@ Mail, Calendar, Notes, and Messages. Only declared typed operations may use
 AppleScript/JXA routes; arbitrary script or shell execution is not exposed.
 Read-only observation may be exercised without input authority, while every
 adapter mutation shares keyboard leases and target revalidation. Browser DOM
-automation and iPhone Mirroring remain outside this task surface.
+automation remains outside this task surface.
 
 For safe live proof, use a visible Finder/System Settings/TextEdit flow with
 no private content, then a read-only adapter inspection or empty draft route
