@@ -29,7 +29,7 @@ public final class ApprovalHUD: NSObject {
     public var snapshotHandler: (() -> ControlCenterSnapshot)?
 
     private var statusItem: NSStatusItem?
-    private let popover = NSPopover()
+    let popover = NSPopover()
     private var displayTimer: Timer?
     private var tokenByOperationID: [String: String] = [:]
     private var actionError: String?
@@ -96,12 +96,16 @@ public final class ApprovalHUD: NSObject {
     private func showControlCenter() {
         onMain { [weak self] in
             guard let self, let button = self.statusItem?.button else { return }
-            self.refreshOnMain()
+            // NSPopover raises an Objective-C exception when shown before a
+            // content controller exists. Hidden refreshes intentionally avoid
+            // rebuilding the view every second, so the click path must force
+            // the first content build before presentation.
+            self.refreshOnMain(populatePopover: true)
             self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
 
-    private func refreshOnMain() {
+    func refreshOnMain(populatePopover: Bool = false) {
         let approvals = pendingApprovals()
         tokenByOperationID = Dictionary(
             uniqueKeysWithValues: approvals.map { ($0.operationID, $0.token) }
@@ -113,7 +117,7 @@ public final class ApprovalHUD: NSObject {
         )
         let presentation = ControlCenterPresentation.make(snapshot: snapshot)
         updateStatusItem(presentation)
-        if popover.isShown {
+        if populatePopover || popover.isShown {
             popover.contentViewController = makePopover(snapshot: snapshot, approvals: approvals)
         }
     }
@@ -245,7 +249,7 @@ public final class ApprovalHUD: NSObject {
             root.addArrangedSubview(secondaryLabel(
                 "\(input) · \(durationLabel(execution.expiresAt.timeIntervalSinceNow)) remaining"
             ))
-            let stop = MouseOnlyButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
+            let stop = NSButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
             stop.bezelStyle = .rounded
             stop.contentTintColor = .systemRed
             stop.setAccessibilityLabel("Stop active Mac Control task and release input authority")
@@ -257,8 +261,11 @@ public final class ApprovalHUD: NSObject {
         if approvals.isEmpty {
             root.addArrangedSubview(secondaryLabel("No approvals are waiting."))
         } else {
-            for approval in approvals {
+            for (index, approval) in approvals.enumerated() {
                 root.addArrangedSubview(approvalRow(approval))
+                if index < approvals.count - 1 {
+                    root.addArrangedSubview(separator())
+                }
             }
         }
 
@@ -272,7 +279,7 @@ public final class ApprovalHUD: NSObject {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         footer.addArrangedSubview(spacer)
-        let quit = MouseOnlyButton(title: "Quit daemon", target: self, action: #selector(quitDaemon(_:)))
+        let quit = NSButton(title: "Quit daemon", target: self, action: #selector(quitDaemon(_:)))
         quit.bezelStyle = .inline
         footer.addArrangedSubview(quit)
         root.addArrangedSubview(footer)
@@ -293,10 +300,10 @@ public final class ApprovalHUD: NSObject {
         card.orientation = .vertical
         card.alignment = .leading
         card.spacing = 5
-        card.edgeInsets = NSEdgeInsets(top: 9, left: 10, bottom: 9, right: 10)
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 8
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        // The popover already supplies the system material. Keep queue rows
+        // transparent so we do not stack an opaque card over that glass; use
+        // rhythm and hairline separators for grouping instead.
+        card.edgeInsets = NSEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
 
         let title = wrappingLabel(approval.summary)
         title.font = .systemFont(ofSize: 12, weight: .medium)
@@ -314,11 +321,11 @@ public final class ApprovalHUD: NSObject {
         approve.bezelStyle = .rounded
         approve.keyEquivalent = ""
         approve.setAccessibilityLabel(approvalTitle + ", mouse activation required")
-        let deny = MouseOnlyButton(title: "Deny", target: self, action: #selector(deny(_:)))
+        let deny = NSButton(title: "Deny", target: self, action: #selector(deny(_:)))
         deny.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
         deny.bezelStyle = .inline
         deny.keyEquivalent = ""
-        deny.setAccessibilityLabel("Deny approval, mouse activation required")
+        deny.setAccessibilityLabel("Deny approval")
         actions.addArrangedSubview(approve)
         actions.addArrangedSubview(deny)
         card.addArrangedSubview(actions)
@@ -339,11 +346,11 @@ public final class ApprovalHUD: NSObject {
         refresh()
     }
 
-    @objc private func deny(_ sender: MouseOnlyButton) {
-        guard sender.consumeMouseClick(),
-              let operationID = sender.identifier?.rawValue,
+    @objc private func deny(_ sender: NSButton) {
+        guard let operationID = sender.identifier?.rawValue,
               let token = tokenByOperationID[operationID] else {
-            rejectNonMouse("deny")
+            actionError = "Deny failed because the approval is no longer pending"
+            refresh()
             return
         }
         let response = denyHandler?(token)
@@ -351,11 +358,8 @@ public final class ApprovalHUD: NSObject {
         refresh()
     }
 
-    @objc private func stopAndRelease(_ sender: MouseOnlyButton) {
-        guard sender.consumeMouseClick() else {
-            rejectNonMouse("stop")
-            return
-        }
+    @objc private func stopAndRelease(_ sender: NSButton) {
+        _ = sender
         let response = stopHandler?()
         actionError = response?.status == .succeeded
             ? nil
@@ -363,11 +367,8 @@ public final class ApprovalHUD: NSObject {
         refresh()
     }
 
-    @objc private func quitDaemon(_ sender: MouseOnlyButton) {
-        guard sender.consumeMouseClick() else {
-            rejectNonMouse("quit")
-            return
-        }
+    @objc private func quitDaemon(_ sender: NSButton) {
+        _ = sender
         NSApplication.shared.terminate(nil)
     }
 

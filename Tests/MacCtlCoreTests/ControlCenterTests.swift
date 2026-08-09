@@ -3,6 +3,34 @@ import XCTest
 @testable import MacCtlCore
 
 final class ControlCenterTests: XCTestCase {
+    func testHiddenControlCenterBuildsPopoverContentBeforeFirstPresentation() {
+        let now = Date()
+        let approval = ApprovalRecord(
+            token: "private-token",
+            operationID: "approval-1",
+            workflowID: "approval.smoke",
+            summary: "Approval smoke",
+            risk: .sensitive,
+            focusPolicy: .foreground,
+            keyboardFreezeRequired: false,
+            handoffTarget: nil,
+            expiresAt: now.addingTimeInterval(300)
+        )
+        let hud = ApprovalHUD(capsLockMonitor: CapsLockMonitor())
+        hud.pendingApprovalsHandler = { [approval] }
+        hud.snapshotHandler = {
+            ControlCenterSnapshot(
+                approvals: [ControlCenterApproval(record: approval)],
+                execution: nil,
+                permissions: []
+            )
+        }
+
+        XCTAssertNil(hud.popover.contentViewController)
+        hud.refreshOnMain(populatePopover: true)
+        XCTAssertNotNil(hud.popover.contentViewController)
+    }
+
     func testPresentationCoversIdleApprovalLeaseFreezeStoppingAndDegradedStates() {
         let now = Date(timeIntervalSince1970: 10_000)
         let granted = permission("Accessibility", "granted")
