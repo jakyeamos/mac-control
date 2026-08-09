@@ -3406,14 +3406,35 @@ final class MacCtlCoreTests: XCTestCase {
         )
         var now = Date(timeIntervalSince1970: 100)
         let store = KeyboardDriveStore()
-        let service = MacCtlService(
-            permissionContext: "test",
-            keyboardAccessController: KeyboardAccessController(
-                eventSender: RecordingKeyboardEventSender(),
-                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
-            ),
+        let keyboard = KeyboardAccessController(
+            eventSender: RecordingKeyboardEventSender(),
+            preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+        )
+        let session = ControlSession(
             keyboardDriveStore: store,
             focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { app },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true },
+            verifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            postActionTimeout: 0
+        )
+        let router = SemanticActionRouter(
+            session: session,
+            keyboardAccessController: keyboard,
+            accessibilityActionController: TestAccessibilityActionPerformer(),
+            visualActionController: TestVisualActionPerformer()
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: keyboard,
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            controlSession: session,
+            semanticActionRouter: router,
             foregroundApplication: { app },
             activateApplication: { _ in app },
             foregroundStabilityVerifier: ControlStateVerifier(
