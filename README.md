@@ -161,6 +161,15 @@ exact prepared workflow afterward with its approval token; the token is consumed
 at first dispatch, and ephemeral input is never returned by the daemon or
 written to its log.
 
+Local providers may route the same human decision through the menu-bar control
+center with `approval.external.prepare`, `approval.external.status`, and
+`approval.external.consume`. The daemon accepts only bounded provider identity,
+summary, risk, expiry, and an exact SHA-256 plan digest. Its private `mce_`
+control-center token is never returned to the provider; the provider polls by
+operation ID and consumes one decision bound to the same instance, plan, and
+digest. Browser Control uses this path while retaining its Chrome side panel as
+a fallback.
+
 The built-in `approval.smoke` workflow is the release-evidence path for this
 boundary. It only waits for 0.2 seconds, performs no external input, and is
 classified as sensitive solely so the approval lifecycle can be exercised

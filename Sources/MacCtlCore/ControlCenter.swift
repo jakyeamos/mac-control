@@ -9,6 +9,8 @@ public struct ControlCenterApproval: Codable, Equatable {
     public let keyboardFreezeRequired: Bool
     public let handoffTarget: ApprovalHandoffTarget?
     public let expiresAt: Date
+    public let provider: String
+    public let planDigest: String?
 
     public init(record: ApprovalRecord) {
         operationID = record.operationID
@@ -19,6 +21,8 @@ public struct ControlCenterApproval: Codable, Equatable {
         keyboardFreezeRequired = record.keyboardFreezeRequired
         handoffTarget = record.handoffTarget
         expiresAt = record.expiresAt
+        provider = record.provider
+        planDigest = record.planDigest
     }
 }
 

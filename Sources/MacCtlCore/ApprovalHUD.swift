@@ -308,9 +308,15 @@ public final class ApprovalHUD: NSObject {
         let title = wrappingLabel(approval.summary)
         title.font = .systemFont(ofSize: 12, weight: .medium)
         card.addArrangedSubview(title)
-        var detail = "\(approval.risk.rawValue.capitalized) · expires in \(durationLabel(approval.expiresAt.timeIntervalSinceNow))"
+        var detail = "\(providerLabel(approval.provider)) · \(approval.risk.rawValue.capitalized) · expires in \(durationLabel(approval.expiresAt.timeIntervalSinceNow))"
         if approval.keyboardFreezeRequired { detail += " · keyboard freeze approved" }
         card.addArrangedSubview(secondaryLabel(detail))
+        if let digest = approval.planDigest {
+            let digestLabel = secondaryLabel("Plan digest · \(digest)")
+            digestLabel.isSelectable = true
+            digestLabel.setAccessibilityLabel("Exact plan digest \(digest)")
+            card.addArrangedSubview(digestLabel)
+        }
 
         let actions = NSStackView()
         actions.orientation = .horizontal
@@ -417,6 +423,14 @@ public final class ApprovalHUD: NSObject {
     private func durationLabel(_ seconds: TimeInterval) -> String {
         let value = max(0, Int(ceil(seconds)))
         return value >= 60 ? "\(value / 60)m \(value % 60)s" : "\(value)s"
+    }
+
+    private func providerLabel(_ provider: String) -> String {
+        switch provider {
+        case "mac_control": return "Mac Control"
+        case "browser_control": return "Browser Control"
+        default: return provider.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 
     private func onMain(_ operation: @escaping () -> Void) {
