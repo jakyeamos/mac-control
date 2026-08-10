@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "corpus_id": "mac-control-phase-0-v1",
+  "phase": "phase-0",
+  "status": "locked",
+  "purpose": "Establish the shared timing, oracle, provenance, and pairing foundation for Mac Control improvement and Mac Control versus Computer Use comparisons.",
+  "pairing_requirements": [
+    "comparison_id",
+    "task",
+    "app",
+    "target_fingerprint",
+    "state_fingerprint",
+    "timing_scope",
+    "implementation_id",
+    "build_id",
+    "provenance"
+  ],
+  "lane_policy": {
+    "agent-baseline": "Best available method excluding Mac Control when a mature direct interface exists.",
+    "generic-gui": "Computer Use control surface without Mac Control.",
+    "mac-control": "Installed daemon-backed Mac Control surface with live verification."
+  },
+  "tasks": [
+    {
+      "task_id": "inspect-full-keyboard-access",
+      "app": "macOS",
+      "target_fingerprint": "fka-v1",
+      "state_fingerprint": "login-session-v1",
+      "oracle": "Full Keyboard Access is enabled",
+      "comparisons": [
+        {
+          "comparison_id": "fka-status-v1",
+          "timing_scope": "command_round_trip",
+          "lanes": ["agent-baseline", "mac-control"],
+          "inputs": [
+            "benchmarks/results/raw-20260809-fka-direct-new.jsonl",
+            "benchmarks/results/raw-20260809-fka-mac-control-new.jsonl"
+          ],
+          "status": "comparable"
+        }
+      ]
+    },
+    {
+      "task_id": "focus-next-control",
+      "app": "System Settings",
+      "target_fingerprint": "system-settings-focus-v1",
+      "state_fingerprint": "system-settings-ready-v1",
+      "oracle": "Accessibility focus changed to the next control",
+      "comparisons": [
+        {
+          "comparison_id": "focus-system-settings-e2e-v2",
+          "timing_scope": "command_round_trip",
+          "lanes": ["agent-baseline", "mac-control"],
+          "inputs": [
+            "benchmarks/results/raw-20260809-focus-system-settings-direct-e2e-sequential.jsonl",
+            "benchmarks/results/raw-20260809-focus-system-settings-mac-control-e2e-sequential.jsonl"
+          ],
+          "status": "comparable"
+        },
+        {
+          "comparison_id": "focus-system-settings-agent-v1",
+          "timing_scope": "agent_action_plus_verification",
+          "lanes": ["generic-gui", "mac-control"],
+          "inputs": [
+            "benchmarks/results/raw-20260809-focus-system-settings-agent-v1.jsonl",
+            "benchmarks/results/raw-20260809-focus-system-settings-agent-mac-control-v1.jsonl"
+          ],
+          "status": "comparable"
+        }
+      ]
+    },
+    {
+      "task_id": "focus-next-control-batch-2",
+      "app": "System Settings",
+      "target_fingerprint": "system-settings-focus-v1",
+      "state_fingerprint": "system-settings-ready-v1",
+      "oracle": "Accessibility focus advanced through 2 controls",
+      "comparisons": [
+        {
+          "comparison_id": "focus-system-settings-batch-2-v1",
+          "timing_scope": "command_round_trip",
+          "lanes": ["agent-baseline", "mac-control"],
+          "inputs": [
+            "benchmarks/results/raw-20260809-focus-system-settings-direct-batch-2-e2e-sequential.jsonl",
+            "benchmarks/results/raw-20260809-focus-system-settings-mac-control-batch-2-e2e-sequential.jsonl"
+          ],
+          "status": "comparable"
+        }
+      ]
+    },
+    {
+      "task_id": "scroll-main",
+      "app": "Finder",
+      "target_fingerprint": "finder-main-scroll-v1",
+      "state_fingerprint": "finder-main-ready-v1",
+      "oracle": "Finder main content viewport changed and was re-read successfully",
+      "comparisons": [
+        {
+          "comparison_id": "scroll-finder-e2e-v1",
+          "timing_scope": "end_to_end_verified_action",
+          "lanes": ["generic-gui", "mac-control"],
+          "inputs": [
+            "benchmarks/results/raw-20260809-finder-scroll-computer-use-e2e-v1.jsonl",
+            "benchmarks/results/raw-20260809-finder-scroll-mac-control-e2e-v1.jsonl"
+          ],
+          "status": "comparable"
+        }
+      ]
+    }
+  ],
+  "phase_1_extensions": [
+    {
+      "task_id": "activate-system-settings",
+      "status": "not_yet_pairable",
+      "reason": "The repository has live activation/readback evidence but no canonical paired benchmark record for this task yet.",
+      "next_phase": "phase-1"
+    },
+    {
+      "task_id": "scroll-notes",
+      "status": "provider_unavailable",
+      "reason": "The existing Mac Control attempt returned action_unavailable before measurement and recommended Computer Use; this is a provider-handoff fixture, not a latency sample.",
+      "next_phase": "phase-1"
+    }
+  ]
+}
