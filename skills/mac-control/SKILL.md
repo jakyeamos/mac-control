@@ -214,8 +214,12 @@ Every control response includes a provider-neutral `outcome` when available. Tre
 For a task-specific route registry, use daemon-executed `macctl route benchmark`, `route inspect`,
 and `route list`. Benchmarking runs the exact action and route for bounded warmups/samples,
 requires every measured sample to reach `verification.state == passed`, and only then persists
-the latency, p95, recovery, and freshness metadata. `macctl route register` remains an explicit
-caller-supplied metadata path and is not equivalent to a live benchmark.
+the median latency, p95 latency, recovery, freshness, and current app/OS/provider context.
+A route is warm only with at least three verified samples and a context match; a stale element,
+failed action, or failed verification expires it and clears the session lease cache entry.
+The fast capability probe resolves declarative `archetype -> app overlay -> session cache` layers;
+use the separate read-only capability audit for broad discovery. `macctl route register` remains
+an explicit caller-supplied metadata path and is not equivalent to a live benchmark.
 The benchmark response also reports `foreground_fast_path_samples`; its timings cover daemon
 route execution rather than CLI process or socket startup.
 For semantic scrolling, benchmark with `--action scroll --route scroll`, a unique `AXScrollArea`

@@ -41,6 +41,21 @@ loads the user LaunchAgent, which executes the bundle's
 `Contents/MacOS/macctld` binary. Use `~/.local/bin/macctl daemon restart` after
 rebuilding and reinstalling.
 
+Every binary install, LaunchAgent install, restart, and removal first asks the
+live daemon for a short atomic lifecycle drain. Pending proposals,
+approved-but-unconsumed authority, active keyboard leases/executions, and
+in-flight mutations block the operation. Once admitted, the daemon temporarily
+rejects new mutations while the lifecycle command changes installed state. A
+healthy daemon whose interlock cannot be reached fails closed; an unhealthy
+daemon remains restartable for recovery. Approval and lease tokens are never
+persisted or returned by this contract.
+
+The first upgrade from a daemon that predates lifecycle drains requires the
+explicit one-time `--allow-legacy-idle-snapshot` flag after the owner confirms
+the control center is idle. That compatibility path still blocks visible
+pending approvals and execution; after the new daemon is restarted, ordinary
+atomic drains are required and the flag is no longer needed.
+
 Install the provider-neutral agent skill and its Codex projection separately:
 
 ```sh
@@ -412,14 +427,29 @@ The benchmark measures the daemon's semantic AX scroll route, verifies every bou
 and persists no warm-path manifest when reset or measured scrolling is unverified.
 
 Safety, permission, target-uniqueness, freshness, and verification gates run
-before speed ranking. The fastest fresh measured candidate wins by complete
-action latency, then p95 latency and recoveries. Unmeasured or stale paths are
-unproven and require rebenchmarking. Visual and coordinate routes require
-explicit manifest opt-in. Only a declared pre-action target-not-found failure
-may advance through a fallback chain; possible side effects and failed
-verification stop the action. Every response reports the selected route and
-fallback chain without persisting selector values, AX values, private text,
-screenshots, OCR, or raw key sequences.
+before speed ranking. Route policy is layered from a provider-neutral app
+archetype, through a declarative bundle overlay, into a bounded current-session
+cache. A measured route becomes warm only after at least three verified samples
+for the matching app/version, OS version, provider state, task, target
+fingerprint, and verification oracle. When present, a tree signature is part of
+that context as well. The fastest eligible candidate wins by median action
+latency, then p95 latency and recoveries. Unmeasured, stale, or context-mismatched
+paths are unproven and require rebenchmarking. A stale element, failed action,
+or failed verification immediately expires the selected route and clears its
+lease cache entry. Visual and coordinate routes require explicit manifest
+opt-in. Only a declared pre-action target-not-found failure may advance through
+a fallback chain; possible side effects and failed verification stop the
+action. Every response reports the selected route and fallback chain without
+persisting selector values, AX values, private text, screenshots, OCR, or raw
+key sequences.
+
+`control capabilities` performs the small latency-sensitive probe and exposes
+the resolved profile layers, provider preferences, stable anchors,
+verification methods, invalidation triggers, and whether the cached route
+context is current. The separate bounded capability audit remains the broad
+read-only discovery path. Browser DOM, CDP, and Computer Use entries in a
+profile are routing declarations for their owning providers; they do not turn
+Mac Control into those providers or bypass their verification boundaries.
 
 Use `route register` only for explicitly caller-supplied external metadata; it
 is not equivalent to the daemon-executed benchmark.

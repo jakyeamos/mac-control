@@ -145,7 +145,10 @@ macctl route benchmark --app "System Settings" \
 ```
 
 The response reports `foreground_fast_path_samples` so activation avoidance is observable;
-latencies cover daemon route execution, not CLI process or socket startup.
+latencies cover daemon route execution, not CLI process or socket startup. Selection uses the
+median action latency and requires at least three verified samples. The manifest is bound to the
+app/version, OS version, provider state, task, target fingerprint, and verification oracle, plus
+the Accessibility tree signature when one was audited. A context mismatch requires rebenchmarking.
 
 For semantic scroll, benchmark the exact AX route rather than registering caller-supplied timing.
 The identifier is optional when role-only resolution returns exactly one scroll area:
@@ -167,6 +170,14 @@ Use `route register` only when explicitly recording external metadata; its
 Caller-supplied candidates remain inventory-only and cannot win warm-path selection. The
 daemon-executed benchmark measures the complete action, including route dispatch, verification,
 and cleanup, so warm-path ranking is not based on caller-reported timings.
+
+App routing policy comes from a provider-neutral archetype profile plus declarative bundle
+overlays. The current-session cache stores the selected route and stable identity descriptors,
+not live AX objects or replayable coordinates. The same lease, per-step revalidation, fallback,
+and invalidation rules apply to every profile. A stale element, action failure, or verification
+failure immediately demotes the selected route and removes its lease cache entry. Browser DOM,
+CDP, and Computer Use preferences declare a handoff to the owning provider rather than an
+executable Mac Control route.
 
 ## Evidence basis
 

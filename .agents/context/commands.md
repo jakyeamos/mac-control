@@ -23,6 +23,13 @@ metadata invariants. There is no
 repository formatter/linter dependency; do not claim lint coverage that has
 not been installed and executed.
 
+Lifecycle mutation commands are interlocked with the live daemon. A healthy
+daemon must grant an atomic drain before `macctl install` or `macctl daemon
+install|restart|remove` changes state; pending or approved authority, active
+execution, and in-flight mutation block the drain. The explicit
+`--allow-legacy-idle-snapshot` option is only for the first upgrade from a
+pre-interlock daemon after owner-visible idle verification.
+
 For read-only runtime diagnostics, use the built CLI only after the package
 build: `swift run macctl doctor --json`, `capabilities --json`, `status
 --json`, `receipts status --json`, and `release check --json`. Release checks
@@ -46,9 +53,11 @@ visible action: `swift run macctl control status --json` and
 `swift run macctl control perform activate --lease-token <token> --title
 <title> --json`. For a task-specific route, use `route benchmark`,
 `route inspect`, and `route list`; `route benchmark` executes and verifies the
-bounded action samples in the daemon before persistence. Selection requires a
-fresh measured app/task manifest and reports the route and declared fallback
-chain. Use `route register` only for explicitly caller-supplied metadata.
+bounded action samples in the daemon before persistence. Selection requires at
+least three verified samples and a fresh context-bound app/task manifest, then
+reports the route and declared fallback chain. Capability policy resolves from
+declarative archetype and app-overlay profiles before consulting the bounded
+session cache. Use `route register` only for explicitly caller-supplied metadata.
 Selector metadata
 describes addressability but does not create a universal route ladder.
 `control perform scroll --app <app> --role AXScrollArea --identifier <id>

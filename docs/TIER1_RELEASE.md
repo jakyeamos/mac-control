@@ -196,8 +196,11 @@ request, avoiding foreground handoff between separate client calls:
 These responses distinguish the selected route (`accessibility`, `keyboard`,
 `visual`, `normalized_coordinate`, `raw_coordinate`, or `scroll`) from the
 post-action verification state. A warm-path selection is eligible only when
-the app identity/version, target fingerprint, permissions, freshness, and
-verification oracle match. Only explicitly declared pre-action fallbacks may
+at least three measured samples passed and the app identity/version, OS version,
+provider state, target fingerprint, permissions, freshness, and verification
+oracle match. An audited tree signature must match when present. A stale
+element, failed action, or failed verification expires the route and clears its
+session lease cache entry. Only explicitly declared pre-action fallbacks may
 run; ambiguous targets, possible side effects, and failed verification block
 without retry. Raw and visual routes require manifest opt-in.
 
@@ -207,7 +210,9 @@ the evidence kind. Semantic scroll requires a unique `AXScrollArea` identifier
 and re-resolves the container after the action.
 
 `control.capabilities` is the latency-sensitive route probe: it may read a
-cached broad profile but never walks the Accessibility tree. The separate
+cached broad profile but never walks the Accessibility tree. It resolves the
+declarative archetype baseline and bundle overlay before consulting the bounded
+current-session route cache. The separate
 `control.capability_audit` surface performs one bounded, read-only AX/provider
 audit and persists only stable, redacted locator descriptors keyed by app
 identity/version, OS/provider state, and tree signature. It does not dispatch
