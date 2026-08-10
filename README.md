@@ -287,6 +287,17 @@ gate still expects its former Control Center receipts and therefore remains bloc
 gate is migrated or removed with the approval backend; source tests for the safety item do not
 substitute for that live evidence.
 
+Local providers may route the same human decision through the menu-bar control
+plane with `approval.external.prepare`, `approval.external.status`, and
+`approval.external.consume`. The daemon accepts only bounded provider identity,
+summary, risk, expiry, and an exact SHA-256 plan digest. Its private `mce_`
+approval token is never returned to the provider; the provider polls by
+operation ID and consumes one decision bound to the same instance, plan, and
+digest. An operator reviews pending records with `macctl approval list` and
+uses the ordinary `approval approve|deny <token>` CLI lifecycle; the transient
+menu-bar safety surface never presents the queue. Browser Control uses this path
+when the provider is available and retains its Chrome side panel fallback.
+
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
 available and returns instructions; it does not attempt to bypass TCC.

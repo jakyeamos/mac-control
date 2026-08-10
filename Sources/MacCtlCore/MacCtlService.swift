@@ -219,6 +219,7 @@ public final class MacCtlService {
     private let keyboardAccessController: KeyboardAccessController
     private let keyboardDriveStore: KeyboardDriveStore
     private let taskApprovalStore: TaskApprovalStore
+    private let externalApprovalStore: ExternalApprovalStore
     private let taskCheckpointStore: TaskCheckpointStore
     private let taskRunner: TaskRunner
     private let adapterRegistry: AppAdapterRegistry
@@ -296,6 +297,7 @@ public final class MacCtlService {
         keyboardAccessController: KeyboardAccessController = KeyboardAccessController(),
         keyboardDriveStore: KeyboardDriveStore = KeyboardDriveStore(),
         taskApprovalStore: TaskApprovalStore = TaskApprovalStore(),
+        externalApprovalStore: ExternalApprovalStore = ExternalApprovalStore(),
         taskCheckpointStore: TaskCheckpointStore = TaskCheckpointStore(),
         adapterRegistry: AppAdapterRegistry = AppAdapterRegistry(),
         taskActionExecutor: TaskActionExecuting? = nil,
@@ -349,6 +351,7 @@ public final class MacCtlService {
         self.keyboardAccessController = keyboardAccessController
         self.keyboardDriveStore = keyboardDriveStore
         self.taskApprovalStore = taskApprovalStore
+        self.externalApprovalStore = externalApprovalStore
         self.taskCheckpointStore = taskCheckpointStore
         self.adapterRegistry = adapterRegistry
         let defaultAccessibilityController = AccessibilityController()
@@ -1028,7 +1031,16 @@ public final class MacCtlService {
             case "workflow.run":
                 return try runWorkflow(request)
             case "approval.list":
-                return try success(request, value: approvalStore.list() + taskApprovalStore.list())
+                return try success(
+                    request,
+                    value: approvalStore.list() + taskApprovalStore.list() + externalApprovalStore.list()
+                )
+            case "approval.external.prepare":
+                return try prepareExternalApproval(request)
+            case "approval.external.status":
+                return try externalApprovalStatus(request)
+            case "approval.external.consume":
+                return try consumeExternalApproval(request)
             case "approval.approve":
                 return try approve(request)
             case "approval.deny":
@@ -1062,10 +1074,11 @@ public final class MacCtlService {
     public func isApprovalPending(token: String) -> Bool {
         approvalStore.list().contains { $0.token == token }
             || taskApprovalStore.list().contains { $0.token == token }
+            || externalApprovalStore.list().contains { $0.token == token }
     }
 
     public func pendingApprovalRecords() -> [ApprovalRecord] {
-        (approvalStore.list() + taskApprovalStore.list()).sorted {
+        (approvalStore.list() + taskApprovalStore.list() + externalApprovalStore.list()).sorted {
             if $0.expiresAt == $1.expiresAt { return $0.operationID < $1.operationID }
             return $0.expiresAt < $1.expiresAt
         }
@@ -6023,8 +6036,122 @@ public final class MacCtlService {
         )
     }
 
+    private func prepareExternalApproval(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let provider = try validatedExternalIdentifier(request, key: "provider")
+        let providerInstanceID = try validatedExternalIdentifier(request, key: "provider_instance_id")
+        let planID = try validatedExternalIdentifier(request, key: "plan_id")
+        let planDigest = try requiredString(request, key: "plan_digest")
+        guard planDigest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw WorkflowExecutionError.unsafeInput("plan_digest must be a lowercase SHA-256 digest")
+        }
+        let summary = try requiredString(request, key: "summary")
+        guard summary.count <= 500 else {
+            throw WorkflowExecutionError.unsafeInput("summary must contain at most 500 characters")
+        }
+        let riskValue = try requiredString(request, key: "risk")
+        guard let risk = RiskLevel(rawValue: riskValue) else {
+            throw WorkflowExecutionError.unsafeInput("risk must be safe, reversible, or sensitive")
+        }
+        let prepared = externalApprovalStore.prepare(
+            provider: provider,
+            providerInstanceID: providerInstanceID,
+            planID: planID,
+            planDigest: planDigest,
+            summary: summary,
+            risk: risk
+        )
+        presentApproval?(prepared.record)
+        controlCenterStateChanged?()
+        return try success(
+            request,
+            status: .prepared,
+            operationID: prepared.record.operationID,
+            result: externalApprovalResult(prepared),
+            evidence: [Evidence(
+                kind: "external_approval",
+                message: "External provider plan was bound to its exact digest in the control center",
+                source: "macctld",
+                metadata: ["provider": .string(provider), "plan_digest": .string(planDigest)]
+            )]
+        )
+    }
+
+    private func externalApprovalStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let operationID = try requiredString(request, key: "operation_id")
+        do {
+            let status = try externalApprovalStore.status(operationID: operationID)
+            let operationStatus: OperationStatus = switch status.state {
+            case .pending:
+                .prepared
+            case .approved, .consumed:
+                .succeeded
+            case .denied:
+                .denied
+            case .expired:
+                .expired
+            }
+            return try success(
+                request,
+                status: operationStatus,
+                operationID: operationID,
+                result: externalApprovalResult(status)
+            )
+        } catch let error as ExternalApprovalStoreError {
+            return externalApprovalFailure(request, operationID: operationID, error: error)
+        }
+    }
+
+    private func consumeExternalApproval(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let operationID = try requiredString(request, key: "operation_id")
+        do {
+            let consumed = try externalApprovalStore.consume(
+                operationID: operationID,
+                provider: try validatedExternalIdentifier(request, key: "provider"),
+                providerInstanceID: try validatedExternalIdentifier(request, key: "provider_instance_id"),
+                planID: try validatedExternalIdentifier(request, key: "plan_id"),
+                planDigest: try requiredString(request, key: "plan_digest")
+            )
+            controlCenterStateChanged?()
+            return try success(
+                request,
+                operationID: operationID,
+                result: externalApprovalResult(consumed),
+                evidence: [Evidence(
+                    kind: "external_approval",
+                    message: "Single-use external approval decision was consumed by the bound provider plan",
+                    source: "macctld",
+                    metadata: ["provider": .string(consumed.provider), "plan_digest": .string(consumed.planDigest)]
+                )]
+            )
+        } catch let error as ExternalApprovalStoreError {
+            return externalApprovalFailure(request, operationID: operationID, error: error)
+        }
+    }
+
     private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
+        if token.hasPrefix("mce_") {
+            do {
+                let approved = try externalApprovalStore.approve(token: token)
+                logger.record(event: "external_approval_approved", metadata: [
+                    "provider": approved.provider,
+                    "operation_id": approved.record.operationID
+                ])
+                return try success(
+                    request,
+                    operationID: approved.record.operationID,
+                    result: externalApprovalResult(approved),
+                    evidence: [Evidence(
+                        kind: "external_approval",
+                        message: "External provider plan was approved for one exact digest",
+                        source: "macctld",
+                        metadata: ["provider": .string(approved.provider)]
+                    )]
+                )
+            } catch let error as ExternalApprovalStoreError {
+                return externalApprovalFailure(request, token: token, error: error)
+            }
+        }
         if token.hasPrefix("mct_") {
             do {
                 if request.params["source"]?.stringValue == "control_center",
@@ -6219,6 +6346,28 @@ public final class MacCtlService {
 
     private func deny(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let token = try requiredString(request, key: "token")
+        if token.hasPrefix("mce_") {
+            do {
+                let denied = try externalApprovalStore.deny(token: token)
+                logger.record(event: "external_approval_denied", metadata: [
+                    "provider": denied.provider,
+                    "operation_id": denied.record.operationID
+                ])
+                return try success(
+                    request,
+                    operationID: denied.record.operationID,
+                    result: externalApprovalResult(denied),
+                    evidence: [Evidence(
+                        kind: "external_approval",
+                        message: "External provider plan was denied",
+                        source: "macctld",
+                        metadata: ["provider": .string(denied.provider)]
+                    )]
+                )
+            } catch let error as ExternalApprovalStoreError {
+                return externalApprovalFailure(request, token: token, error: error)
+            }
+        }
         if token.hasPrefix("mct_") {
             do {
                 let record = try taskApprovalStore.deny(token: token)
@@ -6308,6 +6457,7 @@ public final class MacCtlService {
                 "app.list", "app.open", "app.bind", "launchApp", "activateWindow", "click", "type", "key", "search",
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
                 "workflow.background", "approval.approve", "approval.deny",
+                "approval.external.prepare", "approval.external.status", "approval.external.consume",
                 "keyboard.status", "keyboard.setup", "keyboard.enable", "keyboard.inspect",
                 "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression", "keyboard.lease.navigation-mode",
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
@@ -6330,6 +6480,7 @@ public final class MacCtlService {
                 "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
                 "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference",
                 "install, restart, removal, and upgrade require an atomic daemon drain; active proposals, approved authority, execution, or mutation block the lifecycle change",
+                "external local providers publish only bounded plan metadata and exact digests; control-center tokens never leave macctld",
                 "raw coordinates require an explicit coordinate_mode=raw marker",
                 "background workflows require one named macOS app target and preserve foreground focus",
                 "background click, type, replace-only search, and scroll require unique AX selectors; search verifies AXValue and scroll requires observed structural change",
@@ -7164,6 +7315,73 @@ public final class MacCtlService {
         }
         evidence.append(ReceiptEvidence(kind: "task_checkpoint", source: "macctld"))
         return evidence
+    }
+
+    private func validatedExternalIdentifier(
+        _ request: RequestEnvelope,
+        key: String
+    ) throws -> String {
+        let value = try requiredString(request, key: key)
+        guard value.count <= 128,
+              value.range(of: "^[A-Za-z0-9_.-]+$", options: .regularExpression) != nil else {
+            throw WorkflowExecutionError.unsafeInput(
+                "\(key) must contain only letters, digits, dot, underscore, or hyphen"
+            )
+        }
+        return value
+    }
+
+    private func externalApprovalResult(
+        _ approval: ExternalApprovalRequest
+    ) -> [String: JSONValue] {
+        [
+            "operation_id": .string(approval.record.operationID),
+            "provider": .string(approval.provider),
+            "provider_instance_id": .string(approval.providerInstanceID),
+            "plan_id": .string(approval.planID),
+            "plan_digest": .string(approval.planDigest),
+            "state": .string(approval.state.rawValue),
+            "expires_at": (try? JSONValue.fromEncodable(approval.record.expiresAt)) ?? .null
+        ]
+    }
+
+    private func externalApprovalFailure(
+        _ request: RequestEnvelope,
+        operationID: String? = nil,
+        token: String? = nil,
+        error: ExternalApprovalStoreError
+    ) -> ResponseEnvelope {
+        let resolvedOperationID = operationID
+            ?? token.flatMap { externalApprovalStore.record(for: $0)?.operationID }
+        let code: MacCtlErrorCode
+        let status: OperationStatus
+        switch error {
+        case .notFound:
+            code = .approvalNotFound
+            status = .blocked
+        case .expired:
+            code = .approvalExpired
+            status = .expired
+        case .alreadyUsed:
+            code = .approvalAlreadyUsed
+            status = .blocked
+        case .mismatch:
+            code = .approvalMismatch
+            status = .blocked
+        case .pending:
+            code = .approvalRequired
+            status = .blocked
+        case .denied:
+            code = .approvalRequired
+            status = .denied
+        }
+        return failure(
+            request,
+            status: status,
+            code: code,
+            message: error.localizedDescription,
+            operationID: resolvedOperationID
+        )
     }
 
     private func success<T: Encodable>(

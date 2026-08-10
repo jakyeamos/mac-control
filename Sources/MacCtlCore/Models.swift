@@ -1183,6 +1183,8 @@ public struct ApprovalRecord: Codable, Equatable {
     public let keyboardFreezeRequired: Bool
     public let handoffTarget: ApprovalHandoffTarget?
     public let expiresAt: Date
+    public let provider: String
+    public let planDigest: String?
 
     public init(
         token: String,
@@ -1193,7 +1195,9 @@ public struct ApprovalRecord: Codable, Equatable {
         focusPolicy: FocusPolicy = .foreground,
         keyboardFreezeRequired: Bool = false,
         handoffTarget: ApprovalHandoffTarget? = nil,
-        expiresAt: Date
+        expiresAt: Date,
+        provider: String = "mac_control",
+        planDigest: String? = nil
     ) {
         self.token = token
         self.operationID = operationID
@@ -1204,6 +1208,8 @@ public struct ApprovalRecord: Codable, Equatable {
         self.keyboardFreezeRequired = keyboardFreezeRequired
         self.handoffTarget = handoffTarget
         self.expiresAt = expiresAt
+        self.provider = provider
+        self.planDigest = planDigest
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1217,6 +1223,8 @@ public struct ApprovalRecord: Codable, Equatable {
         case keyboardFreezeRequiredSnake = "keyboard_freeze_required"
         case handoffTarget
         case expiresAt
+        case provider
+        case planDigest
     }
 
     public init(from decoder: Decoder) throws {
@@ -1232,6 +1240,8 @@ public struct ApprovalRecord: Codable, Equatable {
             ?? false
         self.handoffTarget = try container.decodeIfPresent(ApprovalHandoffTarget.self, forKey: .handoffTarget)
         self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+        self.provider = try container.decodeIfPresent(String.self, forKey: .provider) ?? "mac_control"
+        self.planDigest = try container.decodeIfPresent(String.self, forKey: .planDigest)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1245,6 +1255,8 @@ public struct ApprovalRecord: Codable, Equatable {
         try container.encode(keyboardFreezeRequired, forKey: .keyboardFreezeRequired)
         try container.encodeIfPresent(handoffTarget, forKey: .handoffTarget)
         try container.encode(expiresAt, forKey: .expiresAt)
+        try container.encode(provider, forKey: .provider)
+        try container.encodeIfPresent(planDigest, forKey: .planDigest)
     }
 }
 
