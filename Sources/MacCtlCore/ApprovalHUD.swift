@@ -251,6 +251,7 @@ public final class ApprovalHUD: NSObject {
             ))
             let stop = NSButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
             stop.bezelStyle = .rounded
+            stop.focusRingType = .none
             stop.contentTintColor = .systemRed
             stop.setAccessibilityLabel("Stop active Mac Control task and release input authority")
             root.addArrangedSubview(stop)
@@ -281,6 +282,7 @@ public final class ApprovalHUD: NSObject {
         footer.addArrangedSubview(spacer)
         let quit = NSButton(title: "Quit daemon", target: self, action: #selector(quitDaemon(_:)))
         quit.bezelStyle = .inline
+        quit.focusRingType = .none
         footer.addArrangedSubview(quit)
         root.addArrangedSubview(footer)
 
@@ -319,11 +321,13 @@ public final class ApprovalHUD: NSObject {
         let approve = MouseOnlyButton(title: approvalTitle, target: self, action: #selector(approve(_:)))
         approve.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
         approve.bezelStyle = .rounded
+        approve.focusRingType = .none
         approve.keyEquivalent = ""
         approve.setAccessibilityLabel(approvalTitle + ", mouse activation required")
         let deny = NSButton(title: "Deny", target: self, action: #selector(deny(_:)))
         deny.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
         deny.bezelStyle = .inline
+        deny.focusRingType = .none
         deny.keyEquivalent = ""
         deny.setAccessibilityLabel("Deny approval")
         actions.addArrangedSubview(approve)

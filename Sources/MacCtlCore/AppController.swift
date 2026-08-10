@@ -71,9 +71,7 @@ public final class AppController {
                 opened = try openInBackground(app)
             }
         } else {
-            let didOpen = workspace.open(URL(fileURLWithPath: app.path))
-            guard didOpen else { throw AppControllerError.openFailed(nameOrBundleID) }
-            opened = runningInfo(for: app) ?? app
+            opened = try openForeground(app, requestedName: nameOrBundleID)
         }
         if focusPolicy == .background {
             let actualForeground = foregroundApplication()
@@ -89,23 +87,33 @@ public final class AppController {
 
     @discardableResult
     public func activate(_ nameOrBundleID: String) throws -> AppInfo {
-        let app = try open(nameOrBundleID, focusPolicy: .foreground)
+        let app = try resolve(nameOrBundleID)
+        return try openForeground(app, requestedName: nameOrBundleID)
+    }
+
+    private func openForeground(_ app: AppInfo, requestedName: String) throws -> AppInfo {
+        let didOpen = workspace.open(URL(fileURLWithPath: app.path))
+        guard didOpen else { throw AppControllerError.openFailed(requestedName) }
         let deadline = Date().addingTimeInterval(2.0)
         while Date() < deadline {
             if let running = workspace.runningApplications.first(where: {
                 $0.bundleIdentifier == app.bundleID || $0.bundleURL?.path == app.path
             }) {
-                let activated = running.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                guard activated else { throw AppControllerError.activationFailed(nameOrBundleID) }
-                if running.isActive { return app }
+                guard running.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else {
+                    throw AppControllerError.activationFailed(requestedName)
+                }
+                if let frontmost = workspace.frontmostApplication,
+                   frontmost.processIdentifier == running.processIdentifier {
+                    return runningInfo(for: app) ?? app
+                }
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
-        throw AppControllerError.activationFailed(nameOrBundleID)
+        throw AppControllerError.activationFailed(requestedName)
     }
 
     public func foregroundApplication() -> AppInfo? {
-        guard let running = workspace.runningApplications.first(where: { $0.isActive }),
+        guard let running = workspace.frontmostApplication,
               let url = running.bundleURL else {
             return nil
         }

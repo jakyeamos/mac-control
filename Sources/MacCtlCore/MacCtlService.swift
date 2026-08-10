@@ -57,6 +57,14 @@ private enum RouteBenchmarkError: Error, LocalizedError {
     }
 }
 
+private struct DaemonLifecycleAdmissionError: Error, LocalizedError {
+    let expiresAt: Date
+
+    var errorDescription: String? {
+        "The daemon is draining for an owner-requested lifecycle operation; retry after \(expiresAt.ISO8601Format())"
+    }
+}
+
 private struct SemanticScrollFailure: Error, LocalizedError {
     let failureClass: SemanticScrollFailureClass
     let message: String
@@ -117,6 +125,15 @@ private struct CapabilityAuditExecution {
 }
 
 public final class MacCtlService {
+    private static let lifecycleReadOnlyMethods: Set<String> = [
+        "doctor", "capabilities", "status", "keyboard.status", "keyboard.inspect",
+        "keyboard.freeze.status", "task.status", "adapter.capabilities", "control.status",
+        "control.center.snapshot", "control.capabilities", "route.list", "route.inspect",
+        "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
+        "workflow.list", "workflow.validate", "approval.list", "receipts.list",
+        "receipts.status", "logs", "shortcut.audit", "shortcut.inspect"
+    ]
+
     private struct ActiveControlExecution {
         let executionID: String
         let taskID: String?
@@ -187,11 +204,16 @@ public final class MacCtlService {
     private let presentApproval: ((ApprovalRecord) -> Void)?
     private let executionLock = NSLock()
     private let controlCenterLock = NSLock()
+    private let lifecycleLock = NSLock()
+    private let lifecycleNow: () -> Date
+    private let lifecycleDrainDuration: TimeInterval
     // Access is serialized by executionLock. The cache is deliberately held
     // only by a single keyboard lease and re-runs permission selection on
     // every action, so a warm manifest cannot bypass a changed permission gate.
     private var routeSelectionCache: RouteSelectionCacheEntry?
     private var activeControlExecution: ActiveControlExecution?
+    private var activeMutationRequests = 0
+    private var lifecycleDrain: ControlCenterLifecycleDrain?
 
     public var controlCenterStateChanged: (() -> Void)?
 
@@ -231,7 +253,9 @@ public final class MacCtlService {
         menuCommandController: MenuCommandControlling? = nil,
         shortcutProvisioner: ShortcutProvisioning? = nil,
         shortcutKeyboardDispatcher: ShortcutKeyboardDispatching? = nil,
-        shortcutEngine: ShortcutEngine? = nil
+        shortcutEngine: ShortcutEngine? = nil,
+        lifecycleNow: @escaping () -> Date = Date.init,
+        lifecycleDrainDuration: TimeInterval = 15
     ) {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
@@ -240,6 +264,8 @@ public final class MacCtlService {
         self.logger = logger
         self.receiptStore = receiptStore
         self.permissionContext = permissionContext
+        self.lifecycleNow = lifecycleNow
+        self.lifecycleDrainDuration = min(max(lifecycleDrainDuration, 1), 30)
         self.keyboardAccessController = keyboardAccessController
         self.keyboardDriveStore = keyboardDriveStore
         self.taskApprovalStore = taskApprovalStore
@@ -436,7 +462,7 @@ public final class MacCtlService {
             )
         } else {
             do {
-                response = try execute(request)
+                response = try executeWithLifecycleAdmission(request)
             } catch {
                 response = errorResponse(request, error: error)
             }
@@ -451,12 +477,141 @@ public final class MacCtlService {
         controlCenterLock.lock()
         activeControlExecution = nil
         controlCenterLock.unlock()
+        lifecycleLock.lock()
+        lifecycleDrain = nil
+        lifecycleLock.unlock()
         keyboardDriveStore.shutdown()
         controlCenterStateChanged?()
     }
 
+    private func executeWithLifecycleAdmission(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let mutationAdmitted = try beginLifecycleAdmission(method: request.method)
+        defer {
+            if mutationAdmitted { finishLifecycleMutation() }
+        }
+        return try execute(request)
+    }
+
+    private func beginLifecycleAdmission(method: String) throws -> Bool {
+        guard method != "daemon.lifecycle.prepare",
+              !Self.lifecycleReadOnlyMethods.contains(method) else { return false }
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        expireLifecycleDrainLocked()
+        if let lifecycleDrain {
+            throw DaemonLifecycleAdmissionError(expiresAt: lifecycleDrain.expiresAt)
+        }
+        activeMutationRequests += 1
+        return true
+    }
+
+    private func finishLifecycleMutation() {
+        lifecycleLock.lock()
+        activeMutationRequests = max(0, activeMutationRequests - 1)
+        lifecycleLock.unlock()
+    }
+
+    private func currentLifecycleDrain() -> ControlCenterLifecycleDrain? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        expireLifecycleDrainLocked()
+        return lifecycleDrain
+    }
+
+    private func expireLifecycleDrainLocked() {
+        if let lifecycleDrain, lifecycleDrain.expiresAt <= lifecycleNow() {
+            self.lifecycleDrain = nil
+        }
+    }
+
+    private func prepareDaemonLifecycle(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let rawOperation = try requiredString(request, key: "operation")
+        guard let operation = DaemonLifecycleOperation(rawValue: rawOperation) else {
+            return failure(
+                request,
+                status: .failed,
+                code: .invalidRequest,
+                message: "operation must be install, restart, remove, or upgrade"
+            )
+        }
+
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        expireLifecycleDrainLocked()
+
+        if activeMutationRequests > 0 {
+            return failure(
+                request,
+                status: .blocked,
+                code: .daemonLifecycleBlocked,
+                message: "Daemon lifecycle change blocked while a mutating request is in flight",
+                details: [
+                    "operation": .string(operation.rawValue),
+                    "active_request_count": .number(Double(activeMutationRequests)),
+                    "approval_count": .number(0),
+                    "execution_active": .bool(false)
+                ]
+            )
+        }
+
+        // No mutation can enter while lifecycleLock is held. The blocker
+        // snapshot and the transition into drain mode are therefore atomic.
+        let approvals = activeApprovalRecords()
+        controlCenterLock.lock()
+        let controlExecution = activeControlExecution?.snapshot
+        controlCenterLock.unlock()
+        let execution = controlExecution ?? keyboardDriveStore.activeLease().map {
+            ControlCenterExecution(
+                executionID: "manual-lease",
+                taskID: nil,
+                summary: "Keyboard control lease",
+                applicationName: $0.application?.name,
+                physicalInputMode: $0.physicalInputMode,
+                acquiredAt: $0.acquiredAt,
+                expiresAt: $0.expiresAt
+            )
+        }
+        if !approvals.isEmpty || execution != nil {
+            var details: [String: JSONValue] = [
+                "operation": .string(operation.rawValue),
+                "approval_count": .number(Double(approvals.count)),
+                "execution_active": .bool(execution != nil),
+                "active_request_count": .number(0)
+            ]
+            if let nearestExpiry = approvals.map(\.expiresAt).min() {
+                details["nearest_approval_expiry"] = .string(nearestExpiry.ISO8601Format())
+            }
+            if let execution {
+                details["execution_expires_at"] = .string(execution.expiresAt.ISO8601Format())
+                details["input_mode"] = .string(execution.physicalInputMode.rawValue)
+            }
+            return failure(
+                request,
+                status: .blocked,
+                code: .daemonLifecycleBlocked,
+                message: "Daemon lifecycle change blocked until all pending or approved authority and active execution have cleared",
+                details: details
+            )
+        }
+
+        let expiresAt = lifecycleNow().addingTimeInterval(lifecycleDrainDuration)
+        lifecycleDrain = ControlCenterLifecycleDrain(operation: operation, expiresAt: expiresAt)
+        return try success(
+            request,
+            value: DaemonLifecycleDrainReport(operation: operation, ready: true, expiresAt: expiresAt),
+            evidence: [Evidence(
+                kind: "daemon_lifecycle_drain",
+                message: "Daemon admitted an owner-scoped lifecycle change and is temporarily rejecting new mutations",
+                source: "macctld",
+                metadata: ["operation": .string(operation.rawValue)]
+            )]
+        )
+    }
+
     private func execute(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         switch request.method {
+            case "daemon.lifecycle.prepare":
+                return try prepareDaemonLifecycle(request)
             case "doctor":
                 return try success(request, value: doctorReport())
             case "capabilities":
@@ -552,7 +707,12 @@ public final class MacCtlService {
                 let name = try requiredString(request, key: "name")
                 let focusPolicy = try requestedFocusPolicy(from: request) ?? .foreground
                 let app = try withExecutionLock {
-                    try appController.open(name, focusPolicy: focusPolicy)
+                    switch focusPolicy {
+                    case .foreground:
+                        return try activateApplication(name)
+                    case .background:
+                        return try appController.open(name, focusPolicy: .background)
+                    }
                 }
                 logger.record(event: "app_opened", metadata: [
                     "app": app.name,
@@ -564,7 +724,11 @@ public final class MacCtlService {
                     evidence: [Evidence(
                         kind: "focus_policy",
                         message: "Application open used the requested focus policy",
-                        metadata: ["policy": .string(focusPolicy.rawValue)]
+                        metadata: [
+                            "policy": .string(focusPolicy.rawValue),
+                            "foreground_verified": .bool(focusPolicy == .foreground),
+                            "foreground_preserved": .bool(focusPolicy == .background)
+                        ]
                     )]
                 )
             case "workflow.list":
@@ -618,6 +782,13 @@ public final class MacCtlService {
         }
     }
 
+    public func activeApprovalRecords() -> [ApprovalRecord] {
+        (approvalStore.activeRecords() + taskApprovalStore.activeRecords()).sorted {
+            if $0.expiresAt == $1.expiresAt { return $0.operationID < $1.operationID }
+            return $0.expiresAt < $1.expiresAt
+        }
+    }
+
     public func controlCenterSnapshot() -> ControlCenterSnapshot {
         let approvals = pendingApprovalRecords().map(ControlCenterApproval.init)
         controlCenterLock.lock()
@@ -647,7 +818,8 @@ public final class MacCtlService {
         return ControlCenterSnapshot(
             approvals: approvals,
             execution: execution,
-            permissions: permissions
+            permissions: permissions,
+            lifecycleDrain: currentLifecycleDrain()
         )
     }
 
@@ -1251,6 +1423,11 @@ public final class MacCtlService {
             osVersion: currentOSVersion(),
             providerState: providerState
         )
+        let routeContext = WarmPathContextIdentity(
+            osVersion: currentOSVersion(),
+            providerStateSignature: providerState.signature,
+            treeSignature: cachedProfile.profile?.identity.treeSignature
+        )
         let targetFingerprintDigest = targetFingerprint.map(CapabilityProfileDigest.make)
         let recentBlockers = (try? receiptStore.recentControlBlockers(
             application: WarmPathApplicationIdentity(application: application),
@@ -1262,6 +1439,7 @@ public final class MacCtlService {
             taskID: taskID,
             targetFingerprint: targetFingerprint,
             manifest: manifest,
+            currentContextIdentity: routeContext,
             deepAuditAvailable: application.isRunning && application.processID != nil,
             cachedBroadProfile: cachedProfile.summary,
             recentBlockers: recentBlockers
@@ -1276,6 +1454,7 @@ public final class MacCtlService {
                 metadata: [
                     "archetype": .string(profile.archetype.rawValue),
                     "manifest_found": .bool(profile.manifestFound),
+                    "route_context_current": .bool(profile.routeContextCurrent),
                     "route_selection_policy": .string(profile.routeSelectionPolicy),
                     "probe_mode": .string(profile.probeMode),
                     "broad_profile_cache_hit": .bool(cachedProfile.cacheHit),
@@ -1394,7 +1573,18 @@ public final class MacCtlService {
         var entries = run.entries
         var targets = run.targets
         var processedCount = 0
-        for index in entries.indices where entries[index].canResume {
+        // Advance untouched targets before retrying apps that were not
+        // observable in an earlier pass. A closed app remains resumable, but
+        // repeatedly spending the segment budget on it can starve the rest of
+        // the manifest indefinitely when the run is resumed in small batches.
+        let resumableIndices = entries.indices
+            .filter { entries[$0].canResume }
+            .sorted {
+                let leftPriority = capabilityAuditBatchEntryPriority(entries[$0].state)
+                let rightPriority = capabilityAuditBatchEntryPriority(entries[$1].state)
+                return leftPriority == rightPriority ? $0 < $1 : leftPriority < rightPriority
+            }
+        for index in resumableIndices {
             guard processedCount < maxApps else { break }
             let originalEntry = entries[index]
             let startedAt = Date()
@@ -1555,6 +1745,17 @@ public final class MacCtlService {
                 ]
             )]
         )
+    }
+
+    private func capabilityAuditBatchEntryPriority(
+        _ state: CapabilityAuditBatchEntryState
+    ) -> Int {
+        switch state {
+        case .pending: return 0
+        case .failed: return 1
+        case .notObserved: return 2
+        case .audited, .blocked: return 3
+        }
     }
 
     private func capabilityAuditBatchTargets(
@@ -1960,6 +2161,8 @@ public final class MacCtlService {
         foregroundFastPathUsed: Bool,
         expectedMenuItems: [String] = []
     ) throws -> ControlActionExecution {
+        var attemptedRoute = requestedRoute ?? .keyboard
+        var selectedWarmRoute: ControlActionRoute?
         do {
             let selection = try routeSelection(
                 taskID: taskID,
@@ -1967,6 +2170,10 @@ public final class MacCtlService {
                 application: application,
                 leaseToken: leaseToken
             )
+            if let selectedRoute = selection.report?.selectedRoute {
+                attemptedRoute = selectedRoute
+                selectedWarmRoute = selectedRoute
+            }
             let report = try semanticActionRouter.perform(
                 command: command,
                 selector: selector,
@@ -1989,7 +2196,9 @@ public final class MacCtlService {
                 route: report.route,
                 selector: selector,
                 kind: kind,
-                reason: report.verification.state == .passed ? "verified_action" : "verification_unavailable"
+                reason: report.verification.state == .passed ? "verified_action" : "verification_unavailable",
+                warmRouteHit: selectedWarmRoute == report.route,
+                fallbackUsed: report.fallbackUsed
             )
             return ControlActionExecution(
                 report: report,
@@ -2002,10 +2211,11 @@ public final class MacCtlService {
                 application: application,
                 taskID: taskID,
                 targetFingerprint: targetFingerprint,
-                route: requestedRoute ?? .keyboard,
+                route: attemptedRoute,
                 selector: selector,
                 kind: kind,
-                reason: reason
+                reason: reason,
+                warmRouteHit: selectedWarmRoute == attemptedRoute
             )
             throw error
         }
@@ -2200,6 +2410,7 @@ public final class MacCtlService {
         let permissions = Set(PermissionDiagnostics.report()
             .filter { $0.state == "granted" }
             .map { $0.name.lowercased() })
+        let routeContext = currentWarmPathContext(application: application)
         let report = WarmPathSelection.select(
             manifest: manifest,
             context: WarmPathSelectionContext(
@@ -2207,7 +2418,9 @@ public final class MacCtlService {
                 targetFingerprint: targetFingerprint,
                 grantedPermissions: permissions,
                 targetIsUnique: true,
-                verificationAvailable: !manifest.verificationOracle.isEmpty
+                verificationAvailable: !manifest.verificationOracle.isEmpty,
+                contextIdentity: routeContext,
+                requireContextIdentity: true
             )
         )
         guard report.selectedRoute != nil else {
@@ -2412,10 +2625,12 @@ public final class MacCtlService {
             }
 
             let sorted = durations.sorted()
+            let p50Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.50)) - 1))
             let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
             let average = durations.reduce(0, +) / Double(durations.count)
             return (
                 latencyMs: average,
+                p50LatencyMs: sorted[p50Index],
                 p95LatencyMs: sorted[p95Index],
                 recoveries: recoveries,
                 foregroundFastPathSamples: foregroundFastPathSamples
@@ -2430,6 +2645,7 @@ public final class MacCtlService {
             route: route,
             requiredPermissions: requiredPermissions,
             latencyMs: benchmark.latencyMs,
+            p50LatencyMs: benchmark.p50LatencyMs,
             p95LatencyMs: benchmark.p95LatencyMs,
             verificationRate: 1,
             recoveries: benchmark.recoveries,
@@ -2441,7 +2657,8 @@ public final class MacCtlService {
             userHelpCount: userHelpCount,
             visualCoordinateOptIn: visualCoordinateOptIn,
             declaredFallbackRoutes: declaredFallbackRoutes,
-            measurementSource: .daemonExecuted
+            measurementSource: .daemonExecuted,
+            contextIdentity: currentWarmPathContext(application: application)
         )
         return try success(
             request,
@@ -2452,6 +2669,7 @@ public final class MacCtlService {
                 "sample_count": .number(Double(samples)),
                 "warmup_count": .number(Double(warmups)),
                 "latency_ms": .number(benchmark.latencyMs),
+                "p50_latency_ms": .number(benchmark.p50LatencyMs),
                 "p95_latency_ms": .number(benchmark.p95LatencyMs),
                 "verification_rate": .number(1),
                 "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples))
@@ -2593,10 +2811,12 @@ public final class MacCtlService {
             }
 
             let sorted = durations.sorted()
+            let p50Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.50)) - 1))
             let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
             let average = durations.reduce(0, +) / Double(durations.count)
             return (
                 latencyMs: average,
+                p50LatencyMs: sorted[p50Index],
                 p95LatencyMs: sorted[p95Index],
                 foregroundFastPathSamples: foregroundFastPathSamples
             )
@@ -2610,6 +2830,7 @@ public final class MacCtlService {
             route: .scroll,
             requiredPermissions: requiredPermissions,
             latencyMs: benchmark.latencyMs,
+            p50LatencyMs: benchmark.p50LatencyMs,
             p95LatencyMs: benchmark.p95LatencyMs,
             verificationRate: 1,
             recoveries: 0,
@@ -2621,7 +2842,8 @@ public final class MacCtlService {
             userHelpCount: userHelpCount,
             visualCoordinateOptIn: visualCoordinateOptIn,
             declaredFallbackRoutes: declaredFallbackRoutes,
-            measurementSource: .daemonExecuted
+            measurementSource: .daemonExecuted,
+            contextIdentity: currentWarmPathContext(application: application)
         )
         return try success(
             request,
@@ -2632,6 +2854,7 @@ public final class MacCtlService {
                 "sample_count": .number(Double(samples)),
                 "warmup_count": .number(Double(warmups)),
                 "latency_ms": .number(benchmark.latencyMs),
+                "p50_latency_ms": .number(benchmark.p50LatencyMs),
                 "p95_latency_ms": .number(benchmark.p95LatencyMs),
                 "verification_rate": .number(1),
                 "foreground_fast_path_samples": .number(Double(benchmark.foregroundFastPathSamples)),
@@ -2693,7 +2916,8 @@ public final class MacCtlService {
             userHelpCount: try requestedNonNegativeInt(from: request, key: "user_help_count", defaultValue: 0),
             visualCoordinateOptIn: request.params["visual_coordinate_opt_in"]?.boolValue == true,
             declaredFallbackRoutes: try requestedRouteArray(from: request, key: "fallback_routes"),
-            measurementSource: .callerSupplied
+            measurementSource: .callerSupplied,
+            contextIdentity: currentWarmPathContext(application: application)
         )
         return try success(
             request,
@@ -3158,6 +3382,20 @@ public final class MacCtlService {
         return CapabilityProviderState(permissionStatuses: permissions)
     }
 
+    private func currentWarmPathContext(application: AppInfo) -> WarmPathContextIdentity {
+        let providerState = currentCapabilityProviderState()
+        let cachedProfile = capabilityProfileStore.lookup(
+            application: application,
+            osVersion: currentOSVersion(),
+            providerState: providerState
+        ).profile
+        return WarmPathContextIdentity(
+            osVersion: currentOSVersion(),
+            providerStateSignature: providerState.signature,
+            treeSignature: cachedProfile?.identity.treeSignature
+        )
+    }
+
     /// Task evidence is advisory to the profile cache. A broken cache must
     /// never turn a verified control action into a failed control action.
     private func recordCapabilityVerification(
@@ -3167,7 +3405,9 @@ public final class MacCtlService {
         route: ControlActionRoute,
         selector: Selector?,
         kind: CapabilityEvidenceKind,
-        reason: String
+        reason: String,
+        warmRouteHit: Bool = false,
+        fallbackUsed: Bool = false
     ) {
         guard let application,
               let taskID,
@@ -3177,6 +3417,16 @@ public final class MacCtlService {
             return
         }
         do {
+            _ = try warmPathStore.recordOutcome(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: route,
+                warmRouteHit: warmRouteHit,
+                fallbackUsed: fallbackUsed,
+                verified: kind == .positive,
+                failureReason: kind == .positive ? nil : reason
+            )
             _ = try capabilityProfileStore.recordTaskVerification(
                 application: application,
                 osVersion: currentOSVersion(),
@@ -3194,6 +3444,9 @@ public final class MacCtlService {
                 "route": route.rawValue,
                 "error": error.localizedDescription
             ])
+        }
+        if kind != .positive {
+            routeSelectionCache = nil
         }
     }
 
@@ -4355,6 +4608,7 @@ public final class MacCtlService {
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
                 "keyboard.navigate", "keyboard.send",
                 "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
+                "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
                 "task.resume", "task.cancel", "adapter.capabilities",
@@ -4364,6 +4618,7 @@ public final class MacCtlService {
             permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
             safety: [
                 "sensitive workflows require a short-lived single-use approval token",
+                "install, restart, removal, and upgrade require an atomic daemon drain; active proposals, approved authority, execution, or mutation block the lifecycle change",
                 "raw coordinates require an explicit coordinate_mode=raw marker",
                 "background workflows require named macOS app targets and preserve foreground focus",
                 "background input is sent to target processes; global mouse, desktop, and foreground paths are rejected",
@@ -4910,6 +5165,18 @@ public final class MacCtlService {
         var details: [String: JSONValue] = [:]
         var evidence: [Evidence] = []
         switch error {
+        case let error as DaemonLifecycleAdmissionError:
+            status = .blocked
+            code = .daemonLifecycleBlocked
+            details = [
+                "drain_expires_at": .string(error.expiresAt.ISO8601Format()),
+                "retryable": .bool(true)
+            ]
+            evidence = [Evidence(
+                kind: "daemon_lifecycle_drain",
+                message: "A new mutating request was rejected during an owner-requested daemon lifecycle drain",
+                source: "macctld"
+            )]
         case let error as SemanticScrollFailure:
             status = .blocked
             switch error.failureClass {

@@ -434,7 +434,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(profile.archetype, .nativeAppKit)
         XCTAssertEqual(profile.freshMeasuredRoutes, [.keyboard])
         XCTAssertEqual(profile.callerSuppliedRoutes, [.accessibility])
-        XCTAssertEqual(profile.routeSelectionPolicy, "fresh_daemon_executed_measurement_only")
+        XCTAssertEqual(profile.routeSelectionPolicy, "repeated_verified_context_bound_measurement_only")
         XCTAssertTrue(profile.handoffProviders.contains("computer_use"))
     }
 
@@ -625,6 +625,35 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(legacy.focusPolicy, .foreground)
     }
 
+    func testAppOpenForegroundUsesVerifiedActivationPath() throws {
+        let expected = testApp(name: "ChatGPT", processID: 42)
+        var activatedNames: [String] = []
+        let service = MacCtlService(
+            permissionContext: "test",
+            activateApplication: { name in
+                activatedNames.append(name)
+                return expected
+            }
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "app.open",
+            params: ["name": .string("ChatGPT")]
+        ))
+
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(activatedNames, ["ChatGPT"])
+        XCTAssertEqual(response.result["name"]?.stringValue, "ChatGPT")
+        XCTAssertEqual(
+            response.evidence.first?.metadata["foreground_verified"]?.boolValue,
+            true
+        )
+        XCTAssertEqual(
+            response.evidence.first?.metadata["foreground_preserved"]?.boolValue,
+            false
+        )
+    }
+
     func testKeyboardCommandsMapToTheDocumentedSequences() {
         let expected: [KeyboardCommand: [String]] = [
             .nextControl: ["tab"],
@@ -651,6 +680,19 @@ final class MacCtlCoreTests: XCTestCase {
                 XCTAssertNoThrow(try KeySpecification.parse(key))
             }
         }
+    }
+
+    func testModifiedKeySequenceEmitsBalancedModifierTransitions() throws {
+        let specification = try KeySpecification.parse("ctrl+cmd+0")
+
+        XCTAssertEqual(specification.eventSteps, [
+            KeyEventStep(keyCode: 59, keyDown: true, flags: [.maskControl]),
+            KeyEventStep(keyCode: 55, keyDown: true, flags: [.maskControl, .maskCommand]),
+            KeyEventStep(keyCode: 29, keyDown: true, flags: [.maskControl, .maskCommand]),
+            KeyEventStep(keyCode: 29, keyDown: false, flags: [.maskControl, .maskCommand]),
+            KeyEventStep(keyCode: 55, keyDown: false, flags: [.maskControl]),
+            KeyEventStep(keyCode: 59, keyDown: false, flags: [])
+        ])
     }
 
     func testContextMenuUsesVerifiedPostconditionWhenFocusDoesNotChange() throws {
@@ -2248,7 +2290,8 @@ final class MacCtlCoreTests: XCTestCase {
             latencyMs: 1,
             p95LatencyMs: 1,
             verificationRate: 1,
-            samples: 1
+            samples: 3,
+            contextIdentity: testWarmPathContext()
         )
         let before = FocusedElementSnapshot(
             targetApplication: app,
@@ -2314,6 +2357,86 @@ final class MacCtlCoreTests: XCTestCase {
         ))
     }
 
+    func testFailedWarmActionExpiresManifestAndInvalidatesLeaseCache() throws {
+        let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-demotion-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let warmPathStore = WarmPathStore(directory: directory)
+        _ = try warmPathStore.recordBenchmark(
+            application: app,
+            taskID: "focus-next",
+            targetFingerprint: "focus-v1",
+            verificationOracle: "focus changed",
+            route: .keyboard,
+            requiredPermissions: [],
+            latencyMs: 1,
+            p95LatencyMs: 1,
+            verificationRate: 1,
+            samples: 3,
+            contextIdentity: testWarmPathContext()
+        )
+        let unchanged = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXTextField",
+            subrole: nil,
+            identifier: "address",
+            title: nil
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: RecordingKeyboardEventSender(),
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: KeyboardDriveStore(),
+            focusedElementInspector: SequencedFocusedElementInspector([unchanged, unchanged]),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            hasPostEventAccess: { true },
+            warmPathStore: warmPathStore
+        )
+        let lease = service.handle(RequestEnvelope(
+            method: "keyboard.lease.acquire",
+            params: [
+                "scope": .string("app"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "seconds": .number(30)
+            ]
+        ))
+        let token = try XCTUnwrap(lease.result["lease"]?.objectValue?["token"]?.stringValue)
+        let request = RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "lease_token": .string(token),
+                "task": .string("focus-next"),
+                "target_fingerprint": .string("focus-v1"),
+                "inter_key_ms": .number(0)
+            ]
+        )
+
+        let failed = service.handle(request)
+        XCTAssertEqual(failed.status, .succeeded)
+        XCTAssertEqual(failed.result["verification"]?.objectValue?["state"]?.stringValue, "foreground_only")
+        let manifest = try XCTUnwrap(warmPathStore.inspect(
+            application: app,
+            taskID: "focus-next",
+            targetFingerprint: "focus-v1"
+        ))
+        let candidate = try XCTUnwrap(manifest.candidates.first)
+        XCTAssertFalse(candidate.isFresh(at: Date()))
+        XCTAssertEqual(candidate.telemetry.verificationFailureCount, 1)
+
+        let retried = service.handle(request)
+        XCTAssertEqual(retried.status, .blocked)
+        XCTAssertTrue(retried.error?.message.contains("rebenchmark") == true)
+        _ = service.handle(RequestEnvelope(
+            method: "keyboard.lease.release",
+            params: ["token": .string(token)]
+        ))
+    }
+
     func testControlBatchSharesLeaseAndReportsPerStepRouteCacheHits() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-control-batch-\(UUID().uuidString)")
@@ -2327,7 +2450,9 @@ final class MacCtlCoreTests: XCTestCase {
             route: .keyboard,
             latencyMs: 1,
             p95LatencyMs: 1,
-            verificationRate: 1
+            verificationRate: 1,
+            samples: 3,
+            contextIdentity: testWarmPathContext()
         )
         let before = FocusedElementSnapshot(
             targetApplication: app,
@@ -2439,7 +2564,9 @@ final class MacCtlCoreTests: XCTestCase {
             route: .keyboard,
             latencyMs: 1,
             p95LatencyMs: 1,
-            verificationRate: 1
+            verificationRate: 1,
+            samples: 3,
+            contextIdentity: testWarmPathContext()
         )
         let service = MacCtlService(
             permissionContext: "test",
@@ -2460,7 +2587,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(response.result["archetype"]?.stringValue, "browser")
         XCTAssertEqual(response.result["manifestFound"]?.boolValue, true)
         XCTAssertEqual(response.result["freshMeasuredRoutes"]?.arrayValue?.first?.stringValue, "keyboard")
-        XCTAssertEqual(response.result["routeSelectionPolicy"]?.stringValue, "fresh_daemon_executed_measurement_only")
+        XCTAssertEqual(response.result["routeSelectionPolicy"]?.stringValue, "repeated_verified_context_bound_measurement_only")
         XCTAssertEqual(response.result["handoffProviders"]?.arrayValue?.first?.stringValue, "computer_use")
     }
 
@@ -3113,6 +3240,67 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(response.error?.message.contains("serialized") == true)
     }
 
+    func testCapabilityAuditBatchPrioritizesPendingTargetsBeforeRetryingNotObservedApps() throws {
+        let profileDirectory = URL(fileURLWithPath: "/private/tmp/macctl-capability-batch-priority-profiles-\(UUID().uuidString)")
+        let batchDirectory = URL(fileURLWithPath: "/private/tmp/macctl-capability-batch-priority-runs-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: profileDirectory)
+            try? FileManager.default.removeItem(at: batchDirectory)
+        }
+
+        let closed = AppInfo(
+            name: "Closed",
+            bundleID: "com.example.closed",
+            path: "/Applications/Closed.app",
+            isRunning: false,
+            processID: nil,
+            bundleVersion: "1"
+        )
+        let runningApp = testApp(name: "Open", processID: 42, bundleVersion: "1")
+        let laterApp = testApp(name: "Later", processID: 43, bundleVersion: "1")
+        let inspector = RecordingAccessibilityTreeInspector(
+            tree: capabilityTree(for: runningApp, identifier: "results", scrollable: true)
+        )
+        let profileStore = CapabilityProfileStore(directory: profileDirectory)
+        let batchStore = CapabilityAuditBatchStore(directory: batchDirectory)
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplication: { selector in
+                switch selector {
+                case "Closed", closed.bundleID: return closed
+                case "Open", runningApp.bundleID: return runningApp
+                case "Later", laterApp.bundleID: return laterApp
+                default: throw AppControllerError.appNotFound(selector)
+                }
+            },
+            capabilityProfileStore: profileStore,
+            accessibilityTreeInspector: inspector,
+            capabilityAuditBatchStore: batchStore
+        )
+
+        let first = service.handle(RequestEnvelope(
+            method: "control.capability_audit_batch",
+            params: [
+                "apps": .array([.string("Closed"), .string("Open"), .string("Later")]),
+                "max_apps": .number(1)
+            ]
+        ))
+        XCTAssertEqual(first.status, .succeeded)
+        let runID = try XCTUnwrap(first.result["run"]?.objectValue?["runID"]?.stringValue)
+        let savedAfterFirst = try batchStore.load(runID: runID)
+        XCTAssertEqual(savedAfterFirst.entries.map(\.state), [.notObserved, .pending, .pending])
+
+        let resumed = service.handle(RequestEnvelope(
+            method: "control.capability_audit_batch",
+            params: ["run_id": .string(runID), "max_apps": .number(1)]
+        ))
+        XCTAssertEqual(resumed.status, .succeeded)
+        let savedAfterResume = try batchStore.load(runID: runID)
+        XCTAssertEqual(savedAfterResume.entries.map(\.state), [.notObserved, .audited, .pending])
+        XCTAssertEqual(savedAfterResume.entries.map(\.attempts), [1, 1, 0])
+        XCTAssertEqual(inspector.treeCallCount, 1)
+    }
+
     func testSemanticScrollRouteBenchmarkExecutesAndPersistsDaemonSamples() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-benchmark-\(UUID().uuidString)")
@@ -3302,7 +3490,7 @@ final class MacCtlCoreTests: XCTestCase {
 
     func testRouteBenchmarkRejectsUnverifiedWarmupBeforePersistence() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-warmup-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-warmup-\(UUID().uuidString)")
         let warmPathStore = WarmPathStore(directory: directory)
         let focused = FocusedElementSnapshot(
             targetApplication: app,
@@ -4480,7 +4668,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskRunnerPassesOnlyDeclaredAlternateRoutesToRetries() throws {
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-route-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-route-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
         let executor = TestTaskActionExecutor(failuresBeforeSuccess: 1)
@@ -4544,7 +4732,7 @@ final class MacCtlCoreTests: XCTestCase {
             XCTAssertEqual(error as? TaskApprovalStoreError, .alreadyUsed)
         }
 
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-checkpoint-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-checkpoint-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = TaskCheckpointStore(directory: directory)
         try store.save(TaskCheckpoint(
@@ -4578,7 +4766,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskRunnerUsesRiskBoundedRecoveryAndCumulativeActionBudget() throws {
-        let safeDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-safe-(UUID().uuidString)")
+        let safeDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-safe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: safeDirectory) }
         let safeExecutor = TestTaskActionExecutor(failuresBeforeSuccess: 2)
         let safeApprovals = TaskApprovalStore()
@@ -4601,7 +4789,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(safeExecutor.executeCount, 3)
         XCTAssertEqual(safeReport.attempts, 3)
 
-        let reversibleDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-reversible-(UUID().uuidString)")
+        let reversibleDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-reversible-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: reversibleDirectory) }
         let reversibleExecutor = TestTaskActionExecutor(failuresBeforeSuccess: 3)
         let reversibleApprovals = TaskApprovalStore()
@@ -4632,7 +4820,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(reversibleExecutor.executeCount, 2)
         XCTAssertEqual(try reversibleRunner.status(taskID: reversiblePlan.id).state, .blocked)
 
-        let budgetDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-budget-(UUID().uuidString)")
+        let budgetDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-budget-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: budgetDirectory) }
         let budgetExecutor = TestTaskActionExecutor(failuresBeforeSuccess: 2)
         let budgetApprovals = TaskApprovalStore()
@@ -4661,7 +4849,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskRunnerPausesForPreconditionsRequiresFreshResumeAuthorityAndBindsRemainingPlan() throws {
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-resume-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-resume-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
         let executor = TestTaskActionExecutor(evaluationResult: false)
@@ -4733,7 +4921,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testInterruptedRunningCheckpointRequiresExplicitResumeAndPreservesStartTime() throws {
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-interrupted-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-interrupted-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
         let store = TaskCheckpointStore(directory: directory)
@@ -4792,7 +4980,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testSensitiveTaskNeverRetriesUncertainActionAndCancellationInvalidatesState() throws {
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-sensitive-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-sensitive-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
         let executor = TestTaskActionExecutor(sideEffectUncertain: true)
@@ -4821,7 +5009,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(executor.executeCount, 1)
         XCTAssertEqual(try runner.status(taskID: plan.id).state, .indeterminate)
 
-        let cancellationDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-cancel-(UUID().uuidString)")
+        let cancellationDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-cancel-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: cancellationDirectory) }
         let cancellationApprovals = TaskApprovalStore()
         let cancellationRunner = TaskRunner(
@@ -4872,8 +5060,8 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskServiceProducesCheckpointAndReceiptEvidenceWithoutPrivateInputs() throws {
-        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-receipts-(UUID().uuidString)")
-        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-service-(UUID().uuidString)")
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-receipts-\(UUID().uuidString)")
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-service-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: receiptDirectory)
             try? FileManager.default.removeItem(at: checkpointDirectory)
@@ -4940,8 +5128,8 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskServiceCreatesBackgroundInputChannelWithoutKeyboardLease() throws {
-        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-receipts-(UUID().uuidString)")
-        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-(UUID().uuidString)")
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-receipts-\(UUID().uuidString)")
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: receiptDirectory)
             try? FileManager.default.removeItem(at: checkpointDirectory)
@@ -5035,7 +5223,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskServiceRejectsBackgroundChannelWhenTargetOwnsForeground() throws {
-        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-foreground-(UUID().uuidString)")
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-channel-foreground-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
         let target = AppInfo(
             name: "TextEdit",
@@ -5105,7 +5293,7 @@ final class MacCtlCoreTests: XCTestCase {
     }
 
     func testTaskTargetChangesAndModalStatePauseBeforeDispatch() throws {
-        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-target-(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-target-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
         let executor = TestTaskActionExecutor()
@@ -5511,6 +5699,15 @@ private func testApp(name: String, processID: Int32, bundleVersion: String? = ni
         isRunning: true,
         processID: processID,
         bundleVersion: bundleVersion
+    )
+}
+
+private func testWarmPathContext() -> WarmPathContextIdentity {
+    WarmPathContextIdentity(
+        osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+        providerStateSignature: CapabilityProviderState(
+            permissionStatuses: PermissionDiagnostics.unknownReport()
+        ).signature
     )
 }
 

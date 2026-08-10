@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import XCTest
 @testable import MacCtlCore
 
@@ -28,7 +29,18 @@ final class ControlCenterTests: XCTestCase {
 
         XCTAssertNil(hud.popover.contentViewController)
         hud.refreshOnMain(populatePopover: true)
-        XCTAssertNotNil(hud.popover.contentViewController)
+        guard let view = hud.popover.contentViewController?.view else {
+            return XCTFail("Control Center popover content was not built")
+        }
+        let buttons = allSubviews(of: view).compactMap { $0 as? NSButton }
+        XCTAssertFalse(buttons.isEmpty)
+        for button in buttons {
+            XCTAssertEqual(button.focusRingType, .none, "Unexpected focus ring on \(button.title)")
+        }
+    }
+
+    private func allSubviews(of view: NSView) -> [NSView] {
+        view.subviews + view.subviews.flatMap(allSubviews)
     }
 
     func testPresentationCoversIdleApprovalLeaseFreezeStoppingAndDegradedStates() {
@@ -519,6 +531,16 @@ final class ControlCenterTests: XCTestCase {
         XCTAssertEqual(executor.started.wait(timeout: .now() + 2), .success)
         XCTAssertTrue(suppressor.active)
         XCTAssertEqual(service.controlCenterSnapshot().execution?.physicalInputMode, .suppressed)
+        let lifecycleBlocked = service.handle(RequestEnvelope(
+            method: "daemon.lifecycle.prepare",
+            params: ["operation": .string(DaemonLifecycleOperation.restart.rawValue)]
+        ))
+        XCTAssertEqual(lifecycleBlocked.status, .blocked)
+        XCTAssertEqual(
+            lifecycleBlocked.error?.code,
+            MacCtlErrorCode.daemonLifecycleBlocked.rawValue
+        )
+        XCTAssertEqual(lifecycleBlocked.error?.details["active_request_count"]?.intValue, 1)
         let stopped = service.handle(RequestEnvelope(method: "control.stop_active"))
         XCTAssertEqual(stopped.status, .succeeded)
         XCTAssertFalse(suppressor.active)
@@ -542,6 +564,71 @@ final class ControlCenterTests: XCTestCase {
         )
         XCTAssertTrue(leases.invalidate(token: recoveryLease.token))
         XCTAssertNil(leases.activeLease())
+    }
+
+    func testLifecycleDrainAtomicallyRejectsMutationsAndAutoExpires() {
+        var now = Date(timeIntervalSince1970: 10_000)
+        let service = MacCtlService(
+            permissionContext: "test",
+            lifecycleNow: { now },
+            lifecycleDrainDuration: 2
+        )
+        let prepared = service.handle(RequestEnvelope(
+            method: "daemon.lifecycle.prepare",
+            params: ["operation": .string(DaemonLifecycleOperation.restart.rawValue)]
+        ))
+        XCTAssertEqual(prepared.status, .succeeded)
+        XCTAssertEqual(service.controlCenterSnapshot().lifecycleDrain?.operation, .restart)
+
+        let rejected = service.handle(RequestEnvelope(
+            method: "app.open",
+            params: ["name": .string("Calculator")]
+        ))
+        XCTAssertEqual(rejected.status, .blocked)
+        XCTAssertEqual(rejected.error?.code, MacCtlErrorCode.daemonLifecycleBlocked.rawValue)
+        XCTAssertEqual(rejected.error?.details["retryable"]?.boolValue, true)
+
+        XCTAssertEqual(
+            service.handle(RequestEnvelope(method: "control.center.snapshot")).status,
+            .succeeded
+        )
+        now = now.addingTimeInterval(3)
+        let afterExpiry = service.handle(RequestEnvelope(method: "not.a.real.method"))
+        XCTAssertEqual(afterExpiry.error?.code, MacCtlErrorCode.unsupportedMethod.rawValue)
+        XCTAssertNil(service.controlCenterSnapshot().lifecycleDrain)
+    }
+
+    func testLifecycleDrainBlocksPendingAndApprovedAuthorityWithoutExposingTokens() throws {
+        let approvals = TaskApprovalStore()
+        let service = MacCtlService(permissionContext: "test", taskApprovalStore: approvals)
+        let plan = TaskPlan(
+            id: "restart-blocker",
+            name: "Restart blocker",
+            summary: "Hold authority across the lifecycle check",
+            steps: [TaskStep(
+                id: "assert",
+                action: ActionSpec(kind: .assert, surface: .macApp)
+            )]
+        )
+        let pending = approvals.prepare(plan: plan)
+        let pendingResponse = service.handle(RequestEnvelope(
+            method: "daemon.lifecycle.prepare",
+            params: ["operation": .string(DaemonLifecycleOperation.upgrade.rawValue)]
+        ))
+        XCTAssertEqual(pendingResponse.status, .blocked)
+        XCTAssertEqual(pendingResponse.error?.details["approval_count"]?.intValue, 1)
+        XCTAssertFalse(String(data: try JSONCodec.encode(pendingResponse), encoding: .utf8)!.contains(pending.record.token))
+
+        _ = try approvals.approve(token: pending.record.token)
+        XCTAssertTrue(service.pendingApprovalRecords().isEmpty)
+        XCTAssertEqual(service.activeApprovalRecords().count, 1)
+        let approvedResponse = service.handle(RequestEnvelope(
+            method: "daemon.lifecycle.prepare",
+            params: ["operation": .string(DaemonLifecycleOperation.restart.rawValue)]
+        ))
+        XCTAssertEqual(approvedResponse.status, .blocked)
+        XCTAssertEqual(approvedResponse.error?.details["approval_count"]?.intValue, 1)
+        XCTAssertFalse(String(data: try JSONCodec.encode(approvedResponse), encoding: .utf8)!.contains(pending.record.token))
     }
 
     func testPreDispatchFailureLeavesApprovalRetryableUntilFirstActionDispatch() throws {
@@ -584,6 +671,30 @@ final class ControlCenterTests: XCTestCase {
         )
         XCTAssertEqual(executor.executeCount, 1)
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    func testDaemonWaitUsesElapsedTimeAndPollsCancellation() throws {
+        var elapsed: TimeInterval = 0
+        try CancellableMonotonicWait.run(
+            seconds: 0.2,
+            monotonicNow: { elapsed },
+            sleep: { elapsed += $0 },
+            checkpoint: {}
+        )
+        XCTAssertEqual(elapsed, 0.2, accuracy: 0.000_001)
+
+        elapsed = 0
+        XCTAssertThrowsError(try CancellableMonotonicWait.run(
+            seconds: 20,
+            monotonicNow: { elapsed },
+            sleep: { elapsed += $0 },
+            checkpoint: {
+                if elapsed >= 0.15 { throw TaskControlError.cancelled }
+            }
+        )) { error in
+            XCTAssertEqual(error as? TaskControlError, .cancelled)
+        }
+        XCTAssertEqual(elapsed, 0.15, accuracy: 0.000_001)
     }
 
     private func approvalRecord(expiresAt: Date) -> ApprovalRecord {

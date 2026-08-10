@@ -92,9 +92,19 @@ public final class TaskApprovalStore {
     public func list() -> [ApprovalRecord] {
         lock.lock()
         defer { lock.unlock() }
-        expirePendingLocked()
+        expireActiveLocked()
         return entries.values
             .filter { $0.state == .pending }
+            .map(\.prepared.record)
+            .sorted { $0.expiresAt < $1.expiresAt }
+    }
+
+    public func activeRecords() -> [ApprovalRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        expireActiveLocked()
+        return entries.values
+            .filter { $0.state == .pending || $0.state == .approved }
             .map(\.prepared.record)
             .sorted { $0.expiresAt < $1.expiresAt }
     }
@@ -192,10 +202,11 @@ public final class TaskApprovalStore {
         return entry.prepared
     }
 
-    private func expirePendingLocked() {
+    private func expireActiveLocked() {
         let current = now()
         for token in entries.keys {
-            guard let entry = entries[token], entry.state == .pending else { continue }
+            guard let entry = entries[token],
+                  entry.state == .pending || entry.state == .approved else { continue }
             if entry.prepared.record.expiresAt <= current {
                 entries[token] = Entry(prepared: entry.prepared, state: .expired)
             }

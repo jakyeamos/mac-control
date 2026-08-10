@@ -134,49 +134,19 @@ public final class InputController {
     public func key(_ specification: String) throws {
         try requirePostEventAccess()
         let parsed = try KeySpecification.parse(specification)
-        let down = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: parsed.keyCode,
-            keyDown: true
-        )
-        let up = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: parsed.keyCode,
-            keyDown: false
-        )
-        for modifier in parsed.modifiers {
-            down?.flags.insert(modifier)
-            up?.flags.insert(modifier)
+        let events = try parsed.events()
+        for event in events {
+            event.post(tap: .cghidEventTap)
         }
-        guard let down, let up else { throw InputControllerError.permissionDenied }
-        MacCtlKeyboardEventMetadata.markSynthetic(down)
-        MacCtlKeyboardEventMetadata.markSynthetic(up)
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
     }
 
     public func key(_ specification: String, toProcess processID: pid_t) throws {
         try requirePostEventAccess()
         let parsed = try KeySpecification.parse(specification)
-        let down = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: parsed.keyCode,
-            keyDown: true
-        )
-        let up = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: parsed.keyCode,
-            keyDown: false
-        )
-        for modifier in parsed.modifiers {
-            down?.flags.insert(modifier)
-            up?.flags.insert(modifier)
+        let events = try parsed.events()
+        for event in events {
+            event.postToPid(processID)
         }
-        guard let down, let up else { throw InputControllerError.permissionDenied }
-        MacCtlKeyboardEventMetadata.markSynthetic(down)
-        MacCtlKeyboardEventMetadata.markSynthetic(up)
-        down.postToPid(processID)
-        up.postToPid(processID)
     }
 
     @discardableResult
@@ -226,6 +196,52 @@ public struct KeySpecification: Equatable {
         self.modifiers = modifiers
     }
 
+    /// A chord must emit real modifier transitions, not only modifier flags on
+    /// the primary key event. AppKit menu equivalents can ignore the latter
+    /// even though ordinary text shortcuts appear to work.
+    var eventSteps: [KeyEventStep] {
+        var activeFlags: CGEventFlags = []
+        var steps: [KeyEventStep] = []
+        let modifierKeys = modifiers.compactMap(Self.modifierKey)
+        for (keyCode, flag) in modifierKeys {
+            activeFlags.insert(flag)
+            steps.append(KeyEventStep(keyCode: keyCode, keyDown: true, flags: activeFlags))
+        }
+        steps.append(KeyEventStep(keyCode: keyCode, keyDown: true, flags: activeFlags))
+        steps.append(KeyEventStep(keyCode: keyCode, keyDown: false, flags: activeFlags))
+        for (keyCode, flag) in modifierKeys.reversed() {
+            activeFlags.remove(flag)
+            steps.append(KeyEventStep(keyCode: keyCode, keyDown: false, flags: activeFlags))
+        }
+        return steps
+    }
+
+    func events() throws -> [CGEvent] {
+        try eventSteps.map { step in
+            guard let event = CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: step.keyCode,
+                keyDown: step.keyDown
+            ) else {
+                throw InputControllerError.permissionDenied
+            }
+            event.flags = step.flags
+            MacCtlKeyboardEventMetadata.markSynthetic(event)
+            return event
+        }
+    }
+
+    private static func modifierKey(_ flag: CGEventFlags) -> (CGKeyCode, CGEventFlags)? {
+        switch flag {
+        case .maskCommand: return (55, flag)
+        case .maskShift: return (56, flag)
+        case .maskAlternate: return (58, flag)
+        case .maskControl: return (59, flag)
+        case .maskSecondaryFn: return (63, flag)
+        default: return nil
+        }
+    }
+
     public static func parse(_ specification: String) throws -> KeySpecification {
         let parts = specification.lowercased().split(separator: "+").map(String.init)
         guard let keyName = parts.last, !keyName.isEmpty else {
@@ -266,4 +282,10 @@ public struct KeySpecification: Equatable {
         }
         return KeySpecification(keyCode: code, modifiers: modifiers)
     }
+}
+
+struct KeyEventStep: Equatable {
+    let keyCode: CGKeyCode
+    let keyDown: Bool
+    let flags: CGEventFlags
 }

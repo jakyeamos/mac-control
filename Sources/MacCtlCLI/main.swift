@@ -55,7 +55,7 @@ struct CLI {
             case "daemon":
                 return try runDaemon(commandArguments)
             case "install":
-                return try runInstall()
+                return try runInstall(commandArguments)
             case "help", "--help", "-h":
                 printHelp()
                 return 0
@@ -63,10 +63,22 @@ struct CLI {
                 throw CLIError.usage("Unknown command: \(command)")
             }
         } catch {
+            let lifecycleFailure: Bool
+            switch error {
+            case LaunchAgentError.lifecycleBlocked, LaunchAgentError.lifecycleInterlockUnavailable:
+                lifecycleFailure = true
+            default:
+                lifecycleFailure = false
+            }
             let response = ResponseEnvelope(
                 requestID: UUID().uuidString,
-                status: .failed,
-                error: MacCtlError(code: "cli_error", message: error.localizedDescription)
+                status: lifecycleFailure ? .blocked : .failed,
+                error: MacCtlError(
+                    code: lifecycleFailure
+                        ? MacCtlErrorCode.daemonLifecycleBlocked.rawValue
+                        : "cli_error",
+                    message: error.localizedDescription
+                )
             )
             return render(response)
         }
@@ -1012,7 +1024,9 @@ struct CLI {
         guard let subcommand = args.first else {
             throw CLIError.usage("Usage: macctl daemon install|remove|restart|status")
         }
-        let manager = LaunchAgentManager()
+        let manager = LaunchAgentManager(lifecycleInterlock: DaemonLifecycleInterlock(
+            allowLegacyIdleSnapshot: args.contains("--allow-legacy-idle-snapshot")
+        ))
         switch subcommand {
         case "install":
             let daemonPath = LaunchAgentManager.installedDaemonExecutablePath()
@@ -1032,8 +1046,15 @@ struct CLI {
         }
     }
 
-    private func runInstall() throws -> Int32 {
-        let paths = try LaunchAgentManager().installUserBinaries(from: CommandLine.arguments[0])
+    private func runInstall(_ args: [String]) throws -> Int32 {
+        let unsupported = args.filter { $0 != "--allow-legacy-idle-snapshot" }
+        guard unsupported.isEmpty else {
+            throw CLIError.usage("Usage: macctl install [--allow-legacy-idle-snapshot]")
+        }
+        let manager = LaunchAgentManager(lifecycleInterlock: DaemonLifecycleInterlock(
+            allowLegacyIdleSnapshot: args.contains("--allow-legacy-idle-snapshot")
+        ))
+        let paths = try manager.installUserBinaries(from: CommandLine.arguments[0])
         return renderValue(["installed": paths])
     }
 
@@ -1144,9 +1165,9 @@ struct CLI {
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
         macctl task status|cancel <task-id>
         macctl adapter capabilities [--json]
-        macctl daemon install|remove|restart|status
+        macctl daemon install|remove|restart|status [--allow-legacy-idle-snapshot]
         macctl logs [--json]
-        macctl install
+        macctl install [--allow-legacy-idle-snapshot]
         """)
     }
 }

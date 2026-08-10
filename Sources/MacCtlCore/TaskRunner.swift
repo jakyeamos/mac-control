@@ -914,6 +914,24 @@ private extension Array {
     }
 }
 
+enum CancellableMonotonicWait {
+    static func run(
+        seconds: TimeInterval,
+        monotonicNow: () -> TimeInterval,
+        sleep: (TimeInterval) -> Void,
+        checkpoint: () throws -> Void
+    ) throws {
+        let end = monotonicNow() + seconds
+        repeat {
+            try checkpoint()
+            let remaining = end - monotonicNow()
+            guard remaining > 0 else { break }
+            sleep(min(remaining, 0.05))
+        } while monotonicNow() < end
+        try checkpoint()
+    }
+}
+
 /// Native/Accessibility/keyboard execution for the allowlisted task action
 /// set.  Adapter mutations are dispatched only by typed operation name.
 public final class MacTaskActionExecutor: TaskActionExecuting {
@@ -931,6 +949,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let backgroundPress: (pid_t, Selector) throws -> Void
     private let backgroundSetValue: (pid_t, Selector, String) throws -> Void
     private let backgroundSendKey: (String, pid_t) throws -> Void
+    private let monotonicNow: () -> TimeInterval
+    private let sleep: (TimeInterval) -> Void
 
     public init(
         appController: AppController,
@@ -946,7 +966,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         searchTextTyper: SearchTextTyping? = nil,
         backgroundPress: ((pid_t, Selector) throws -> Void)? = nil,
         backgroundSetValue: ((pid_t, Selector, String) throws -> Void)? = nil,
-        backgroundSendKey: ((String, pid_t) throws -> Void)? = nil
+        backgroundSendKey: ((String, pid_t) throws -> Void)? = nil,
+        monotonicNow: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
     ) {
         self.appController = appController
         self.accessibilityController = accessibilityController
@@ -968,6 +990,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.backgroundSendKey = backgroundSendKey ?? { specification, pid in
             try inputController.key(specification, toProcess: pid)
         }
+        self.monotonicNow = monotonicNow
+        self.sleep = sleep
     }
 
     public func execute(
@@ -1186,7 +1210,18 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             guard context.now().addingTimeInterval(seconds) <= context.deadline else {
                 throw TaskControlError.timedOut
             }
-            RunLoop.current.run(until: context.now().addingTimeInterval(seconds))
+            // A daemon request executes on a worker thread whose RunLoop may
+            // have no sources, so RunLoop.run(until:) can return immediately.
+            // Use monotonic time and short slices so Stop & Release is observed
+            // promptly even while a wait action is in progress.
+            try CancellableMonotonicWait.run(
+                seconds: seconds,
+                monotonicNow: monotonicNow,
+                sleep: sleep,
+                checkpoint: {
+                    _ = try context.revalidateBeforeAction(includeTarget: false)
+                }
+            )
             return TaskActionExecutionReport(route: "native")
         case .capture, .ocr:
             try requireRecoveryRoute(context, allowed: ["visual"])

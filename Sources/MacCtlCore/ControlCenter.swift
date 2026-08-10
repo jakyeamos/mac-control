@@ -57,15 +57,47 @@ public struct ControlCenterSnapshot: Codable, Equatable {
     public let approvals: [ControlCenterApproval]
     public let execution: ControlCenterExecution?
     public let permissions: [PermissionStatus]
+    public let lifecycleDrain: ControlCenterLifecycleDrain?
 
     public init(
         approvals: [ControlCenterApproval],
         execution: ControlCenterExecution?,
-        permissions: [PermissionStatus]
+        permissions: [PermissionStatus],
+        lifecycleDrain: ControlCenterLifecycleDrain? = nil
     ) {
         self.approvals = approvals
         self.execution = execution
         self.permissions = permissions
+        self.lifecycleDrain = lifecycleDrain
+    }
+}
+
+public enum DaemonLifecycleOperation: String, Codable, Equatable {
+    case install
+    case restart
+    case remove
+    case upgrade
+}
+
+public struct ControlCenterLifecycleDrain: Codable, Equatable {
+    public let operation: DaemonLifecycleOperation
+    public let expiresAt: Date
+
+    public init(operation: DaemonLifecycleOperation, expiresAt: Date) {
+        self.operation = operation
+        self.expiresAt = expiresAt
+    }
+}
+
+public struct DaemonLifecycleDrainReport: Codable, Equatable {
+    public let operation: DaemonLifecycleOperation
+    public let ready: Bool
+    public let expiresAt: Date
+
+    public init(operation: DaemonLifecycleOperation, ready: Bool, expiresAt: Date) {
+        self.operation = operation
+        self.ready = ready
+        self.expiresAt = expiresAt
     }
 }
 
@@ -92,6 +124,17 @@ public struct ControlCenterPresentation: Equatable {
         approvalLifetime: TimeInterval = 300
     ) -> ControlCenterPresentation {
         let approvals = snapshot.approvals.filter { $0.expiresAt > now }
+        if let drain = snapshot.lifecycleDrain, drain.expiresAt > now {
+            let remaining = max(0, drain.expiresAt.timeIntervalSince(now))
+            return ControlCenterPresentation(
+                state: .stopping,
+                label: drain.operation == .upgrade ? "Updating" : "Restarting",
+                ringFraction: nil,
+                tooltip: "Daemon lifecycle drain active for \(durationLabel(remaining))",
+                accessibilityLabel: "Daemon lifecycle drain active, \(durationLabel(remaining)) remaining",
+                pendingCount: approvals.count
+            )
+        }
         let missing = snapshot.permissions.filter {
             $0.state == "missing" && ["Accessibility", "Input Monitoring", "Post Events"].contains($0.name)
         }

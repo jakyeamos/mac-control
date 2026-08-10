@@ -9,59 +9,13 @@ public enum MacAppArchetype: String, Codable, Equatable, CaseIterable {
     case electronChromium = "electron_chromium"
     case browser
     case systemSettings = "system_settings"
+    case mirroredDevice = "mirrored_device"
     case unknown
 }
 
 public enum MacAppArchetypeClassifier {
     public static func classify(_ application: WarmPathApplicationIdentity) -> MacAppArchetype {
-        let bundleID = application.bundleID?.lowercased() ?? ""
-        let name = application.name.lowercased()
-        let combined = "\(bundleID) \(name)"
-        let compact = combined
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .joined()
-
-        if combined.contains("iphone") || combined.contains("mirroring") {
-            return .unknown
-        }
-        if bundleID == "com.apple.systemsettings"
-            || bundleID == "com.apple.systempreferences"
-            || name == "system settings"
-            || name == "system preferences" {
-            return .systemSettings
-        }
-        if compact.contains("swiftui") {
-            return .swiftUI
-        }
-        if bundleID.contains("chrome")
-            || bundleID.contains("firefox")
-            || bundleID.contains("safari")
-            || bundleID.contains("microsoftedge")
-            || bundleID.contains("brave")
-            || name == "chrome"
-            || name == "safari"
-            || name == "firefox" {
-            return .browser
-        }
-        if bundleID.contains("electron")
-            || bundleID.contains("visualstudio")
-            || bundleID.contains("slack")
-            || bundleID.contains("discord")
-            || bundleID.contains("notion")
-            || bundleID.contains("figma") {
-            return .electronChromium
-        }
-        if compact.contains("visualstudio")
-            || compact.contains("slack")
-            || compact.contains("discord")
-            || compact.contains("notion")
-            || compact.contains("figma") {
-            return .electronChromium
-        }
-        if bundleID.hasPrefix("com.apple.") {
-            return .nativeAppKit
-        }
-        return .unknown
+        AppControlProfileRegistry.standard.archetype(for: application)
     }
 }
 
@@ -74,6 +28,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     public let taskID: String?
     public let targetFingerprint: String?
     public let manifestFound: Bool
+    public let routeContextCurrent: Bool
     public let freshMeasuredRoutes: [ControlActionRoute]
     public let staleOrUnprovenRoutes: [ControlActionRoute]
     public let callerSuppliedRoutes: [ControlActionRoute]
@@ -83,6 +38,11 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     /// browser's native context menu is a supported tab/group mutation API.
     public let unsupportedCapabilities: [String]
     public let handoffProviders: [String]
+    public let preferredProviders: [AppControlProvider]
+    public let profileLayers: [String]
+    public let anchors: [String]
+    public let verificationMethods: [String]
+    public let invalidatesOn: [String]
     public let routeSelectionPolicy: String
     public let deepAuditAvailable: Bool
     public let cachedBroadProfile: CapabilityProfileCacheSummary?
@@ -94,30 +54,35 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         targetFingerprint: String? = nil,
         manifest: WarmPathManifest? = nil,
         now: Date = Date(),
+        currentContextIdentity: WarmPathContextIdentity? = nil,
         deepAuditAvailable: Bool = false,
         cachedBroadProfile: CapabilityProfileCacheSummary? = nil,
-        recentBlockers: [ControlBlockerObservation] = []
+        recentBlockers: [ControlBlockerObservation] = [],
+        profileRegistry: AppControlProfileRegistry = .standard
     ) {
         self.schemaVersion = 2
         self.probeMode = "fast_route_probe"
         self.application = application
-        self.archetype = MacAppArchetypeClassifier.classify(application)
-        self.classificationSource = "bundle_identity_and_app_name"
+        let effectiveProfile = profileRegistry.profile(for: application)
+        self.archetype = effectiveProfile.archetype
+        self.classificationSource = "declarative_profile_registry"
         self.taskID = taskID
         self.targetFingerprint = targetFingerprint
         self.manifestFound = manifest != nil
         let candidates = manifest?.candidates ?? []
+        let contextCurrent = currentContextIdentity == nil
+            || manifest == nil
+            || (manifest?.contextIdentity != nil && manifest?.contextIdentity == currentContextIdentity)
+        self.routeContextCurrent = contextCurrent
         self.freshMeasuredRoutes = candidates
-            .filter { $0.isMeasured && $0.isFresh(at: now) }
+            .filter { contextCurrent && $0.isWarm(at: now) }
             .map(\.route)
         self.staleOrUnprovenRoutes = candidates
-            .filter { !$0.isMeasured || !$0.isFresh(at: now) }
+            .filter { !contextCurrent || !$0.isWarm(at: now) }
             .map(\.route)
         self.callerSuppliedRoutes = candidates
             .filter { $0.measurementSource == .callerSupplied }
             .map(\.route)
-        let isGoogleChrome = application.bundleID?.lowercased() == "com.google.chrome"
-            || ["chrome", "google chrome"].contains(application.name.lowercased())
         self.contractCapabilities = [
             "control.outcome",
             "control.batch",
@@ -130,11 +95,14 @@ public struct ControlCapabilityProfile: Codable, Equatable {
             "semantic_scroll",
             "computer_use_handoff"
         ]
-        self.unsupportedCapabilities = isGoogleChrome
-            ? ["chrome_tab_group_mutation"]
-            : []
+        self.unsupportedCapabilities = effectiveProfile.unsupportedCapabilities
         self.handoffProviders = ["computer_use"]
-        self.routeSelectionPolicy = "fresh_daemon_executed_measurement_only"
+        self.preferredProviders = effectiveProfile.preferredProviders(for: taskID)
+        self.profileLayers = effectiveProfile.layers
+        self.anchors = effectiveProfile.anchors
+        self.verificationMethods = effectiveProfile.verification
+        self.invalidatesOn = effectiveProfile.invalidatesOn
+        self.routeSelectionPolicy = "repeated_verified_context_bound_measurement_only"
         self.deepAuditAvailable = deepAuditAvailable
         self.cachedBroadProfile = cachedBroadProfile
         self.recentBlockers = recentBlockers

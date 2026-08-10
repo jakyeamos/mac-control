@@ -72,6 +72,8 @@ public enum LaunchAgentError: Error, LocalizedError {
     case launchctlFailed(String)
     case installFailed(String)
     case signingFailed(String)
+    case lifecycleBlocked(String)
+    case lifecycleInterlockUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -85,6 +87,10 @@ public enum LaunchAgentError: Error, LocalizedError {
             return "Could not install macctl: \(message)"
         case .signingFailed(let message):
             return "Could not sign the macctld app bundle: \(message)"
+        case .lifecycleBlocked(let message):
+            return "Daemon lifecycle change blocked: \(message)"
+        case .lifecycleInterlockUnavailable(let message):
+            return "Could not verify the daemon lifecycle interlock: \(message)"
         }
     }
 }
@@ -164,8 +170,11 @@ public struct LaunchAgentStatus: Codable, Equatable {
 
 public final class LaunchAgentManager {
     private let fileManager = FileManager.default
+    private let lifecycleInterlock: DaemonLifecycleInterlock
 
-    public init() {}
+    public init(lifecycleInterlock: DaemonLifecycleInterlock = DaemonLifecycleInterlock()) {
+        self.lifecycleInterlock = lifecycleInterlock
+    }
 
     public func install(daemonExecutable: String) throws -> LaunchAgentStatus {
         guard fileManager.isExecutableFile(atPath: daemonExecutable) else {
@@ -176,6 +185,7 @@ public final class LaunchAgentManager {
         guard suppliedPath == expectedPath else {
             throw LaunchAgentError.invalidDaemonIdentity(suppliedPath)
         }
+        _ = try lifecycleInterlock.prepare(operation: .install, launchAgentStatus: status())
         try MacCtlPaths.ensureDirectories()
         try fileManager.createDirectory(
             at: MacCtlPaths.launchAgentURL.deletingLastPathComponent(),
@@ -210,6 +220,7 @@ public final class LaunchAgentManager {
     }
 
     public func remove() throws -> LaunchAgentStatus {
+        _ = try lifecycleInterlock.prepare(operation: .remove, launchAgentStatus: status())
         let domain = "gui/\(getuid())"
         _ = try? ProcessRunner.run(
             executable: "/bin/launchctl",
@@ -225,6 +236,7 @@ public final class LaunchAgentManager {
         guard fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path) else {
             throw LaunchAgentError.launchctlFailed("LaunchAgent plist is not installed")
         }
+        _ = try lifecycleInterlock.prepare(operation: .restart, launchAgentStatus: status())
         return try reconcile()
     }
 
@@ -278,6 +290,7 @@ public final class LaunchAgentManager {
               fileManager.isExecutableFile(atPath: daemonSource.path) else {
             throw LaunchAgentError.daemonExecutableMissing
         }
+        _ = try lifecycleInterlock.prepare(operation: .upgrade, launchAgentStatus: status())
         let destinationDirectory = MacCtlPaths.userLocalBinDirectory
         try fileManager.createDirectory(
             at: destinationDirectory,
@@ -379,6 +392,10 @@ public final class LaunchAgentManager {
             throw LaunchAgentError.signingFailed(error.localizedDescription)
         }
 
+        // Refresh the bounded drain immediately before replacing the running
+        // daemon's on-disk bundle. Staging or codesigning may have consumed the
+        // first window; a newly active task must stop the replacement here.
+        _ = try lifecycleInterlock.prepare(operation: .upgrade, launchAgentStatus: status())
         if fileManager.fileExists(atPath: MacCtlPaths.daemonAppURL.path) {
             try fileManager.removeItem(at: MacCtlPaths.daemonAppURL)
         }

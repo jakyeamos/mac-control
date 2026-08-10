@@ -92,9 +92,22 @@ public final class ApprovalStore {
     public func list() -> [ApprovalRecord] {
         lock.lock()
         defer { lock.unlock() }
-        expireEntries(now: Date())
+        expireActiveEntries(now: Date())
         return entries.values
             .filter { $0.state == .pending }
+            .map { $0.prepared.record }
+            .sorted { $0.expiresAt < $1.expiresAt }
+    }
+
+    /// Pending proposals and approved-but-unconsumed authority both block a
+    /// daemon lifecycle transition. Tokens never leave the store through the
+    /// lifecycle API; callers receive only sanitized counts and expiry data.
+    public func activeRecords() -> [ApprovalRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        expireActiveEntries(now: Date())
+        return entries.values
+            .filter { $0.state == .pending || $0.state == .approved }
             .map { $0.prepared.record }
             .sorted { $0.expiresAt < $1.expiresAt }
     }
@@ -203,9 +216,10 @@ public final class ApprovalStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private func expireEntries(now: Date) {
+    private func expireActiveEntries(now: Date) {
         for token in entries.keys {
-            guard let entry = entries[token], entry.state == .pending else { continue }
+            guard let entry = entries[token],
+                  entry.state == .pending || entry.state == .approved else { continue }
             if entry.prepared.record.expiresAt <= now {
                 entries[token] = Entry(prepared: entry.prepared, state: .expired)
             }
