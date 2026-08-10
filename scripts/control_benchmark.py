@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-LANES = {"agent-baseline", "generic-gui", "mac-control"}
+LANES = {"agent-baseline", "generic-gui", "hybrid", "mac-control"}
 PHASES = {"warmup", "measured"}
 STATUSES = {"passed", "failed", "blocked"}
 CONTEXT_FIELDS = (
@@ -427,16 +427,20 @@ def run_mac_focus(args: argparse.Namespace) -> int:
     if args.sample_offset < 0:
         raise ValueError("sample offset must be non-negative")
 
+    task = "focus-next-control"
     context = record_context(
         args,
-        task="focus-next-control",
+        task=task,
         app=args.app,
         implementation_id="mac-control",
         timing_scope="command_round_trip",
         provenance="daemon_executed",
     )
+    command_count = 0
 
     def perform(action: str) -> tuple[dict[str, Any], float]:
+        nonlocal command_count
+        command_count += 1
         return run_json(
             [
                 args.macctl,
@@ -450,47 +454,72 @@ def run_mac_focus(args: argparse.Namespace) -> int:
             ]
         )
 
-    # An app activation can legitimately restore the window without an AX
-    # focused control. Prime that precondition outside the timer. Each action is
-    # nevertheless self-contained: the daemon reasserts stable foreground,
-    # acquires an ephemeral app lease, verifies, and releases before replying.
-    primed, _ = perform("next-control")
-    if not focus_verified(primed):
-        if focus_established(primed):
-            raise RuntimeError("Mac Control could not establish a focus-changing precondition")
-        raise RuntimeError("Mac Control could not establish a readable focus precondition")
-    restored, _ = perform("previous-control")
-    if not focus_verified(restored):
-        raise RuntimeError("precondition focus reset did not verify")
+    def blocked(reason: str) -> int:
+        append_record(
+            args.output,
+            make_record(
+                task=task,
+                lane="mac-control",
+                phase="warmup",
+                sample=max(1, args.sample_offset + 1),
+                duration_ms=0,
+                tool_calls=command_count,
+                recoveries=1,
+                verified=False,
+                user_help=False,
+                status="blocked",
+                oracle="Accessibility focus changed to the next control",
+                route="keyboard",
+                notes=reason,
+                **context,
+            ),
+        )
+        return 1
 
-    for phase, count in (("warmup", args.warmups), ("measured", args.samples)):
-        for sample in range(1, count + 1):
-            payload, duration_ms = perform("next-control")
-            verified = focus_verified(payload)
-            append_record(
-                args.output,
-                make_record(
-                    task="focus-next-control",
-                    lane="mac-control",
-                    phase=phase,
-                    sample=sample + args.sample_offset,
-                    duration_ms=duration_ms,
-                    tool_calls=1,
-                    recoveries=0,
-                    verified=verified,
-                    user_help=False,
-                    status="passed" if verified else "failed",
-                    oracle="Accessibility focus changed to the next control",
-                    route="keyboard",
-                    **context,
-                ),
-            )
-            if not verified:
-                return 1
+    try:
+        # An app activation can legitimately restore the window without an AX
+        # focused control. Prime that precondition outside the timer. Each action is
+        # nevertheless self-contained: the daemon reasserts stable foreground,
+        # acquires an ephemeral app lease, verifies, and releases before replying.
+        primed, _ = perform("next-control")
+        if not focus_verified(primed):
+            if focus_established(primed):
+                return blocked("Mac Control could not establish a focus-changing precondition")
+            return blocked("Mac Control could not establish a readable focus precondition")
+        restored, _ = perform("previous-control")
+        if not focus_verified(restored):
+            return blocked("precondition focus reset did not verify")
 
-            reset, _ = perform("previous-control")
-            if not focus_verified(reset):
-                raise RuntimeError("focus reset did not verify")
+        for phase, count in (("warmup", args.warmups), ("measured", args.samples)):
+            for sample in range(1, count + 1):
+                payload, duration_ms = perform("next-control")
+                verified = focus_verified(payload)
+                append_record(
+                    args.output,
+                    make_record(
+                        task=task,
+                        lane="mac-control",
+                        phase=phase,
+                        sample=sample + args.sample_offset,
+                        duration_ms=duration_ms,
+                        tool_calls=1,
+                        recoveries=0,
+                        verified=verified,
+                        user_help=False,
+                        status="passed" if verified else "failed",
+                        oracle="Accessibility focus changed to the next control",
+                        route="keyboard",
+                        **context,
+                    ),
+                )
+                if not verified:
+                    return 1
+
+                reset, _ = perform("previous-control")
+                if not focus_verified(reset):
+                    return blocked("focus reset did not verify")
+    except (OSError, RuntimeError, ValueError) as error:
+        return blocked(f"benchmark setup or execution blocked: {error}")
     return 0
 
 

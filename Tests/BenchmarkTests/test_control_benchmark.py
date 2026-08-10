@@ -66,6 +66,31 @@ class ControlBenchmarkTests(unittest.TestCase):
         self.assertEqual(record["build_id"], "daemon-build-a")
         self.assertNotIn("lease_token", record)
 
+    def test_hybrid_lane_is_an_explicit_provider_handoff_lane(self):
+        record = benchmark.make_record(
+            task="scroll-main",
+            lane="hybrid",
+            phase="measured",
+            sample=1,
+            duration_ms=25.0,
+            tool_calls=4,
+            recoveries=1,
+            verified=True,
+            user_help=False,
+            status="passed",
+            oracle="viewport changed after provider handoff",
+            comparison_id="scroll-finder-hybrid-v1",
+            app="Finder",
+            target_fingerprint="finder-main-scroll-v1",
+            state_fingerprint="finder-main-ready-v1",
+            implementation_id="mac-control-computer-use-hybrid",
+            build_id="hybrid-current",
+            timing_scope="end_to_end_verified_action",
+            provenance="provider_handoff",
+        )
+        self.assertEqual(record["lane"], "hybrid")
+        self.assertEqual(record["provenance"], "provider_handoff")
+
     def test_pairwise_summary_separates_context_and_build_variants(self):
         def sample(lane, duration, *, build, target="target-a"):
             return benchmark.make_record(
@@ -403,9 +428,32 @@ class ControlBenchmarkTests(unittest.TestCase):
             output=Path(tempfile.mkdtemp()) / "raw.jsonl",
         )
         with patch.object(benchmark, "run_json", return_value=(payload, 1.0)):
-            with self.assertRaisesRegex(RuntimeError, "focus-changing precondition"):
-                benchmark.run_mac_focus(args)
-        self.assertFalse(args.output.exists())
+            self.assertEqual(benchmark.run_mac_focus(args), 1)
+        records = benchmark.load_records(args.output)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "blocked")
+        self.assertEqual(records[0]["tool_calls"], 1)
+        self.assertIn("focus-changing precondition", records[0]["notes"])
+
+    def test_mac_focus_persists_command_failure_as_blocked_evidence(self):
+        args = SimpleNamespace(
+            macctl="/tmp/macctl",
+            app="Notes",
+            warmups=0,
+            samples=1,
+            sample_offset=0,
+            output=Path(tempfile.mkdtemp()) / "raw.jsonl",
+        )
+        with patch.object(
+            benchmark,
+            "run_json",
+            side_effect=RuntimeError("command failed with exit 1"),
+        ):
+            self.assertEqual(benchmark.run_mac_focus(args), 1)
+        record = benchmark.load_records(args.output)[0]
+        self.assertEqual(record["status"], "blocked")
+        self.assertEqual(record["tool_calls"], 1)
+        self.assertIn("command failed with exit 1", record["notes"])
 
     def test_mac_batch_focus_uses_one_daemon_batch_per_phase_action(self):
         calls = []

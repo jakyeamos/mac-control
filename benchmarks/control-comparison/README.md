@@ -1,14 +1,23 @@
 # Mac Control comparison benchmark
 
-This benchmark compares three ways an agent can complete the same macOS task:
+This benchmark compares the available ways an agent can complete the same macOS
+task:
 
 1. `agent-baseline`: the best available method excluding Mac Control.
 2. `generic-gui`: accessibility/screenshot-driven computer control without Mac Control.
 3. `mac-control`: the installed, daemon-backed Mac Control surface with Full Keyboard Access.
+4. `hybrid`: Mac Control detects a provider handoff condition, then Computer Use
+   performs fresh target discovery, the action, and fresh verification.
 
 The initial suite uses one warmup and three measured samples per lane. Expand a
 lane to seven measured samples when its three-sample coefficient of variation
 exceeds 15%, or when the two fastest lane medians are within 10%.
+
+The locked Phase 0 corpus is [`phase-0-corpus-v1.json`](./phase-0-corpus-v1.json).
+Its canonical interpretation is [`phase-0-baseline-report.md`](./phase-0-baseline-report.md);
+the generated machine summary lives in `benchmarks/results/phase-0-baseline-v1.json`
+and `.md`. Phase 1 extensions remain explicit when they are blocked or lack a
+paired benchmark record.
 
 ## Timing and oracle contract
 
@@ -70,8 +79,11 @@ with this end-to-end lane.
 
 Mac Control samples require live `macctld` evidence and never accept a local
 fallback as a valid result. Generic GUI samples must use the Computer Use
-control surface. The baseline may use any faster available method except Mac
-Control or the generic GUI surface.
+control surface. Hybrid samples must include the Mac Control outcome that
+caused the handoff and the subsequent fresh Computer Use action plus oracle;
+they must not hide the provider transition or count a caller-supplied metric.
+The baseline may use any faster available method except Mac Control or the
+generic GUI surface.
 
 For the deterministic focus task, the repository includes an independent
 baseline lane using System Events UI scripting. It activates System Settings,
