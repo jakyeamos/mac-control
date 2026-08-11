@@ -15,6 +15,20 @@ SPEC.loader.exec_module(benchmark)
 
 
 class ControlBenchmarkTests(unittest.TestCase):
+    @staticmethod
+    def foreground_status_payload(bundle_id="com.example.ForegroundApp", name="ForegroundApp"):
+        return {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {
+                "foregroundApplication": {
+                    "name": name,
+                    "bundleID": bundle_id,
+                    "path": "/Applications/Foreground.app",
+                }
+            },
+        }
+
     def test_sensitive_fields_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "sensitive field"):
             benchmark.assert_safe({"metadata": {"lease_token": "do-not-store"}})
@@ -65,6 +79,149 @@ class ControlBenchmarkTests(unittest.TestCase):
         self.assertEqual(record["comparison_id"], "focus-system-settings-v1")
         self.assertEqual(record["build_id"], "daemon-build-a")
         self.assertNotIn("lease_token", record)
+
+    def test_focus_policy_and_interaction_mode_are_versioned_and_validated(self):
+        record = benchmark.make_record(
+            task="focus-next-control",
+            lane="mac-control",
+            phase="measured",
+            sample=1,
+            duration_ms=12.0,
+            tool_calls=1,
+            recoveries=0,
+            verified=True,
+            user_help=False,
+            status="passed",
+            oracle="focus changed",
+            focus_policy="foreground",
+            interaction_mode="keyboard",
+        )
+        self.assertEqual(record["schema_version"], 4)
+        self.assertEqual(record["focus_policy"], "foreground")
+        self.assertEqual(record["interaction_mode"], "keyboard")
+        with self.assertRaisesRegex(ValueError, "unknown focus policy"):
+            benchmark.make_record(
+                task="task-a",
+                lane="mac-control",
+                phase="measured",
+                sample=1,
+                duration_ms=1.0,
+                tool_calls=1,
+                recoveries=0,
+                verified=True,
+                user_help=False,
+                status="passed",
+                oracle="done",
+                focus_policy="implicit",
+            )
+        with self.assertRaisesRegex(ValueError, "unknown interaction mode"):
+            benchmark.make_record(
+                task="task-a",
+                lane="mac-control",
+                phase="measured",
+                sample=1,
+                duration_ms=1.0,
+                tool_calls=1,
+                recoveries=0,
+                verified=True,
+                user_help=False,
+                status="passed",
+                oracle="done",
+                interaction_mode="vision-only",
+            )
+
+    def test_summary_separates_foreground_and_background_focus_policies(self):
+        records = []
+        for sample, focus_policy in enumerate(("foreground", "background"), 1):
+            records.append(
+                benchmark.make_record(
+                    task="focus-next-control",
+                    lane="mac-control",
+                    phase="measured",
+                    sample=sample,
+                    duration_ms=10.0,
+                    tool_calls=1,
+                    recoveries=0,
+                    verified=True,
+                    user_help=False,
+                    status="passed",
+                    oracle="focus changed",
+                    comparison_id="focus-policy-v1",
+                    app="Target",
+                    target_fingerprint="target-v1",
+                    state_fingerprint="state-v1",
+                    implementation_id="mac-control",
+                    build_id=f"daemon-{focus_policy}",
+                    timing_scope="end_to_end_verified_action",
+                    focus_policy=focus_policy,
+                    interaction_mode="keyboard",
+                    foreground_oracle="foreground_unchanged",
+                    foreground_state="preserved",
+                    provenance="daemon_executed",
+                )
+            )
+        summary = benchmark.summarize_records(records)
+        self.assertEqual(len(summary["comparisons"]), 2)
+        self.assertTrue(all(item["variant_count"] == 1 for item in summary["comparisons"]))
+        self.assertTrue(all(item["status"] == "insufficient_evidence" for item in summary["comparisons"]))
+
+    def test_summary_separates_keyboard_parity_from_provider_natural_pointer_mode(self):
+        records = []
+        for sample, interaction_mode in enumerate(("keyboard", "pointer"), 1):
+            records.append(
+                benchmark.make_record(
+                    task="focus-or-pointer-action",
+                    lane="generic-gui",
+                    phase="measured",
+                    sample=sample,
+                    duration_ms=10.0,
+                    tool_calls=1,
+                    recoveries=0,
+                    verified=True,
+                    user_help=False,
+                    status="passed",
+                    oracle="target postcondition changed",
+                    comparison_id="provider-natural-v1",
+                    app="Target",
+                    target_fingerprint="target-v1",
+                    state_fingerprint="state-v1",
+                    implementation_id="computer-use-agent",
+                    build_id="computer-use-v1",
+                    timing_scope="end_to_end_verified_action",
+                    focus_policy="foreground",
+                    interaction_mode=interaction_mode,
+                    provenance="computer_use",
+                )
+            )
+        summary = benchmark.summarize_records(records)
+        self.assertEqual(len(summary["comparisons"]), 2)
+        self.assertEqual(
+            {item["interaction_mode"] for item in summary["comparisons"]},
+            {"keyboard", "pointer"},
+        )
+
+    def test_foreground_evidence_without_focus_policy_is_not_promoted(self):
+        record = benchmark.make_record(
+            task="focus-next-control",
+            lane="mac-control",
+            phase="measured",
+            sample=1,
+            duration_ms=10.0,
+            tool_calls=1,
+            recoveries=0,
+            verified=True,
+            user_help=False,
+            status="passed",
+            oracle="focus changed",
+            comparison_id="focus-legacy-v1",
+            target_fingerprint="target-v1",
+            state_fingerprint="state-v1",
+            foreground_oracle="foreground_unchanged",
+            foreground_state="preserved",
+        )
+        group = benchmark.summarize_records([record])["groups"][0]
+        self.assertFalse(group["foreground_complete"])
+        self.assertIn("focus policy", group["interpretation"])
 
     def test_hybrid_lane_is_an_explicit_provider_handoff_lane(self):
         record = benchmark.make_record(
@@ -315,9 +472,12 @@ class ControlBenchmarkTests(unittest.TestCase):
                 "verification": "passed",
             },
         }
+        status_payload = self.foreground_status_payload(name="Finder")
 
         def fake_run_json(command):
             calls.append(command)
+            if command[1:3] == ["control", "status"]:
+                return status_payload, 0.25
             return payload, 12.3456
 
         with tempfile.TemporaryDirectory() as directory:
@@ -348,13 +508,184 @@ class ControlBenchmarkTests(unittest.TestCase):
             self.assertEqual(records[0]["tool_calls"], 1)
             self.assertTrue(records[0]["verified"])
 
-        self.assertEqual(len(calls), 4)
+        action_calls = [command for command in calls if command[1:3] == ["control", "perform"]]
+        status_calls = [command for command in calls if command[1:3] == ["control", "status"]]
+        self.assertEqual(len(action_calls), 4)
+        self.assertEqual(len(status_calls), 8)
         self.assertEqual(
-            [command[command.index("--direction") + 1] for command in calls],
+            [command[command.index("--direction") + 1] for command in action_calls],
             ["down", "up", "down", "up"],
         )
-        self.assertIn("--identifier", calls[0])
-        self.assertNotIn("--lease-token", calls[0])
+        self.assertIn("--identifier", action_calls[0])
+        self.assertNotIn("--lease-token", action_calls[0])
+
+    def test_mac_scroll_runner_preserves_fixture_task_identity(self):
+        payload = {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {"route": "scroll", "verification": "passed"},
+            "outcome": {
+                "state": "verified_success",
+                "route": "scroll",
+                "verification": "passed",
+            },
+        }
+        status_payload = self.foreground_status_payload(name="System Settings")
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                macctl="/tmp/macctl",
+                app="System Settings",
+                role="AXScrollArea",
+                identifier="settings-scroll",
+                direction="down",
+                amount=1,
+                reset_direction="up",
+                reset_amount=1,
+                warmups=0,
+                samples=1,
+                sample_offset=3,
+                task="system-settings-accessibility-pane-scroll",
+                record_route="accessibility-scroll",
+                output=Path(directory) / "raw.jsonl",
+                comparison_id="phase3-system-settings-accessibility-scroll-v2",
+                target_fingerprint="system-settings-accessibility-content-scroll-v1",
+                state_fingerprint="system-settings-accessibility-top-v1",
+            )
+            def fake_run_json(command):
+                if command[1:3] == ["control", "status"]:
+                    return status_payload, 0.25
+                return payload, 7.25
+
+            with patch.object(benchmark, "run_json", side_effect=fake_run_json):
+                self.assertEqual(benchmark.run_mac_scroll(args), 0)
+
+            records = benchmark.load_records(args.output)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["task"], args.task)
+            self.assertEqual(records[0]["sample"], 4)
+            self.assertEqual(records[0]["route"], args.record_route)
+
+    def test_mac_scroll_runner_accepts_locator_digest_and_window_scope(self):
+        calls = []
+        payload = {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {"route": "scroll", "verification": "passed"},
+            "outcome": {
+                "state": "verified_success",
+                "route": "scroll",
+                "verification": "passed",
+            },
+        }
+        status_payload = self.foreground_status_payload(name="Pronto")
+
+        def fake_run_json(command):
+            calls.append(command)
+            if command[1:3] == ["control", "status"]:
+                return status_payload, 0.25
+            return payload, 8.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                macctl="/tmp/macctl",
+                app="Pronto",
+                role="AXScrollArea",
+                identifier=None,
+                locator_digest="redacted-locator-digest",
+                ancestor_digest="redacted-ancestor-digest",
+                geometry_digest="redacted-geometry-digest",
+                window_title="Pronto",
+                oracle="Pronto viewport changed",
+                direction="down",
+                amount=1,
+                reset_direction="up",
+                reset_amount=1,
+                warmups=0,
+                samples=1,
+                sample_offset=0,
+                output=Path(directory) / "raw.jsonl",
+                comparison_id="scroll-pronto-e2e-v1",
+                target_fingerprint="pronto-main-scroll-v1",
+                state_fingerprint="pronto-main-ready-v1",
+            )
+            with patch.object(benchmark, "run_json", side_effect=fake_run_json):
+                self.assertEqual(benchmark.run_mac_scroll(args), 0)
+
+            records = benchmark.load_records(args.output)
+            self.assertEqual(records[0]["oracle"], "Pronto viewport changed")
+
+        action_calls = [command for command in calls if command[1:3] == ["control", "perform"]]
+        self.assertIn("--locator-digest", action_calls[0])
+        self.assertIn("--ancestor-digest", action_calls[0])
+        self.assertIn("--geometry-digest", action_calls[0])
+        self.assertIn("--window-title", action_calls[0])
+        self.assertNotIn("--identifier", action_calls[0])
+
+    def test_foreground_status_comparison_is_redacted_and_fail_closed(self):
+        before = self.foreground_status_payload()
+        after = self.foreground_status_payload()
+        self.assertEqual(benchmark.foreground_status_identity(before), ("bundleID", "com.example.ForegroundApp"))
+        self.assertEqual(benchmark.foreground_status_state(before, after), "preserved")
+        self.assertTrue(benchmark.foreground_status_matches_target(before, "ForegroundApp"))
+        self.assertTrue(benchmark.foreground_status_matches_target(before, "com.example.ForegroundApp"))
+        self.assertFalse(benchmark.foreground_status_matches_target(before, "OtherApp"))
+        self.assertEqual(
+            benchmark.foreground_status_state(
+                before,
+                self.foreground_status_payload("com.example.OtherApp"),
+            ),
+            "changed",
+        )
+        self.assertEqual(
+            benchmark.foreground_status_state(before, {"status": "succeeded"}),
+            "unavailable",
+        )
+
+    def test_mac_scroll_runner_requires_named_target_to_be_frontmost(self):
+        payload = {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {"route": "scroll", "verification": "passed"},
+            "outcome": {
+                "state": "verified_success",
+                "route": "scroll",
+                "verification": "passed",
+            },
+        }
+        status_payload = self.foreground_status_payload(name="OtherApp")
+
+        def fake_run_json(command):
+            if command[1:3] == ["control", "status"]:
+                return status_payload, 0.25
+            return payload, 7.25
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                macctl="/tmp/macctl",
+                app="Finder",
+                role="AXScrollArea",
+                identifier="settings-scroll",
+                direction="down",
+                amount=1,
+                reset_direction="up",
+                reset_amount=1,
+                warmups=0,
+                samples=1,
+                sample_offset=0,
+                output=Path(directory) / "raw.jsonl",
+                comparison_id="scroll-frontmost-v1",
+                target_fingerprint="finder-scroll-v1",
+                state_fingerprint="finder-ready-v1",
+            )
+            with patch.object(benchmark, "run_json", side_effect=fake_run_json):
+                self.assertEqual(benchmark.run_mac_scroll(args), 1)
+
+            record = benchmark.load_records(args.output)[0]
+            self.assertEqual(record["status"], "blocked")
+            self.assertFalse(record["verified"])
+            self.assertEqual(record["foreground_state"], "unavailable")
+            self.assertIn("named target", record["notes"])
 
     def test_mac_focus_uses_atomic_app_control_for_prime_and_samples(self):
         calls = []
@@ -372,6 +703,15 @@ class ControlBenchmarkTests(unittest.TestCase):
                                 "state": "passed",
                                 "focusChanged": True,
                                 "focusAfter": {"role": "AXTextField"},
+                                "foregroundBefore": {
+                                    "bundleID": "com.apple.systempreferences",
+                                    "path": "/System/Applications/System Settings.app",
+                                },
+                                "foregroundAfter": {
+                                    "bundleID": "com.apple.systempreferences",
+                                    "path": "/System/Applications/System Settings.app",
+                                },
+                                "foregroundChanged": False,
                             },
                         },
                     },
@@ -399,6 +739,74 @@ class ControlBenchmarkTests(unittest.TestCase):
             [command[3] for command in calls],
             ["next-control", "previous-control", "next-control", "previous-control"],
         )
+
+    def test_mac_focus_supports_named_item_navigation_with_explicit_reset(self):
+        calls = []
+
+        def fake_run_json(command):
+            calls.append(command)
+            return (
+                {
+                    "status": "succeeded",
+                    "evidence": [{"source": "macctld"}],
+                    "result": {
+                        "route": "keyboard",
+                        "verification": {
+                            "state": "passed",
+                            "focusChanged": True,
+                            "focusAfter": {"role": "AXButton"},
+                            "foregroundBefore": {
+                                "bundleID": "com.apple.Notes",
+                                "path": "/System/Applications/Notes.app",
+                            },
+                            "foregroundAfter": {
+                                "bundleID": "com.apple.Notes",
+                                "path": "/System/Applications/Notes.app",
+                            },
+                            "foregroundChanged": False,
+                        },
+                    },
+                },
+                1.0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                macctl="/tmp/macctl",
+                app="Notes",
+                action="next-item",
+                reset_action="previous-item",
+                task="focus-next-notes-item-v1",
+                oracle="Accessibility focus changed to the next Notes item",
+                warmups=0,
+                samples=1,
+                sample_offset=0,
+                output=Path(directory) / "raw.jsonl",
+                comparison_id="phase2-focus-notes-v1",
+                target_fingerprint="notes-focus-v1",
+                state_fingerprint="notes-focus-ready-v1",
+            )
+            with patch.object(benchmark, "run_json", side_effect=fake_run_json):
+                self.assertEqual(benchmark.run_mac_focus(args), 0)
+            record = benchmark.load_records(args.output)[0]
+
+        self.assertEqual(record["task"], "focus-next-notes-item-v1")
+        self.assertEqual(record["oracle"], "Accessibility focus changed to the next Notes item")
+        self.assertEqual(record["focus_policy"], "foreground")
+        self.assertEqual(record["interaction_mode"], "keyboard")
+        self.assertEqual(
+            [command[3] for command in calls],
+            ["next-item", "previous-item", "next-item", "previous-item"],
+        )
+
+    def test_mac_focus_rejects_same_action_as_reset(self):
+        args = SimpleNamespace(
+            sample_offset=0,
+            action="next-item",
+            reset_action="next-item",
+        )
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            benchmark.run_mac_focus(args)
 
     def test_mac_focus_rejects_negative_sample_offset(self):
         args = SimpleNamespace(sample_offset=-1)
@@ -454,6 +862,75 @@ class ControlBenchmarkTests(unittest.TestCase):
         self.assertEqual(record["status"], "blocked")
         self.assertEqual(record["tool_calls"], 1)
         self.assertIn("command failed with exit 1", record["notes"])
+
+    def test_run_json_preserves_structured_provider_failure_metadata(self):
+        payload = {
+            "status": "blocked",
+            "error": {
+                "code": "control_verification_unavailable",
+                "details": {
+                    "failure_class": "verification_unavailable",
+                    "route": "keyboard",
+                    "verification": "foreground_only",
+                    "fresh_state_required": True,
+                },
+            },
+            "outcome": {
+                "state": "verification_unavailable",
+                "provider": "mac_control",
+                "next_action": "refresh_state_before_retrying",
+            },
+        }
+        completed = SimpleNamespace(returncode=1, stdout=json.dumps(payload), stderr="")
+        with patch.object(benchmark.subprocess, "run", return_value=completed):
+            with self.assertRaises(benchmark.CommandFailure) as raised:
+                benchmark.run_json(["/tmp/macctl", "control", "perform", "next-control", "--json"])
+
+        self.assertEqual(raised.exception.payload, payload)
+        note = benchmark.summarize_command_failure(raised.exception)
+        self.assertIn("code=control_verification_unavailable", note)
+        self.assertIn("failure_class=verification_unavailable", note)
+        self.assertIn("fresh_state_required=True", note)
+        self.assertIn("next_action=refresh_state_before_retrying", note)
+
+    def test_mac_focus_records_structured_provider_failure_without_raw_output(self):
+        payload = {
+            "status": "blocked",
+            "error": {
+                "code": "control_verification_unavailable",
+                "details": {
+                    "failure_class": "verification_unavailable",
+                    "route": "keyboard",
+                    "verification": "foreground_only",
+                    "fresh_state_required": True,
+                },
+            },
+            "outcome": {
+                "state": "verification_unavailable",
+                "next_action": "refresh_state_before_retrying",
+            },
+        }
+        args = SimpleNamespace(
+            macctl="/tmp/macctl",
+            app="WhatsApp",
+            warmups=0,
+            samples=1,
+            sample_offset=0,
+            output=Path(tempfile.mkdtemp()) / "raw.jsonl",
+        )
+        with patch.object(
+            benchmark,
+            "run_json",
+            side_effect=benchmark.CommandFailure(1, payload),
+        ):
+            self.assertEqual(benchmark.run_mac_focus(args), 1)
+
+        record = benchmark.load_records(args.output)[0]
+        self.assertEqual(record["status"], "blocked")
+        self.assertIn("failure_class=verification_unavailable", record["notes"])
+        self.assertIn("fresh_state_required=True", record["notes"])
+        self.assertIn("next_action=refresh_state_before_retrying", record["notes"])
+        self.assertIn("verification=foreground_only", record["notes"])
 
     def test_mac_batch_focus_uses_one_daemon_batch_per_phase_action(self):
         calls = []
@@ -584,6 +1061,67 @@ class ControlBenchmarkTests(unittest.TestCase):
         self.assertFalse(benchmark.focus_established(payload))
         payload["result"]["verification"]["focusAfter"] = {"role": "AXTextField"}
         self.assertTrue(benchmark.focus_established(payload))
+
+    def test_foreground_state_is_fail_closed_and_detects_identity_change(self):
+        payload = {
+            "status": "succeeded",
+            "evidence": [{"source": "macctld"}],
+            "result": {
+                "route": "keyboard",
+                "verification": {
+                    "state": "passed",
+                    "focusChanged": True,
+                    "foregroundBefore": {"bundleID": "com.example.target", "path": "/Target.app"},
+                    "foregroundAfter": {"bundleID": "com.example.target", "path": "/Target.app"},
+                    "foregroundChanged": False,
+                },
+            },
+        }
+        self.assertEqual(benchmark.foreground_state(payload), "preserved")
+        self.assertTrue(benchmark.focus_verified(payload))
+
+        payload["result"]["verification"]["foregroundAfter"] = {
+            "bundleID": "com.example.other",
+            "path": "/Other.app",
+        }
+        self.assertEqual(benchmark.foreground_state(payload), "changed")
+        self.assertFalse(benchmark.focus_verified(payload))
+
+        del payload["result"]["verification"]["foregroundBefore"]
+        self.assertEqual(benchmark.foreground_state(payload), "unavailable")
+
+    def test_foreground_required_group_cannot_rank_without_preserved_samples(self):
+        records = [
+            benchmark.make_record(
+                task="focus-next-control",
+                lane="mac-control",
+                phase="measured",
+                sample=1,
+                duration_ms=10.0,
+                tool_calls=1,
+                recoveries=0,
+                verified=True,
+                user_help=False,
+                status="passed",
+                oracle="focus changed",
+                comparison_id="focus-foreground-v1",
+                app="Target",
+                target_fingerprint="target-v1",
+                state_fingerprint="state-v1",
+                implementation_id="mac-control",
+                build_id="daemon-v1",
+                timing_scope="end_to_end_verified_action",
+                foreground_oracle="foreground_unchanged",
+                foreground_state="unavailable",
+                provenance="daemon_executed",
+            )
+        ]
+        summary = benchmark.summarize_records(records)
+        group = summary["groups"][0]
+        comparison = summary["comparisons"][0]
+        self.assertFalse(group["foreground_complete"])
+        self.assertEqual(group["interpretation"], "focus policy or foreground-preservation oracle not satisfied")
+        self.assertEqual(comparison["status"], "insufficient_evidence")
 
 
 if __name__ == "__main__":

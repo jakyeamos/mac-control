@@ -135,6 +135,14 @@ Phase 1 evidence snapshot:
   Computer Use; Finder scroll failed closed with a machine-readable
   Computer Use recommendation and fresh-state requirement rather than being
   silently retried.
+- The currently running user-facing inventory contained no app classified as
+  the explicit `swiftui` archetype. System Settings remains classified under
+  its dedicated `system_settings` overlay, and the next available live
+  candidate, Calculator, classified as `native_appkit`; no app was launched to
+  manufacture a SwiftUI sample. Read-only binary linkage showed SwiftUI
+  dependencies for Calculator and Notes, but that is not behavioral proof of
+  a SwiftUI accessibility surface; both therefore remain `native_appkit`
+  until a visible task-specific SwiftUI behavior is independently verified.
 
 Phase 1 remains active until the not-observed targets have legitimate
 already-running evidence and task-specific capability verification is added;
@@ -176,7 +184,7 @@ Exit gate:
 Phase 2 pilot evidence:
 
 - The current paired report is
-  [`phase2-summary-v3`](../benchmarks/results/phase2-summary-v3.md),
+  [`phase2-summary-v4`](../benchmarks/results/phase2-summary-v4.md),
   with raw records retained beside it. The atomic System Settings focus task
   passed 3/3 in each lane: Mac Control median 134.924 ms (p95 135.900),
   direct UI scripting median 479.491 ms (p95 479.767), and Computer Use
@@ -198,6 +206,82 @@ Phase 2 pilot evidence:
   under the same end-to-end timing boundary. Pronto independently passed 3/3
   Mac Control focus samples, but its Computer Use state did not expose a
   stable focused-element oracle, so it remains unpaired evidence.
+- Discord added an Electron paired focus comparison: Mac Control passed 3/3
+  with a 183.730 ms median (185.749 ms p95) versus Computer Use at 7,577.616
+  ms median (8,121.376 ms p95), a 41.24x speedup under the same
+  `agent_action_plus_verification` boundary. Computer Use used fresh state,
+  Tab, fresh focus readback, and a verified Shift-Tab reset for every sample.
+  The first Mac Control precondition attempt was retained as a separate
+  transient blocked record; it was not mixed into the comparable lane. See
+  the [Discord pair summary](../benchmarks/results/phase2-focus-discord-v1-summary.md).
+- WhatsApp added a second paired cross-app focus comparison: Mac Control
+  passed 3/3 with a 674.813 ms median (744.673 ms p95) versus Computer Use at
+  7,372.648 ms median (8,189.623 ms p95), a 10.93x speedup under the same
+  `agent_action_plus_verification` boundary. Its initial reset failure was
+  preserved as blocked evidence, then a fresh 1-warmup/3-sample run passed. See
+  the [WhatsApp pair summary](../benchmarks/results/phase2-focus-whatsapp-v1-summary.md).
+- Notes added a native AppKit focus comparison using the app's verified
+  `Control-Tab`/`Control-Shift-Tab` item-navigation pair because plain Tab did
+  not produce an observable focus transition in the current editor state. The
+  original 3/3 pair passed with Mac Control at a 185.577 ms median (241.794 ms
+  p95) versus Computer Use at 10,493.507 ms median (12,942.028 ms p95), a
+  56.55x median and 53.53x p95 speedup under the same
+  `agent_action_plus_verification` boundary. The Mac Control lane then passed
+  an expanded 7/7 run at a 152.531 ms median (192.556 ms p95). The matched
+  Computer Use expansion was stopped after one valid measured sample when the
+  second inverse-reset readback failed; the action focus change was observed,
+  but the full sample could not be verified and no new speedup claim is made.
+  The initial plain-Tab attempts remain separate blocked/unpaired evidence; see
+  the [original Notes pair summary](../benchmarks/results/phase2-focus-notes-v1-summary.md)
+  and the [expanded Notes evidence](../benchmarks/results/phase2-focus-notes-v2-summary.md).
+- Calculator added an additional live native-AppKit focus result: Mac Control
+  passed 3/3 at a 127.745 ms median (131.340 ms p95), with foreground unchanged
+  and verified inverse resets. The fresh Computer Use state exposed no
+  focused-element marker, so no Computer Use key was dispatched against the
+  calculator value; this remains unpaired evidence rather than a provider
+  speed claim. See the [Calculator evidence summary](../benchmarks/results/phase2-focus-calculator-v1-summary.md).
+- The benchmark runner now preserves bounded daemon failure metadata—error
+  code, failure class, route, verification mode, outcome, fresh-state flag,
+  and next action—when a structured command exits non-zero. It still excludes
+  raw command output and UI content; a live WhatsApp
+  `verification_unavailable` response now records its refresh requirement
+  instead of collapsing to a generic exit code.
+- Focus benchmark records now enforce the shared foreground oracle. The daemon
+  `foregroundBefore`/`foregroundAfter` identities and `foregroundChanged` flag
+  are classified as `preserved`, `changed`, or `unavailable`; every prime,
+  measured action, and inverse reset must preserve the foreground before a
+  sample can be ranked. The comparison key includes that oracle, so a future
+  Computer Use or hybrid lane must independently provide matching evidence.
+- A fresh foreground-aware Calculator run passed all 3 measured samples at a
+  231.570 ms median (258.234 ms p95), with 3/3 foreground-preserved samples,
+  verified inverse resets, zero recoveries, and one daemon-executed keyboard
+  call per sample. Its report remains `insufficient_evidence` for comparison
+  ranking because no safe Computer Use focused-element marker was available;
+  no Computer Use action was dispatched. This is new oracle-complete Mac
+  Control evidence, not a cross-provider speed claim.
+- Pronto semantic scroll now has explicit provider-handoff evidence: Mac
+  Control stopped fail-closed with `action_unavailable` after uniquely
+  resolving the audited `AXScrollArea`; the response included
+  `fallback_allowed: true`, `fresh_state_required: true`,
+  `recommended_provider: computer_use`, and
+  `local_fallback_dispatched: false`. Computer Use completed 3/3 fresh-state
+  scrolls with a median of 3,693.458 ms and p95 of 4,186.392 ms. The AX tree
+  did not expose a structural delta, so each Computer Use postcondition was
+  confirmed with a secondary visual viewport readback. This is not a paired
+  speed claim because Mac Control produced zero verified samples. The raw
+  records are `phase2-scroll-pronto-mac-control.jsonl` and
+  `phase2-scroll-pronto-computer-use.jsonl`.
+- Pronto locator and capability hardening now keeps incidental
+  `AXScrollToVisible` descendants out of the semantic-scroll locator set and
+  requires a directional AX scroll action for promotion. A fresh deep-read-only
+  audit completed with 8,659 nodes and no truncation, exposed one
+  `AXScrollArea` locator, and persisted `semantic_scroll` as a candidate with
+  `directional_scroll_action_not_observed`. The live resolver reaches the
+  actual provider boundary and hands off to Computer Use rather than reporting
+  a false ambiguity. No speed claim is made from this probe.
+- The scroll benchmark harness accepts either a stable identifier or a
+  redacted locator digest, plus optional window scope, and persists blocked
+  provider-handoff outcomes instead of dropping them.
 - Notes exposed a native-app verification gap: the keyboard route returned
   `verification_unavailable`/`foreground_only`. The benchmark harness now
   persists this as a blocked record instead of dropping the failed setup. No
@@ -226,6 +310,30 @@ Goal 2 deliverables:
   success rate.
 - Background-target fixtures prove that the named target changes while an
   unrelated foreground app remains unchanged.
+- Comparisons include an explicit `focus_policy` (`foreground` or `background`)
+  and `interaction_mode` (`keyboard`, `pointer`, `scroll`, `drag`, or `mixed`),
+  so foreground-target and background-target work cannot be paired accidentally.
+- Computer Use uses its provider-natural pointer/visual, scroll, or drag route
+  for broad task comparisons. Tab/Shift-Tab remains separately labeled
+  keyboard-parity evidence.
+
+Phase 3 correction evidence:
+
+- A sequential System Settings readback showed that Computer Use can address a
+  named background app with `sky.press_key` while preserving ChatGPT as the
+  unrelated foreground app. That sample is useful background-target evidence,
+  but it is not comparable to the foreground Mac Control lane. The benchmark
+  contract now records the distinction instead of treating the two runs as one
+  focus oracle. The existing Tab run remains exploratory keyboard-task evidence;
+  it is not a representative Computer Use result for the broader comparison.
+- A fresh System Settings `Desktop & Dock` handoff fixture exercised the
+  provider contract end to end: Mac Control detected presentation-only AX
+  actions in 490 ms and returned an actionable Computer Use handoff without
+  dispatching a native action; Computer Use then re-read the state, clicked the
+  uniquely identified row, and verified the selected pane in 11.398 s. This is
+  recovery evidence, not a speed claim: Mac Control did not complete the task
+  and the foreground oracle was unavailable at both action boundaries, so the
+  persisted comparison remains `insufficient_evidence`.
 
 Exit gate:
 

@@ -139,6 +139,7 @@ only as a live command argument; it is never written to the raw result:
 ```sh
 python3 scripts/control_benchmark.py run-mac-scroll \
   --app Finder --role AXScrollArea --identifier '_NS:23' \
+  --task scroll-main \
   --direction down --amount 1 --reset-direction up --reset-amount 1 \
   --comparison-id scroll-finder-e2e-v1 \
   --target-fingerprint finder-main-scroll-v1 \
@@ -147,6 +148,20 @@ python3 scripts/control_benchmark.py run-mac-scroll \
   --timing-scope end_to_end_verified_action --provenance daemon_executed \
   --output benchmarks/results/raw-mac-scroll-e2e.jsonl
 ```
+
+`--task` is optional and defaults to `scroll-main`. Use a task-specific value
+when extending an existing paired fixture so daemon-executed samples retain
+the same comparison identity; this keeps the timing live without recording
+caller-supplied metrics.
+`--record-route` is also optional and defaults to `scroll`; use it only when
+continuing a fixture whose redacted route label is already established under a
+different historical name. The runner samples `macctl control status --json`
+before and after each prime, measured action, and inverse reset outside the
+timed interval. For `focus_policy=foreground`, both snapshots must identify
+the named target and remain unchanged; otherwise the sample is unavailable or
+failed and does not join a ranked pair. It records
+`foreground_oracle=foreground_unchanged` for compatibility with existing
+fixtures while enforcing the stronger target-frontmost check.
 
 Computer Use samples should start the timer before fresh state discovery,
 locate the target from that fresh state, scroll once, and stop only after a
