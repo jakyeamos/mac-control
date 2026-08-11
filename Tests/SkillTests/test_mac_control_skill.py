@@ -20,6 +20,13 @@ class MacControlSkillTests(unittest.TestCase):
         for marker in (
             "task-specific rather than a fixed",
             "fresh manifest exists for the exact app identity",
+            "`mac-control-task-manifest/v4`",
+            "self-attested `criteria` booleans",
+            "Quality Runner must resolve\nevery source reference to an implementation file",
+            "Treat v1 through v3 as declaration-only migration formats",
+            "Keep rendered web content on a browser connector",
+            "Accessibility candidates need a stable identifier",
+            "require\nan explicit fresh-state handoff",
             "selector's addressability metadata",
             "one unique\n`AXTextField` with subrole `AXSearchField`",
             "Never fall back to\nrepeated `next-control`/Tab traversal",
@@ -88,6 +95,9 @@ class MacControlSkillTests(unittest.TestCase):
         text = ROUTING.read_text(encoding="utf-8")
         for marker in (
             "Read `AppleKeyboardUIMode`",
+            "claims web content through native Accessibility",
+            "score `0/8`",
+            "typed v4 semantic claims with source grounding",
             "Move focus to the next control",
             "one unique `AXTextField`/`AXSearchField`",
             "Do not approximate search with repeated `Tab`/`next-control`",

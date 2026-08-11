@@ -26,6 +26,14 @@ permissions, socket ownership, receipt storage, approval safety, Mac GUI
 smokes are missing. It does not launch a workflow or alter a device to
 manufacture evidence.
 
+The authorization-notice dimension additionally requires fresh source and installed-daemon
+evidence for the four `control.authorization.*` routes, safe-field redaction and limits,
+expiry/deduplication/bind/resolve behavior, owner-only transport peer capture, provenance
+downgrades on missing or mismatched identity, Control Center attention presentation, and
+notification deduplication. This is explanatory context only: the native macOS Allow/Deny
+decision remains user-controlled, and an external unannounced dialog cannot be attributed by
+Mac Control in v1.
+
 The release report also includes `agent.contract`. That check requires the
 provider-neutral outcome surface, capability discovery, bounded control batch,
 and daemon-executed route-benchmark provenance to be present in the live daemon
@@ -206,17 +214,44 @@ without retry. Raw and visual routes require manifest opt-in.
 
 Tree and audit responses are bounded, redacted, local-only diagnostics. They
 exclude AX values, private text, screenshots, and OCR, and receipts retain only
-the evidence kind. Semantic scroll requires a unique `AXScrollArea` identifier
-and re-resolves the container after the action.
+the evidence kind. Semantic scroll requires a unique `AXScrollArea` selector
+and re-resolves the container after the action. When local descriptors repeat,
+the audit exposes a redacted `ancestorDigest` that can be supplied alongside
+`identityDigest`; it may also expose a redacted `geometryDigest` derived from
+the element bounds. These selectors choose one structural target without
+persisting raw AX references, raw coordinates, or visible ancestor text. If
+duplicates remain, capability promotion stays blocked/candidate rather than
+selecting by index. An `AXScrollArea` without a directional AX scroll action
+also remains a candidate: structural presence alone is not proof that the
+provider can perform a requested direction.
 
 `control.capabilities` is the latency-sensitive route probe: it may read a
 cached broad profile but never walks the Accessibility tree. It resolves the
 declarative archetype baseline and bundle overlay before consulting the bounded
-current-session route cache. The separate
+current-session route cache. Bundle overlays can also expose typed
+`advertisedCapabilities` from public app disclosures. These entries are
+`candidate_only`, remain separate from measured route evidence, and require a
+task-specific postcondition before use. The separate
 `control.capability_audit` surface performs one bounded, read-only AX/provider
 audit and persists only stable, redacted locator descriptors keyed by app
 identity/version, OS/provider state, and tree signature. It does not dispatch
 actions and is not route-ranking authority.
+
+The deep audit both matches the current bundle overlay's declared disclosure
+signals and performs generic `capabilityLeads` discovery. Generic discovery is
+limited to app-owned menus, controls, dialogs, help, onboarding, and
+accessibility surfaces; it recognizes keyboard navigation, shortcut catalogs,
+quick switchers, command palettes, keyboard search, and adjacent split keycaps.
+Ordinary content text is excluded. Leads persist only normalized shortcut and
+signal metadata plus hashed locator identities, never disclosure text. A
+conflicting shortcut remains ambiguous and every newly discovered lead remains
+a candidate. Task-specific verification can promote or demote a matching lead,
+while route execution still requires independent measured-route evidence.
+No match is absence of evidence, not negative evidence, because a transient
+surface may have been dismissed. The Discord overlay remains a high-confidence
+reconciliation specialization for Tab/arrow navigation, Command-/ shortcut
+list, and Command-K Quick Switcher; it is no longer a prerequisite for generic
+discovery.
 
 `control.capability_audit_batch` is a separate bounded inventory surface. It
 audits at most 24 explicit or catalog-selected installed apps, only when they
@@ -231,6 +266,18 @@ recovery is fresh `get_app_state`, fresh unique scroll-target lookup,
 Computer Use `sky.scroll`, and post-scroll state verification. Ambiguous
 targets and failed verification remain blocked; the release gate does not
 count a dispatched input event as a successful scroll.
+Context-menu verification failures expose the same handoff boundary as an
+`outcome.handoff_plan`: the receiving caller must refresh state, relocate the
+target uniquely, perform the right-click through Computer Use, and verify the
+rendered menu while preserving the foreground oracle. The plan is redacted and
+caller-executed; it never authorizes a native replay or stores raw selector/menu
+labels.
+
+Daemon route benchmarks also record bounded task-specific negative or
+ambiguous route-health evidence when an existing matching profile or manifest
+is present. That evidence expires the failed route for subsequent selection
+without creating or updating benchmark metrics; an unverified reset or
+measured sample still prevents manifest persistence.
 
 ## Checkpointed task and adapter evidence
 

@@ -33,6 +33,16 @@ Receipts and logs are owner-only, atomic, retention-bounded, and redacted.
 Never persist credentials, OCR text, screenshots, image bytes, message bodies,
 sources for permissions or secrets.
 
+Authorization notices are a separate short-lived owner-only store, bounded to pending
+requests and replay guards. They accept only safe summaries and allowlisted `codex://`
+source references; raw commands, arguments, prompt bodies, passwords, tokens, private input,
+and inherited environment values never cross this boundary. Socket peer PID, executable, and
+signing metadata are daemon-observed and remain distinct from caller-declared context.
+Missing or mismatched peer identity is `unverified`; `attested` is origin correlation only,
+never a safety or approval decision. `resolve` records completion and never operates a native
+Allow/Deny control. The Control Center may open a source only through a registered Codex
+opener, and otherwise displays the reference without opening it.
+
 Warm-path manifests are owner-only, app/task/version/target scoped, and retain
 only route metrics, permission names, freshness, and verification metadata.
 Unmeasured or stale candidates are not eligible. Accessibility tree and audit

@@ -10,14 +10,17 @@ task.
 | --- | --- | --- |
 | A mature CLI or API performs the exact operation | Direct interface | Avoid GUI activation and input overhead. |
 | A browser DOM connector can identify and verify the page element | Browser DOM | Keep semantic web actions in the DOM. |
+| An ideal-state manifest claims web content through native Accessibility | Reject the manifest claim and use a browser connector | A native route observing browser chrome does not prove semantic control of rendered page content. |
 | A native app exposes a declared typed Mac Control adapter | Mac Control adapter | Use the narrow declared operation and its verification. |
 | A task has a fresh measured candidate for this app/version/target | The eligible manifest candidate | Rank complete-action latency, p95 latency, then recoveries after all gates pass. |
+| An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
+| Rendered browser page content is the target | Browser connector handoff | Declare `target_surface=web_content`; Mac Control returns a tab-addressed provider handoff without activating browser UI. |
 | A broad profile is missing, stale, or explicitly needed for planning | `control capability-audit` | Perform one bounded, read-only AX/provider audit and persist stable descriptors. |
 | A bounded inventory is needed across installed applicable apps | `control capability-audit-batch` | Audit up to 24 already-running apps, persist resumable per-app receipts, and never launch or dispatch input. |
 | Several verified actions target one foreground app | `control batch` | Hold one bounded app lease, cache only the route lookup, and revalidate every step. |
 | A native control has stable role, title, or identifier addressability | The explicitly requested semantic route | Use the stable address, without assuming it outranks another route globally. |
-| A native context menu must be opened and observed | Accessibility `context-menu` | Resolve one target, expose `AXShowMenu`, and require the menu plus expected labels before reporting success. |
+| A native context menu must be opened and observed | Accessibility `context-menu` | Resolve one target, expose `AXShowMenu`, and require one rendered menu candidate, rendered items, and expected labels before reporting success. |
 | A redacted tree or manifest exposes one unique `AXTextField`/`AXSearchField` beside a repeated list | Atomic `search` with `search_shortcut` and the `keyboard` route | Resolve the structural field, use the named search shortcut once, replace ephemeral query text, and verify focus before completing query entry. |
 | The task is a shortcut, menu, focus move, or repeated navigation | The declared named keyboard candidate | Use bounded named input with foreground and focus verification when that candidate is selected. |
 | A target requires generic Accessibility observation | The declared Accessibility candidate | Preserve semantic targeting with bounded observation and post-action verification. |
@@ -28,6 +31,8 @@ task.
 
 - Read `AppleKeyboardUIMode`: use `/usr/bin/defaults read`; the direct read fully covers the
   fact and is faster than daemon-backed control.
+- A v3 repository manifest says all eight criteria are true: report eight legacy declarations,
+  score `0/8`, and migrate each task to typed v4 semantic claims with source grounding.
 - Move focus to the next control in System Settings: use atomic `macctl control perform
   next-control --app "System Settings" --confirm --json`; there is no mature direct interface
   for that visible focus transition.
@@ -44,6 +49,14 @@ task.
   `AXTextField` named `Tab-group title`, and require group-label readback after naming it.
 - Open a native context menu with a known target: use `control perform context-menu` with a
   window-scoped selector when needed; do not infer that this mutates browser tabs or groups.
+- If the context-menu postcondition reports zero rendered geometry or ambiguous menu
+  candidates, treat the native observation as unavailable and hand off to the eligible
+  provider after refreshing state; the outcome should recommend `computer_use` with
+  `fresh_state_required=true` and `fallback_allowed=false`; do not treat `AXShowMenu` or
+  `visible=true` alone as proof or blindly replay the native action. If
+  `outcome.handoff_plan` is present, execute its ordered fresh-state steps using the
+  original request as ephemeral input; the plan contains only redacted target identity
+  fields and expected-item digests.
 - Click a webpage button when a healthy browser DOM connector can identify it: use the browser
   connector, not Mac Control.
 - Enter a password or other private text: do not use raw keyboard send; use an approval-gated
@@ -57,6 +70,9 @@ task.
   route for that action; apply the Mac Control task manifest and eligibility gates.
 - A known target is many focus moves away: prefer direct semantic Accessibility. Keyboard
   wins most often for shortcuts and repetitive navigation, not every distant known target.
+- A task can accept a custom shortcut but none is assigned: record the verified customization
+  surface without claiming a runnable shortcut candidate. Add the candidate only after an
+  assigned chord is read back and can use the task's independent postcondition.
 - A search field is missing, ambiguous, not structurally addressable, or the named shortcut
   does not verify focus: stop. Do not approximate search with repeated `Tab`/`next-control`
   actions, and do not treat a dispatched shortcut as completion.
@@ -87,6 +103,12 @@ task.
 - If the handoff requires Computer Use, do not pass the stale AX target across providers:
   call `get_app_state`, perform a fresh unique-element lookup, call `sky.scroll`, then
   re-read and verify the viewport. If the target is ambiguous, stop instead.
+- If the user must remain hands-off across multiple actions or providers, start one explicit
+  bounded `control hands-off begin --confirm` session before the run. Pass its opaque
+  `session_id` to each native action or batch, heartbeat before the advertised interval, and
+  end it after the final verification. `Hands Off` is a persistent user cue; `Focusing` and
+  `Focused` without that session are only transient one-shot notices. Expiry, Stop & Release,
+  or shutdown clears the session.
 - `control.batch` is deliberately not a universal action ladder. It rejects semantic scroll,
   stops on the first unverified step, and always reports completed count and lease release.
 - Full Keyboard Access or a required TCC grant is missing: report `blocked` and the exact user
@@ -108,6 +130,11 @@ task-specific verification -> profile update or invalidation. A changed app vers
 provider state, or audited tree invalidates the matching profile. Stale elements, failed
 actions, and failed verification demote or stale the relevant profile; ambiguous targets remain
 candidates. Cached entries contain stable identity descriptors and digests, not raw AX objects.
+The broad audit may also emit generic `capabilityLeads` from app-owned menus, controls, dialogs,
+help, onboarding, and accessibility disclosures without an app overlay. These leads retain only
+normalized shortcut and signal categories, confidence, verification requirements, and locator
+digests. Ordinary content text is excluded, conflicting shortcuts stay ambiguous, and no lead is
+route authority until task verification and normal measured-route admission both succeed.
 If a recursive deep audit reaches its bounded ceiling, the daemon may partition discovered AX
 windows into bounded top-level pages. Complete window/page coverage can promote the broad profile;
 omitted windows, omitted pages, or a truncated page remain stale and are surfaced as audit evidence.
@@ -149,6 +176,22 @@ latencies cover daemon route execution, not CLI process or socket startup. Selec
 median action latency and requires at least three verified samples. The manifest is bound to the
 app/version, OS version, provider state, task, target fingerprint, and verification oracle, plus
 the Accessibility tree signature when one was audited. A context mismatch requires rebenchmarking.
+When a native app does not expose a useful plain-Tab transition, use the repository comparison
+runner's named focus action with its explicit inverse reset, such as
+`run-mac-focus --action next-item --reset-action previous-item`; pair it with the same fresh-state
+focus oracle in the non-Mac-Control lane. The runner's oracle includes foreground preservation:
+every daemon response must provide matching `foregroundBefore` and `foregroundAfter` identities
+with `foregroundChanged == false`, including the inverse reset. Missing evidence is unavailable,
+and a foreground change invalidates the sample. Manual/provider-handoff records must use the same
+`foreground_oracle` and explicitly report `foreground_state=preserved` before they can join a
+foreground-safe comparison; old records without that field are not retroactively promoted.
+The benchmark comparison key also includes `focus_policy` (`foreground` or
+`background`) and `interaction_mode` (`keyboard`, `pointer`, `scroll`, `drag`,
+or `mixed`). A foreground policy requires the named target to be frontmost;
+a background policy is only valid when the unrelated foreground identity is
+preserved. Use provider-natural Computer Use pointer/visual, scroll, or drag
+actions for the broad comparison. Keep Tab/Shift-Tab as separately labeled
+keyboard-task evidence rather than treating it as representative Computer Use.
 
 For semantic scroll, benchmark the exact AX route rather than registering caller-supplied timing.
 The identifier is optional when role-only resolution returns exactly one scroll area:
@@ -170,6 +213,18 @@ Use `route register` only when explicitly recording external metadata; its
 Caller-supplied candidates remain inventory-only and cannot win warm-path selection. The
 daemon-executed benchmark measures the complete action, including route dispatch, verification,
 and cleanup, so warm-path ranking is not based on caller-reported timings.
+The repository end-to-end comparison runner also accepts `--task` on
+`run-mac-scroll` (default `scroll-main`) so a live daemon sample can extend a
+task-specific paired fixture without changing its comparison identity. Its
+optional `--record-route` only preserves a historical redacted label; it does
+not change the executed daemon route. The runner samples the redacted
+foreground identity through `macctl control status --json` before and after
+each action and inverse reset, outside the timed route. For a foreground
+fixture, both snapshots must identify the named target and remain unchanged;
+missing target identity, missing status, or a changed identity fails closed.
+It records `foreground_oracle=foreground_unchanged` for compatibility with
+existing fixtures, so every ranked scroll sample remains foreground-comparable
+with the paired provider lane.
 
 App routing policy comes from a provider-neutral archetype profile plus declarative bundle
 overlays. The current-session cache stores the selected route and stable identity descriptors,

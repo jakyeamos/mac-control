@@ -130,6 +130,8 @@ def _errors_for_mac_control_skill() -> list[str]:
         "fresh manifest exists for the exact app identity",
         "selector's addressability metadata",
         "Visual and coordinate candidates require explicit task-manifest opt-in",
+        "mac-control-task-manifest/v4",
+        "Every task also declares shortcut acceleration",
         "keyboard_focus_changed",
         "lease_released",
         "result.verification.state",
