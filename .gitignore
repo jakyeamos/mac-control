@@ -3,5 +3,6 @@
 .DS_Store
 .aios/
 coverage/
+*.profraw
 __pycache__/
 *.pyc
