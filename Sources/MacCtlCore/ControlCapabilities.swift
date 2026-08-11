@@ -19,12 +19,45 @@ public enum MacAppArchetypeClassifier {
     }
 }
 
+/// The caller's intended control boundary. Browser chrome remains macOS app
+/// UI; rendered webpage content belongs to the tab-addressed browser provider.
+public enum ControlTargetSurface: String, Codable, Equatable, CaseIterable {
+    case macAppUI = "mac_app_ui"
+    case webContent = "web_content"
+}
+
+public struct ControlProviderHandoffRequired: Error, LocalizedError, Equatable {
+    public let targetSurface: ControlTargetSurface
+    public let recommendedProvider: AppControlProvider
+    public let nextAction: String
+
+    public init(
+        targetSurface: ControlTargetSurface,
+        recommendedProvider: AppControlProvider = .browserDOM,
+        nextAction: String = "submit_browser_target_plan"
+    ) {
+        self.targetSurface = targetSurface
+        self.recommendedProvider = recommendedProvider
+        self.nextAction = nextAction
+    }
+
+    public var errorDescription: String? {
+        "Web content must be addressed through the browser connector; Mac Control will not activate the browser for this request"
+    }
+}
+
 public struct ControlCapabilityProfile: Codable, Equatable {
     public let schemaVersion: Int
     public let probeMode: String
     public let application: WarmPathApplicationIdentity
     public let archetype: MacAppArchetype
     public let classificationSource: String
+    public let targetSurface: ControlTargetSurface
+    public let localExecution: String
+    public let foregroundRequirement: String
+    public let providerHandoffRequired: Bool
+    public let recommendedProvider: AppControlProvider?
+    public let nextAction: String?
     public let taskID: String?
     public let targetFingerprint: String?
     public let manifestFound: Bool
@@ -37,6 +70,10 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     /// explicit truthfulness for callers that might otherwise infer that a
     /// browser's native context menu is a supported tab/group mutation API.
     public let unsupportedCapabilities: [String]
+    /// App-published candidate capabilities. They improve planning and deep
+    /// audit discovery but are never included in `freshMeasuredRoutes` until
+    /// the specific task has independent verification evidence.
+    public let advertisedCapabilities: [AppAdvertisedCapability]
     public let handoffProviders: [String]
     public let preferredProviders: [AppControlProvider]
     public let profileLayers: [String]
@@ -58,14 +95,21 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         deepAuditAvailable: Bool = false,
         cachedBroadProfile: CapabilityProfileCacheSummary? = nil,
         recentBlockers: [ControlBlockerObservation] = [],
+        targetSurface: ControlTargetSurface = .macAppUI,
         profileRegistry: AppControlProfileRegistry = .standard
     ) {
-        self.schemaVersion = 2
+        self.schemaVersion = 5
         self.probeMode = "fast_route_probe"
         self.application = application
         let effectiveProfile = profileRegistry.profile(for: application)
         self.archetype = effectiveProfile.archetype
         self.classificationSource = "declarative_profile_registry"
+        self.targetSurface = targetSurface
+        self.localExecution = targetSurface == .webContent ? "provider_handoff_required" : "supported"
+        self.foregroundRequirement = targetSurface == .webContent
+            ? "not_required_by_surface"
+            : "action_dependent"
+        self.providerHandoffRequired = targetSurface == .webContent
         self.taskID = taskID
         self.targetFingerprint = targetFingerprint
         self.manifestFound = manifest != nil
@@ -89,15 +133,29 @@ public struct ControlCapabilityProfile: Codable, Equatable {
             "control.capabilities",
             "control.capability_audit",
             "control.capability_audit_batch",
+            "control.capability_leads",
             "control.blocker_observations",
             "window_scoped_accessibility_selector",
             "verified_context_menu",
             "semantic_scroll",
-            "computer_use_handoff"
+            "computer_use_handoff",
+            "web_content_provider_handoff"
         ]
         self.unsupportedCapabilities = effectiveProfile.unsupportedCapabilities
-        self.handoffProviders = ["computer_use"]
+        self.advertisedCapabilities = effectiveProfile.advertisedCapabilities
         self.preferredProviders = effectiveProfile.preferredProviders(for: taskID)
+        let browserProviders = self.preferredProviders.filter {
+            $0 == .browserDOM || $0 == .cdpDOM
+        }
+        self.recommendedProvider = targetSurface == .webContent
+            ? (browserProviders.first ?? .browserDOM)
+            : nil
+        self.nextAction = targetSurface == .webContent ? "submit_browser_target_plan" : nil
+        self.handoffProviders = targetSurface == .webContent
+            ? Array((browserProviders + [.computerUse]).map(\.rawValue).reduce(into: [String]()) {
+                if !$0.contains($1) { $0.append($1) }
+            })
+            : [AppControlProvider.computerUse.rawValue]
         self.profileLayers = effectiveProfile.layers
         self.anchors = effectiveProfile.anchors
         self.verificationMethods = effectiveProfile.verification

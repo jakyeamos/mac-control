@@ -299,13 +299,15 @@ public final class TaskRunner {
         plan: TaskPlan,
         approvalToken: String,
         ephemeralInputs: [String: String] = [:],
-        authority: TaskExecutionAuthority? = nil
+        authority: TaskExecutionAuthority? = nil,
+        effectiveFocusPolicy: FocusPolicy? = nil
     ) throws -> TaskStatusReport {
         try execute(
             plan: plan,
             approvalToken: approvalToken,
             ephemeralInputs: ephemeralInputs,
             authority: authority,
+            effectiveFocusPolicy: effectiveFocusPolicy,
             resuming: false
         )
     }
@@ -314,13 +316,15 @@ public final class TaskRunner {
         plan: TaskPlan,
         approvalToken: String,
         ephemeralInputs: [String: String] = [:],
-        authority: TaskExecutionAuthority
+        authority: TaskExecutionAuthority,
+        effectiveFocusPolicy: FocusPolicy? = nil
     ) throws -> TaskStatusReport {
         try execute(
             plan: plan,
             approvalToken: approvalToken,
             ephemeralInputs: ephemeralInputs,
             authority: authority,
+            effectiveFocusPolicy: effectiveFocusPolicy,
             resuming: true
         )
     }
@@ -357,9 +361,17 @@ public final class TaskRunner {
         approvalToken: String,
         ephemeralInputs: [String: String],
         authority: TaskExecutionAuthority?,
+        effectiveFocusPolicy: FocusPolicy?,
         resuming: Bool
     ) throws -> TaskStatusReport {
         try validate(plan)
+        let executionFocusPolicy = effectiveFocusPolicy
+            ?? FocusPolicyResolution.resolve(
+                requestedPolicy: plan.focusPolicy,
+                backgroundEligible: false,
+                backgroundUnavailableReason: "execution_policy_not_resolved"
+            ).effectivePolicy
+        try validate(plan.withFocusPolicy(executionFocusPolicy))
         guard let checkpoint = try loadCheckpoint(plan.id) else {
             throw TaskControlError.notFound(plan.id)
         }
@@ -432,7 +444,7 @@ public final class TaskRunner {
                     taskID: plan.id,
                     stepID: step.id,
                     target: step.target,
-                    focusPolicy: plan.focusPolicy,
+                    focusPolicy: executionFocusPolicy,
                     planDigest: expectedDigest,
                     ephemeralInputs: ephemeralInputs,
                     deadline: minDate(deadline, now().addingTimeInterval(step.timeout)),
@@ -949,6 +961,13 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let backgroundPress: (pid_t, Selector) throws -> Void
     private let backgroundSetValue: (pid_t, Selector, String) throws -> Void
     private let backgroundSendKey: (String, pid_t) throws -> Void
+    private let backgroundScroll: (
+        pid_t,
+        AppInfo,
+        Selector,
+        AccessibilityScrollDirection,
+        Int
+    ) throws -> AccessibilityScrollReport
     private let monotonicNow: () -> TimeInterval
     private let sleep: (TimeInterval) -> Void
 
@@ -967,6 +986,13 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         backgroundPress: ((pid_t, Selector) throws -> Void)? = nil,
         backgroundSetValue: ((pid_t, Selector, String) throws -> Void)? = nil,
         backgroundSendKey: ((String, pid_t) throws -> Void)? = nil,
+        backgroundScroll: ((
+            pid_t,
+            AppInfo,
+            Selector,
+            AccessibilityScrollDirection,
+            Int
+        ) throws -> AccessibilityScrollReport)? = nil,
         monotonicNow: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
     ) {
@@ -985,10 +1011,19 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             _ = try accessibilityController.press(pid: pid, selector: selector)
         }
         self.backgroundSetValue = backgroundSetValue ?? { pid, selector, value in
-            _ = try accessibilityController.setValue(pid: pid, selector: selector, value: value)
+            _ = try accessibilityController.setValueAndVerify(pid: pid, selector: selector, value: value)
         }
         self.backgroundSendKey = backgroundSendKey ?? { specification, pid in
             try inputController.key(specification, toProcess: pid)
+        }
+        self.backgroundScroll = backgroundScroll ?? { pid, application, selector, direction, amount in
+            try accessibilityController.scroll(
+                pid: pid,
+                application: application,
+                selector: selector,
+                direction: direction,
+                amount: amount
+            )
         }
         self.monotonicNow = monotonicNow
         self.sleep = sleep
@@ -1196,13 +1231,40 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 targetFingerprint: ControlTargetFingerprints.make(application: result.targetApplication, focus: nil)
             )
         case .scroll:
-            try requireRecoveryRoute(context, allowed: ["input_scroll", "keyboard"])
             let application = try context.requireAuthority()
-            guard application != nil else { throw TaskControlError.leaseRequired }
             let direction = try requiredParameter(action, key: "direction")
-            let amount = Int32(action.parameters["amount"]?.intValue ?? 3)
+            let amount = action.parameters["amount"]?.intValue ?? 3
+            if context.focusPolicy == .background {
+                try requireRecoveryRoute(context, allowed: ["accessibility"])
+                guard let application,
+                      let pid = application.processID,
+                      let selector = action.selector,
+                      selector.addressability == .accessibility,
+                      let semanticDirection = AccessibilityScrollDirection(rawValue: direction),
+                      context.authority?.inputChannel?.permits(.accessibility) == true else {
+                    throw TaskActionExecutionError.unsupported("background_scroll_requires_task_accessibility_channel")
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                let scroll: AccessibilityScrollReport
+                do {
+                    scroll = try backgroundScroll(pid, application, selector, semanticDirection, amount)
+                } catch AccessibilityControllerError.ambiguousMatch {
+                    throw TaskActionExecutionError.blocked("ambiguous_target")
+                } catch AccessibilityControllerError.elementNotFound {
+                    throw TaskActionExecutionError.blocked("target_unavailable")
+                } catch AccessibilityControllerError.permissionDenied {
+                    throw TaskActionExecutionError.permissionMissing("Accessibility")
+                }
+                guard scroll.verification == .passed else {
+                    throw TaskActionExecutionError.uncertain("background_scroll_not_verified")
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                return report(route: "task_input_accessibility_scroll", application: application)
+            }
+            try requireRecoveryRoute(context, allowed: ["input_scroll", "keyboard"])
+            guard application != nil else { throw TaskControlError.leaseRequired }
             _ = try context.revalidateBeforeAction(includeTarget: true)
-            let inputReport = try inputController.scroll(amount: amount, direction: direction)
+            let inputReport = try inputController.scroll(amount: Int32(amount), direction: direction)
             return report(route: inputReport.route, application: application)
         case .waitFor:
             try requireRecoveryRoute(context, allowed: ["native"])
@@ -1238,7 +1300,6 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         _ action: ActionSpec,
         context: TaskActionContext
     ) throws -> TaskActionExecutionReport {
-        try requireRecoveryRoute(context, allowed: ["keyboard"])
         let parameters: SearchActionParameters
         do {
             parameters = try SearchActionContract.parameters(for: action)
@@ -1251,6 +1312,31 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         guard let query = context.ephemeralInputs[parameters.inputKey] else {
             throw TaskActionExecutionError.blocked("missing_ephemeral_input")
         }
+        if context.focusPolicy == .background {
+            try requireRecoveryRoute(context, allowed: ["accessibility"])
+            guard parameters.replaceExisting else {
+                throw TaskActionExecutionError.unsupported("background_search_requires_replace_existing")
+            }
+            guard context.authority?.inputChannel?.permits(.accessibility) == true,
+                  let application = try context.requireAuthority(),
+                  let pid = application.processID else {
+                throw TaskControlError.leaseRequired
+            }
+            _ = try context.revalidateBeforeAction(includeTarget: true)
+            do {
+                try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
+                try backgroundSetValue(pid, selector, query)
+            } catch AccessibilityControllerError.ambiguousMatch {
+                throw TaskActionExecutionError.blocked("ambiguous_search_field")
+            } catch AccessibilityControllerError.elementNotFound {
+                throw TaskActionExecutionError.blocked("search_field_unavailable")
+            } catch AccessibilityControllerError.permissionDenied {
+                throw TaskActionExecutionError.permissionMissing("Accessibility")
+            }
+            _ = try context.revalidateBeforeAction(includeTarget: true)
+            return report(route: "task_input_accessibility_search", application: application)
+        }
+        try requireRecoveryRoute(context, allowed: ["keyboard"])
         guard let authority = context.authority,
               let leaseToken = authority.leaseToken else {
             throw TaskControlError.leaseRequired
@@ -1470,6 +1556,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             throw AppAdapterError.arbitraryScriptRejected
         }
         let operation = try adapterRegistry.operation(adapterID: adapterID, name: operationName)
+        if context.focusPolicy == .background, operation.focusSupport != .backgroundSafe {
+            throw TaskActionExecutionError.unsupported("adapter_operation_requires_foreground")
+        }
         let requestedRoute = try adapterRecoveryRoute(context, operation: operation)
         guard let manifest = adapterRegistry.manifest(adapterID: adapterID) else {
             throw AppAdapterError.unsupportedAdapter(adapterID)
@@ -1538,6 +1627,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 state: state.visible ? "visible" : "hidden",
                 fields: ["window_visible": .bool(state.visible)]
             )
+            _ = try context.revalidateBeforeAction(includeTarget: true)
             return AppAdapterActionResult(
                 adapterID: adapterID,
                 operation: operationName,
@@ -1572,6 +1662,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 state: "matched",
                 fields: ["matched": .bool(true)]
             )
+            _ = try context.revalidateBeforeAction(includeTarget: true)
             return AppAdapterActionResult(
                 adapterID: adapterID,
                 operation: operationName,
@@ -1778,9 +1869,11 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             return .blocked("application_not_running")
         case .ambiguousMatch, .ambiguousWindowMatch:
             return .blocked("ambiguous_target")
+        case .resolutionIncomplete:
+            return .blocked("target_resolution_incomplete")
         case .elementNotFound, .windowNotFound, .unreadableFocus:
             return .blocked("focus_unreadable")
-        case .actionUnavailable, .actionFailed, .boundsUnavailable, .scrollTargetRequired, .scrollUnavailable:
+        case .actionUnavailable, .semanticActivationUnavailable, .actionFailed, .boundsUnavailable, .scrollTargetRequired, .scrollUnavailable:
             return .blocked("accessibility_observation_failed")
         }
     }

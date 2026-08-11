@@ -3,15 +3,29 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+/// Resolution may inspect a larger bounded surface than the default fast
+/// selector lookup. Deep native and web-backed AX trees can exceed the audit
+/// page size; the bound remains finite so an action can never become an
+/// unbounded provider walk.
+public enum AccessibilityResolutionBounds {
+    public static let maximumNodes = 16_000
+}
+
 public enum AccessibilityControllerError: Error, LocalizedError {
     case permissionDenied
     case applicationNotRunning
     case elementNotFound
     case ambiguousMatch(Int)
+    case resolutionIncomplete(Int)
     case windowNotFound
     case ambiguousWindowMatch(Int)
     case unreadableFocus
     case actionUnavailable(String)
+    case semanticActivationUnavailable(
+        role: String?,
+        subrole: String?,
+        advertisedActions: [String]
+    )
     case actionFailed(String)
     case boundsUnavailable
     case scrollTargetRequired
@@ -27,6 +41,8 @@ public enum AccessibilityControllerError: Error, LocalizedError {
             return "No Accessibility element matched the selector"
         case .ambiguousMatch(let count):
             return "Accessibility selector matched \(count) elements; the target was not unique"
+        case .resolutionIncomplete(let count):
+            return "Accessibility selector resolution reached its bounded search limit after observing \(count) candidate(s); uniqueness could not be proven"
         case .windowNotFound:
             return "No Accessibility window matched the selector's window scope"
         case .ambiguousWindowMatch(let count):
@@ -35,6 +51,9 @@ public enum AccessibilityControllerError: Error, LocalizedError {
             return "The focused Accessibility element could not be read"
         case .actionUnavailable(let action):
             return "Accessibility action is not exposed by the target: \(action)"
+        case let .semanticActivationUnavailable(role, subrole, advertisedActions):
+            let actions = advertisedActions.sorted().joined(separator: ", ")
+            return "Accessibility target \(role ?? "unknown")/\(subrole ?? "unknown") exposes presentation-only actions [\(actions)] but no activation action; hand off to Computer Use"
         case .actionFailed(let action):
             return "Accessibility action failed: \(action)"
         case .boundsUnavailable:
@@ -88,13 +107,64 @@ enum AccessibilitySelectorLabel {
 }
 
 private struct ContextMenuObservation {
-    let visible: Bool
+    let renderedMenuCount: Int
     let visibleItemCount: Int
     let labels: [String]
+    let ambiguousMenuCandidates: Bool
+
+    var menuVisible: Bool {
+        renderedMenuCount == 1 && !ambiguousMenuCandidates
+    }
+
+    var visible: Bool {
+        menuVisible && visibleItemCount > 0
+    }
 }
 
 public final class AccessibilityController: FocusedElementInspecting {
+    /// macOS sidebar rows can expose semantic UI actions instead of AXPress.
+    /// Keep these names explicit because they are part of the provider's
+    /// action contract, not guessed coordinate or keyboard fallbacks.
+    public static let showDefaultUIAction = "AXShowDefaultUI"
+    public static let showAlternateUIAction = "AXShowAlternateUI"
+
     public init() {}
+
+    /// Select a native activation action for a target. AXPress is the only
+    /// action whose Accessibility contract simulates clicking the element.
+    /// AXShowDefaultUI/AXShowAlternateUI are presentation actions, even when
+    /// System Settings advertises them on sidebar rows, so they must not be
+    /// mistaken for row activation.
+    public static func semanticActivationAction(
+        role: String?,
+        subrole: String?,
+        actions: [String]
+    ) -> String? {
+        if actions.contains(kAXPressAction as String) {
+            return kAXPressAction as String
+        }
+        return nil
+    }
+
+    /// Returns a presentation-only action exposed by a sidebar/outline row.
+    /// This is recorded as capability evidence so an agent can explain the
+    /// provider boundary, but it is never dispatched as an activation.
+    public static func semanticPresentationAction(
+        role: String?,
+        subrole: String?,
+        actions: [String]
+    ) -> String? {
+        guard role == "AXRow" || subrole == "AXOutlineRow" else {
+            return nil
+        }
+        if actions.contains(showDefaultUIAction) {
+            return showDefaultUIAction
+        }
+        if actions.contains(showAlternateUIAction) {
+            return showAlternateUIAction
+        }
+        return nil
+    }
 
     public func findElement(pid: pid_t, selector: Selector) throws -> AXUIElement {
         let matches = try findElements(pid: pid, selector: selector)
@@ -118,7 +188,7 @@ public final class AccessibilityController: FocusedElementInspecting {
         guard PermissionDiagnostics.hasAccessibility() else {
             throw AccessibilityControllerError.permissionDenied
         }
-        let nodeLimit = min(max(1, maxNodes), 8_000)
+        let nodeLimit = min(max(1, maxNodes), AccessibilityResolutionBounds.maximumNodes)
         let application = AXUIElementCreateApplication(pid)
         var found: [AXUIElement] = []
         var identities = Set<UInt64>()
@@ -135,13 +205,15 @@ public final class AccessibilityController: FocusedElementInspecting {
         let scopedWindows = try scopedWindows(windows, selector: selector)
         if !hasWindowScope,
            let focused = elementAttribute(application, kAXFocusedUIElementAttribute),
-           self.matches(focused, selector: selector) {
+           self.matches(focused, selector: selector, ancestorDigest: nil) {
             append(focused)
         }
         for window in scopedWindows {
+            guard found.count < 2 else { break }
             search(
                 window,
                 selector: selector,
+                ancestorIdentityDigests: [],
                 maxNodes: nodeLimit,
                 found: &found,
                 identities: &identities,
@@ -157,9 +229,26 @@ public final class AccessibilityController: FocusedElementInspecting {
         if !hasWindowScope {
             let applicationChildren = (attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? []
             for child in applicationChildren {
+                guard found.count < 2 else { break }
+                // Ancestor-scoped locators are emitted by the windowed deep
+                // audit. Do not search a second provider projection for them;
+                // an app-level alias can otherwise make a unique audited
+                // target appear ambiguous.
+                guard selector.ancestorDigest == nil else { continue }
+                // AXWindows are already traversed above. Some applications
+                // expose the same window tree through both AXWindows and
+                // application-level children, but return distinct runtime
+                // handles for the two projections. Walking both can turn a
+                // structurally unique selector into a false two-match result.
+                // Keep the application-level pass for menus and other
+                // non-window surfaces that are not reachable from a window.
+                guard Self.shouldTraverseApplicationChild(
+                    role: attribute(child, kAXRoleAttribute) as? String
+                ) else { continue }
                 search(
                     child,
                     selector: selector,
+                    ancestorIdentityDigests: [],
                     maxNodes: nodeLimit,
                     found: &found,
                     identities: &identities,
@@ -168,14 +257,21 @@ public final class AccessibilityController: FocusedElementInspecting {
                     truncated: &truncated
                 )
             }
-            if self.matches(application, selector: selector) {
+            if self.matches(application, selector: selector, ancestorDigest: nil) {
                 append(application)
             }
         }
         guard !truncated else {
-            throw AccessibilityControllerError.ambiguousMatch(max(found.count + 1, 2))
+            throw AccessibilityControllerError.resolutionIncomplete(found.count)
         }
         return found
+    }
+
+    /// Window descendants are searched through AXWindows first. Application
+    /// children with AXWindow role are aliases of that surface on some
+    /// providers, not an additional target scope.
+    static func shouldTraverseApplicationChild(role: String?) -> Bool {
+        role != "AXWindow"
     }
 
     @discardableResult
@@ -185,6 +281,62 @@ public final class AccessibilityController: FocusedElementInspecting {
             return try bounds(of: element)
         }
         throw AccessibilityControllerError.actionFailed(kAXPressAction as String)
+    }
+
+    /// Activates a uniquely resolved target using the action that the target
+    /// actually advertises. Sidebar rows that expose only
+    /// AXShowDefaultUI/AXShowAlternateUI are presentation-only on macOS;
+    /// report an explicit provider handoff instead of dispatching a no-op.
+    /// Rows that expose AXPress receive the task-specific selected-pane
+    /// postcondition.
+    @discardableResult
+    public func activate(
+        pid: pid_t,
+        selector: Selector
+    ) throws -> AccessibilityActivationReport {
+        let element = try findElement(pid: pid, selector: selector)
+        let role = attribute(element, kAXRoleAttribute) as? String
+        let subrole = attribute(element, kAXSubroleAttribute) as? String
+        let action = Self.semanticActivationAction(
+            role: role,
+            subrole: subrole,
+            actions: actionNames(of: element)
+        )
+        guard let action else {
+            let actions = actionNames(of: element)
+            if Self.semanticPresentationAction(
+                role: role,
+                subrole: subrole,
+                actions: actions
+            ) != nil {
+                throw AccessibilityControllerError.semanticActivationUnavailable(
+                    role: role,
+                    subrole: subrole,
+                    advertisedActions: actions.filter {
+                        $0 == Self.showDefaultUIAction || $0 == Self.showAlternateUIAction
+                    }
+                )
+            }
+            throw AccessibilityControllerError.actionUnavailable(kAXPressAction as String)
+        }
+        guard AXUIElementPerformAction(element, action as CFString) == .success else {
+            throw AccessibilityControllerError.actionFailed(action)
+        }
+
+        let isSidebarRow = role == "AXRow" || subrole == "AXOutlineRow"
+        let postcondition = isSidebarRow
+            ? waitForSelectedPane(
+                pid: pid,
+                selector: selector,
+                role: role,
+                subrole: subrole,
+                action: action
+            )
+            : nil
+        return AccessibilityActivationReport(
+            action: action,
+            postcondition: postcondition
+        )
     }
 
     public func showContextMenu(
@@ -212,6 +364,25 @@ public final class AccessibilityController: FocusedElementInspecting {
             value as CFTypeRef
         ) == .success else {
             throw AccessibilityControllerError.actionFailed(kAXValueAttribute as String)
+        }
+        return try? bounds(of: element)
+    }
+
+    /// Writes a value to one uniquely resolved element and verifies the value
+    /// through AX before returning. The value is never included in receipts or
+    /// error metadata.
+    @discardableResult
+    public func setValueAndVerify(pid: pid_t, selector: Selector, value: String) throws -> CGRect? {
+        let element = try findElement(pid: pid, selector: selector)
+        guard AXUIElementSetAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            value as CFTypeRef
+        ) == .success else {
+            throw AccessibilityControllerError.actionFailed(kAXValueAttribute as String)
+        }
+        guard attribute(element, kAXValueAttribute) as? String == value else {
+            throw AccessibilityControllerError.actionFailed("AXValue verification")
         }
         return try? bounds(of: element)
     }
@@ -332,6 +503,7 @@ public final class AccessibilityController: FocusedElementInspecting {
     private func search(
         _ element: AXUIElement,
         selector: Selector,
+        ancestorIdentityDigests: [String],
         maxNodes: Int,
         found: inout [AXUIElement],
         identities: inout Set<UInt64>,
@@ -339,6 +511,10 @@ public final class AccessibilityController: FocusedElementInspecting {
         visited: inout Int,
         truncated: inout Bool
     ) {
+        // Two matches are sufficient to prove ambiguity. Stop traversing the
+        // provider surface once that proof exists so a large unrelated AX
+        // subtree cannot turn a known ambiguity into a bounded-search result.
+        guard found.count < 2 else { return }
         guard visited < maxNodes else {
             truncated = true
             return
@@ -347,17 +523,28 @@ public final class AccessibilityController: FocusedElementInspecting {
             return
         }
         visited += 1
-        if self.matches(element, selector: selector) {
+        if self.matches(
+            element,
+            selector: selector,
+            ancestorDigest: makeAncestorDigest(ancestorIdentityDigests)
+        ) {
             let identity = UInt64(CFHash(element))
             if identities.insert(identity).inserted {
                 found.append(element)
             }
+        }
+        let childAncestors: [String]
+        if selector.ancestorDigest == nil {
+            childAncestors = []
+        } else {
+            childAncestors = ancestorIdentityDigests + [liveLocatorDigest(for: element)]
         }
         let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
         for child in children {
             search(
                 child,
                 selector: selector,
+                ancestorIdentityDigests: childAncestors,
                 maxNodes: maxNodes,
                 found: &found,
                 identities: &identities,
@@ -409,18 +596,31 @@ public final class AccessibilityController: FocusedElementInspecting {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }.filter { !$0.isEmpty })
         let deadline = Date().addingTimeInterval(1.0)
-        var latest = ContextMenuObservation(visible: false, visibleItemCount: 0, labels: [])
+        var latest = ContextMenuObservation(
+            renderedMenuCount: 0,
+            visibleItemCount: 0,
+            labels: [],
+            ambiguousMenuCandidates: false
+        )
         while true {
             latest = inspectContextMenu(pid: pid)
             let matched = matchedMenuItemCount(expected: expected, labels: latest.labels)
-            if latest.visible && (expected.isEmpty || matched == expected.count) {
+            if Self.contextMenuEvidenceIsSufficient(
+                renderedMenuCount: latest.renderedMenuCount,
+                visibleItemCount: latest.visibleItemCount,
+                expectedItemCount: expected.count,
+                matchedItemCount: matched,
+                ambiguousMenuCandidates: latest.ambiguousMenuCandidates
+            ) {
                 return ContextMenuReport(
                     state: .passed,
                     targetResolved: true,
                     menuVisible: true,
                     expectedItemCount: expected.count,
                     matchedItemCount: matched,
-                    visibleItemCount: latest.visibleItemCount
+                    visibleItemCount: latest.visibleItemCount,
+                    renderedMenuCount: latest.renderedMenuCount,
+                    ambiguousMenuCandidates: latest.ambiguousMenuCandidates
                 )
             }
             guard Date() < deadline else { break }
@@ -430,10 +630,90 @@ public final class AccessibilityController: FocusedElementInspecting {
         return ContextMenuReport(
             state: .verificationUnavailable,
             targetResolved: true,
-            menuVisible: latest.visible,
+            menuVisible: latest.menuVisible,
             expectedItemCount: expected.count,
             matchedItemCount: matched,
-            visibleItemCount: latest.visibleItemCount
+            visibleItemCount: latest.visibleItemCount,
+            renderedMenuCount: latest.renderedMenuCount,
+            ambiguousMenuCandidates: latest.ambiguousMenuCandidates
+        )
+    }
+
+    private func waitForSelectedPane(
+        pid: pid_t,
+        selector: Selector,
+        role: String?,
+        subrole: String?,
+        action: String
+    ) -> ControlActionPostcondition {
+        let deadline = Date().addingTimeInterval(1.0)
+        var targetResolved = false
+        var selected = false
+        var resolution = "not_observed"
+
+        while true {
+            do {
+                let matches = try findElements(
+                    pid: pid,
+                    selector: selector,
+                    maxNodes: AccessibilityResolutionBounds.maximumNodes
+                )
+                if matches.count == 1, let target = matches.first {
+                    targetResolved = true
+                    selected = (attribute(target, kAXSelectedAttribute) as? Bool) == true
+                    resolution = "unique"
+                    if selected {
+                        return selectedPanePostcondition(
+                            verified: true,
+                            targetResolved: true,
+                            selected: true,
+                            resolution: resolution,
+                            role: role,
+                            subrole: subrole,
+                            action: action
+                        )
+                    }
+                } else {
+                    resolution = matches.isEmpty ? "not_found" : "ambiguous"
+                }
+            } catch {
+                resolution = "read_failed"
+            }
+            guard Date() < deadline else { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        }
+
+        return selectedPanePostcondition(
+            verified: false,
+            targetResolved: targetResolved,
+            selected: selected,
+            resolution: resolution,
+            role: role,
+            subrole: subrole,
+            action: action
+        )
+    }
+
+    private func selectedPanePostcondition(
+        verified: Bool,
+        targetResolved: Bool,
+        selected: Bool,
+        resolution: String,
+        role: String?,
+        subrole: String?,
+        action: String
+    ) -> ControlActionPostcondition {
+        ControlActionPostcondition(
+            kind: "selected_pane",
+            verified: verified,
+            details: [
+                "target_resolved": .bool(targetResolved),
+                "selected": .bool(selected),
+                "resolution": .string(resolution),
+                "role": .string(role ?? ""),
+                "subrole": .string(subrole ?? ""),
+                "activation_action": .string(action)
+            ]
         )
     }
 
@@ -442,7 +722,7 @@ public final class AccessibilityController: FocusedElementInspecting {
         let roots = ((attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? [])
             + ((attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? [])
         var visited = Set<UInt64>()
-        var visible = false
+        var renderedMenuCount = 0
         var visibleItemCount = 0
         var labels: [String] = []
 
@@ -450,16 +730,22 @@ public final class AccessibilityController: FocusedElementInspecting {
             guard depth < 32, visited.insert(UInt64(CFHash(element))).inserted else { return }
             let role = attribute(element, kAXRoleAttribute) as? String
             let hidden = (attribute(element, kAXHiddenAttribute) as? Bool) ?? false
-            let isVisibleMenu = insideVisibleMenu || (role == "AXMenu" && !hidden)
-            if role == "AXMenu" && !hidden { visible = true }
+            let isRenderedMenu = !insideVisibleMenu
+                && role == "AXMenu"
+                && !hidden
+                && Self.hasRenderableBounds(try? bounds(of: element))
+            let isVisibleMenu = insideVisibleMenu || isRenderedMenu
+            if isRenderedMenu { renderedMenuCount += 1 }
             if role == "AXMenuItem" && isVisibleMenu && !hidden {
-                visibleItemCount += 1
-                if let label = AccessibilitySelectorLabel.preferred(
-                    title: attribute(element, kAXTitleAttribute) as? String,
-                    description: attribute(element, kAXDescriptionAttribute) as? String,
-                    help: attribute(element, kAXHelpAttribute) as? String
-                ) {
-                    labels.append(label.lowercased())
+                if Self.hasRenderableBounds(try? bounds(of: element)) {
+                    visibleItemCount += 1
+                    if let label = AccessibilitySelectorLabel.preferred(
+                        title: attribute(element, kAXTitleAttribute) as? String,
+                        description: attribute(element, kAXDescriptionAttribute) as? String,
+                        help: attribute(element, kAXHelpAttribute) as? String
+                    ) {
+                        labels.append(label.lowercased())
+                    }
                 }
             }
             let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
@@ -472,10 +758,34 @@ public final class AccessibilityController: FocusedElementInspecting {
             walk(root, insideVisibleMenu: false, depth: 0)
         }
         return ContextMenuObservation(
-            visible: visible,
+            renderedMenuCount: renderedMenuCount,
             visibleItemCount: visibleItemCount,
-            labels: labels
+            labels: labels,
+            ambiguousMenuCandidates: renderedMenuCount > 1
         )
+    }
+
+    static func hasRenderableBounds(_ bounds: CGRect?) -> Bool {
+        guard let bounds else { return false }
+        return bounds.origin.x.isFinite
+            && bounds.origin.y.isFinite
+            && bounds.size.width.isFinite
+            && bounds.size.height.isFinite
+            && bounds.size.width > 0
+            && bounds.size.height > 0
+    }
+
+    static func contextMenuEvidenceIsSufficient(
+        renderedMenuCount: Int,
+        visibleItemCount: Int,
+        expectedItemCount: Int,
+        matchedItemCount: Int,
+        ambiguousMenuCandidates: Bool
+    ) -> Bool {
+        renderedMenuCount == 1
+            && visibleItemCount > 0
+            && !ambiguousMenuCandidates
+            && (expectedItemCount == 0 || matchedItemCount == expectedItemCount)
     }
 
     private func matchedMenuItemCount(expected: Set<String>, labels: [String]) -> Int {
@@ -484,7 +794,11 @@ public final class AccessibilityController: FocusedElementInspecting {
         }
     }
 
-    private func matches(_ element: AXUIElement, selector: Selector) -> Bool {
+    private func matches(
+        _ element: AXUIElement,
+        selector: Selector,
+        ancestorDigest: String?
+    ) -> Bool {
         if let role = selector.role, role != (attribute(element, kAXRoleAttribute) as? String) {
             return false
         }
@@ -494,6 +808,14 @@ public final class AccessibilityController: FocusedElementInspecting {
         }
         if let locatorDigest = selector.locatorDigest,
            locatorDigest != liveLocatorDigest(for: element) {
+            return false
+        }
+        if let expectedAncestorDigest = selector.ancestorDigest,
+           expectedAncestorDigest != ancestorDigest {
+            return false
+        }
+        if let expectedGeometryDigest = selector.geometryDigest,
+           expectedGeometryDigest != liveGeometryDigest(for: element) {
             return false
         }
         if let title = selector.title,
@@ -520,8 +842,9 @@ public final class AccessibilityController: FocusedElementInspecting {
                 return false
             }
         }
-        return selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil || selector.title != nil
-            || selector.subrole != nil || selector.containsText != nil
+        return selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil
+            || selector.ancestorDigest != nil || selector.geometryDigest != nil || selector.title != nil || selector.subrole != nil
+            || selector.containsText != nil
     }
 
     /// Rebuilds the same redacted identity descriptor emitted by capability
@@ -529,8 +852,10 @@ public final class AccessibilityController: FocusedElementInspecting {
     private func liveLocatorDigest(for element: AXUIElement) -> String {
         let role = attribute(element, kAXRoleAttribute) as? String
         let actions = actionNames(of: element)
+        // Keep live selector identity in lockstep with deep-audit locators:
+        // incidental AXScrollToVisible actions do not identify a semantic
+        // scroll container.
         let scrollable = role == "AXScrollArea"
-            || actions.contains(where: { $0.hasPrefix("AXScroll") })
         let label = AccessibilitySelectorLabel.preferred(
             title: attribute(element, kAXTitleAttribute) as? String,
             description: attribute(element, kAXDescriptionAttribute) as? String,
@@ -545,6 +870,16 @@ public final class AccessibilityController: FocusedElementInspecting {
             actions: actions,
             scrollable: scrollable
         ).identityDigest
+    }
+
+    private func liveGeometryDigest(for element: AXUIElement) -> String? {
+        guard let frame = try? bounds(of: element) else { return nil }
+        return CapabilityProfileDigest.geometry(frame)
+    }
+
+    private func makeAncestorDigest(_ identities: [String]) -> String? {
+        guard !identities.isEmpty else { return nil }
+        return CapabilityProfileDigest.make(identities.joined(separator: "|"))
     }
 
     func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {

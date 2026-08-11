@@ -358,6 +358,7 @@ public enum ScrollVerificationState: String, Codable, Equatable {
 public enum SemanticScrollFailureClass: String, Codable, Equatable {
     case targetMissing = "target_missing"
     case targetAmbiguous = "target_ambiguous"
+    case targetResolutionIncomplete = "target_resolution_incomplete"
     case actionUnavailable = "action_unavailable"
     case actionFailed = "action_failed"
     case permissionDenied = "permission_denied"
@@ -697,7 +698,11 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         // descriptor stable and redacted; uniqueness is still enforced by
         // findElements before and after the action.
         let targetIdentifier = selector.identifier ?? "role:AXScrollArea"
-        let matches = try findElements(pid: pid, selector: selector, maxNodes: 2_000)
+        let matches = try findElements(
+            pid: pid,
+            selector: selector,
+            maxNodes: AccessibilityResolutionBounds.maximumNodes
+        )
         guard let element = matches.first else {
             throw AccessibilityControllerError.elementNotFound
         }
@@ -736,7 +741,11 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         // Re-resolve the target after the action. This proves that the
         // semantic container remains uniquely addressable without reading its
         // content or screenshot.
-        let remaining = try findElements(pid: pid, selector: selector, maxNodes: 2_000)
+        let remaining = try findElements(
+            pid: pid,
+            selector: selector,
+            maxNodes: AccessibilityResolutionBounds.maximumNodes
+        )
         guard remaining.count == 1 else {
             throw remaining.isEmpty
                 ? AccessibilityControllerError.elementNotFound
@@ -853,8 +862,11 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
         let actions = actionNames(of: element)
         let role = attribute(element, kAXRoleAttribute) as? String
+        // `AXScrollToVisible` is an incidental action exposed by many
+        // descendants. It does not make the element a semantic scroll
+        // container. Keep this flag aligned with the scroll route, which
+        // requires a unique AXScrollArea target.
         let scrollable = role == "AXScrollArea"
-            || actions.contains(where: { $0.hasPrefix("AXScroll") })
         let state = AccessibilityTreeNodeState(
             enabled: (attribute(element, kAXEnabledAttribute) as? Bool) ?? true,
             focused: (attribute(element, kAXFocusedAttribute) as? Bool) ?? false,

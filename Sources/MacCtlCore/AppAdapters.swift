@@ -8,6 +8,15 @@ public enum AppAdapterRoute: String, Codable, Equatable, CaseIterable {
     case appleScript = "apple_script"
 }
 
+/// Whether a typed adapter operation can run while another application keeps
+/// macOS foreground focus. This is an allowlist property, not an inference
+/// from the transport: every operation defaults to foreground-only until its
+/// implementation and post-action focus guard are known to be safe.
+public enum AppAdapterFocusSupport: String, Codable, Equatable, CaseIterable {
+    case foregroundOnly = "foreground_only"
+    case backgroundSafe = "background_safe"
+}
+
 public struct AppAdapterOperation: Codable, Equatable {
     public let name: String
     public let mutating: Bool
@@ -15,6 +24,7 @@ public struct AppAdapterOperation: Codable, Equatable {
     public let requiredPermissions: [String]
     public let routes: [AppAdapterRoute]
     public let redactedObservationSchema: [String]
+    public let focusSupport: AppAdapterFocusSupport
 
     public init(
         name: String,
@@ -22,7 +32,8 @@ public struct AppAdapterOperation: Codable, Equatable {
         risk: RiskLevel,
         requiredPermissions: [String] = [],
         routes: [AppAdapterRoute],
-        redactedObservationSchema: [String] = []
+        redactedObservationSchema: [String] = [],
+        focusSupport: AppAdapterFocusSupport = .foregroundOnly
     ) {
         self.name = name
         self.mutating = mutating
@@ -30,6 +41,34 @@ public struct AppAdapterOperation: Codable, Equatable {
         self.requiredPermissions = requiredPermissions
         self.routes = routes
         self.redactedObservationSchema = redactedObservationSchema
+        self.focusSupport = focusSupport
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case mutating
+        case risk
+        case requiredPermissions
+        case routes
+        case redactedObservationSchema
+        case focusSupport
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        mutating = try container.decode(Bool.self, forKey: .mutating)
+        risk = try container.decode(RiskLevel.self, forKey: .risk)
+        requiredPermissions = try container.decodeIfPresent([String].self, forKey: .requiredPermissions) ?? []
+        routes = try container.decode([AppAdapterRoute].self, forKey: .routes)
+        redactedObservationSchema = try container.decodeIfPresent(
+            [String].self,
+            forKey: .redactedObservationSchema
+        ) ?? []
+        focusSupport = try container.decodeIfPresent(
+            AppAdapterFocusSupport.self,
+            forKey: .focusSupport
+        ) ?? .foregroundOnly
     }
 }
 
@@ -217,7 +256,8 @@ public final class AppAdapterRegistry {
             risk: .safe,
             requiredPermissions: ["Accessibility"],
             routes: [.accessibility],
-            redactedObservationSchema: ["application", "window_visible"]
+            redactedObservationSchema: ["application", "window_visible"],
+            focusSupport: .backgroundSafe
         )
         let open = AppAdapterOperation(
             name: "open",
@@ -240,7 +280,8 @@ public final class AppAdapterRegistry {
             risk: .safe,
             requiredPermissions: ["Accessibility"],
             routes: [.accessibility],
-            redactedObservationSchema: ["role", "subrole", "identifier", "matched"]
+            redactedObservationSchema: ["role", "subrole", "identifier", "matched"],
+            focusSupport: .backgroundSafe
         )
         let save = AppAdapterOperation(
             name: "document.save",

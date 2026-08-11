@@ -638,7 +638,10 @@ final class MacCtlCoreTests: XCTestCase {
 
         let response = service.handle(RequestEnvelope(
             method: "app.open",
-            params: ["name": .string("ChatGPT")]
+            params: [
+                "name": .string("ChatGPT"),
+                "focus_policy": .string("foreground")
+            ]
         ))
 
         XCTAssertEqual(response.status, .succeeded)
@@ -719,7 +722,8 @@ final class MacCtlCoreTests: XCTestCase {
             menuVisible: true,
             expectedItemCount: 1,
             matchedItemCount: 1,
-            visibleItemCount: 8
+            visibleItemCount: 8,
+            renderedMenuCount: 1
         ))
         let router = SemanticActionRouter(
             session: session,
@@ -754,6 +758,157 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertFalse(report.verification.focusChanged)
         XCTAssertEqual(report.verification.postcondition?.kind, "context_menu")
         XCTAssertEqual(report.verification.postcondition?.verified, true)
+    }
+
+    func testContextMenuVerificationRecommendsFreshComputerUseHandoff() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-context-menu-handoff-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let app = testApp(name: "Chrome", processID: 42)
+        let focus = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "tab",
+            title: "Example"
+        )
+        var now = Date(timeIntervalSince1970: 100)
+        let store = KeyboardDriveStore()
+        let keyboard = KeyboardAccessController(
+            eventSender: RecordingKeyboardEventSender(),
+            preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+        )
+        let session = ControlSession(
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { app },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true },
+            verifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            postActionTimeout: 0
+        )
+        let contextMenu = TestContextMenuActionPerformer(report: ContextMenuReport(
+            state: .verificationUnavailable,
+            targetResolved: true,
+            menuVisible: false,
+            expectedItemCount: 1,
+            matchedItemCount: 0,
+            visibleItemCount: 0,
+            renderedMenuCount: 0
+        ))
+        let router = SemanticActionRouter(
+            session: session,
+            keyboardAccessController: keyboard,
+            accessibilityActionController: TestAccessibilityActionPerformer(),
+            visualActionController: TestVisualActionPerformer(),
+            contextMenuActionController: contextMenu
+        )
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "test",
+            keyboardAccessController: keyboard,
+            keyboardDriveStore: store,
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            controlSession: session,
+            semanticActionRouter: router,
+            foregroundApplication: { app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(
+                now: { now },
+                sleep: { interval in now = now.addingTimeInterval(interval) }
+            ),
+            hasPostEventAccess: { true }
+        )
+
+        let handsOffBegin = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: [
+                "confirm": .bool(true),
+                "provider": .string("hybrid"),
+                "app": .string("Chrome"),
+                "task_id": .string("context-menu"),
+                "seconds": .number(30)
+            ]
+        ))
+        XCTAssertEqual(handsOffBegin.status, .succeeded)
+        let handsOffSessionObject = try XCTUnwrap(handsOffBegin.result["hands_off_session"]?.objectValue)
+        let handsOffSessionID = try XCTUnwrap(handsOffSessionObject["session_id"]?.stringValue)
+
+        let response = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("context-menu"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "hands_off_session_id": .string(handsOffSessionID),
+                "selector": .object([
+                    "role": .string("AXButton"),
+                    "identifier": .string("tab")
+                ]),
+                "expected_menu_items": .array([.string("Reload")])
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.controlVerificationUnavailable.rawValue)
+        XCTAssertEqual(response.error?.details["failure_class"]?.stringValue, "verification_unavailable")
+        XCTAssertEqual(response.error?.details["recommended_provider"]?.stringValue, "computer_use")
+        XCTAssertEqual(response.error?.details["fresh_state_required"]?.boolValue, true)
+        XCTAssertEqual(response.error?.details["fallback_allowed"]?.boolValue, false)
+        XCTAssertEqual(
+            response.error?.details["next_action"]?.stringValue,
+            "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        )
+        XCTAssertEqual(response.outcome?.state, .verificationUnavailable)
+        XCTAssertEqual(response.outcome?.recommendedProvider, "computer_use")
+        XCTAssertEqual(response.outcome?.freshStateRequired, true)
+        XCTAssertEqual(
+            response.outcome?.nextAction,
+            "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        )
+        let handoffPlan = try XCTUnwrap(response.outcome?.handoffPlan)
+        XCTAssertEqual(handoffPlan.schemaVersion, 1)
+        XCTAssertEqual(handoffPlan.provider, "computer_use")
+        XCTAssertEqual(handoffPlan.reason, "native_context_menu_verification_unavailable")
+        XCTAssertEqual(handoffPlan.action, "context-menu")
+        XCTAssertTrue(handoffPlan.freshStateRequired)
+        XCTAssertFalse(handoffPlan.nativeActionReplayAllowed)
+        XCTAssertEqual(handoffPlan.focusPolicy, .foreground)
+        XCTAssertEqual(handoffPlan.foregroundOracle, "target_foreground_unchanged")
+        XCTAssertEqual(handoffPlan.targetSource, "original_request_selector")
+        XCTAssertEqual(handoffPlan.target?.application, "Chrome")
+        XCTAssertEqual(handoffPlan.target?.selectorFields, ["identifier", "role"])
+        XCTAssertNil(handoffPlan.target?.selectorFields.first(where: { $0 == "title" }))
+        XCTAssertEqual(handoffPlan.handsOffSession?.sessionID, handsOffSessionID)
+        XCTAssertGreaterThan(handoffPlan.handsOffSession?.heartbeatIntervalSeconds ?? 0, 0)
+        XCTAssertEqual(handoffPlan.postconditionKind, "context_menu")
+        XCTAssertEqual(handoffPlan.expectedItemCount, 1)
+        XCTAssertNotNil(handoffPlan.expectedItemDigest)
+        XCTAssertEqual(
+            handoffPlan.steps.map(\.id),
+            ["refresh_state", "relocate_target", "execute_action", "verify_postcondition"]
+        )
+        XCTAssertEqual(handoffPlan.steps[0].operation, "get_app_state")
+        XCTAssertEqual(handoffPlan.steps[1].targetSource, "original_request_selector")
+        XCTAssertEqual(handoffPlan.steps[2].parameters["mouse_button"]?.stringValue, "right")
+        XCTAssertEqual(
+            handoffPlan.steps[3].parameters["expected_items_source"]?.stringValue,
+            "original_request"
+        )
+        let handoffDetails = try XCTUnwrap(response.error?.details["handoff_plan"]?.objectValue)
+        XCTAssertNil(handoffDetails["expected_menu_items"])
+        XCTAssertNil(handoffDetails["selector"])
+        XCTAssertEqual(
+            response.evidence.first(where: { $0.kind == "provider_handoff" })?.metadata["handoff_plan"],
+            response.error?.details["handoff_plan"]
+        )
+        let encodedResponse = try JSONCodec.encode(response)
+        let decodedResponse = try JSONCodec.decode(ResponseEnvelope.self, from: encodedResponse)
+        XCTAssertEqual(decodedResponse.outcome?.handoffPlan, handoffPlan)
+        XCTAssertTrue(response.evidence.contains { $0.kind == "provider_handoff" })
+        XCTAssertNil(store.activeLease())
     }
 
     func testKeyboardRawSequenceValidationRejectsTypingAndBoundsRepetition() {
@@ -927,6 +1082,105 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(suppressor.acquiredUntil.isEmpty)
     }
 
+    func testKeyboardNavigationLeaseTogglesPassThroughAndRestoresOnCleanup() throws {
+        var now = Date(timeIntervalSince1970: 100)
+        let sender = RecordingKeyboardEventSender()
+        let store = KeyboardDriveStore(
+            now: { now },
+            passThroughToggler: SystemKeyboardPassThroughToggler(eventSender: sender)
+        )
+
+        let lease = try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 5,
+            confirm: true,
+            navigationMode: .navigation,
+            fromPassThrough: true
+        )
+        XCTAssertEqual(lease.navigationMode, .navigation)
+        XCTAssertTrue(lease.passThroughTransitionOwned)
+        XCTAssertEqual(sender.keys, ["ctrl+option+cmd+p"])
+
+        try store.release(token: lease.token)
+        XCTAssertEqual(sender.keys, ["ctrl+option+cmd+p", "ctrl+option+cmd+p"])
+
+        let expiring = try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 5,
+            confirm: true,
+            navigationMode: .navigation,
+            fromPassThrough: true
+        )
+        now = now.addingTimeInterval(6)
+        XCTAssertNil(store.activeLease())
+        XCTAssertEqual(sender.keys.count, 4)
+        XCTAssertFalse(store.isNavigationRestorationPending)
+        XCTAssertThrowsError(try store.lease(for: expiring.token)) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .notFound)
+        }
+    }
+
+    func testKeyboardNavigationLeaseRequiresSessionAndExplicitPassThroughAssertion() throws {
+        let sender = RecordingKeyboardEventSender()
+        let store = KeyboardDriveStore(
+            passThroughToggler: SystemKeyboardPassThroughToggler(eventSender: sender)
+        )
+        let app = testApp(name: "Chrome", processID: 42)
+
+        XCTAssertThrowsError(try store.acquire(
+            scope: .app,
+            application: app,
+            seconds: 30,
+            confirm: true,
+            navigationMode: .navigation,
+            fromPassThrough: true
+        )) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .navigationModeRequiresSession)
+        }
+        XCTAssertThrowsError(try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 30,
+            confirm: true,
+            navigationMode: .navigation
+        )) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .navigationModeRequiresPassThroughAssertion)
+        }
+        XCTAssertNil(store.activeLease())
+        XCTAssertTrue(sender.keys.isEmpty)
+    }
+
+    func testKeyboardNavigationLeaseBlocksAfterAmbiguousTransition() throws {
+        let sender = RecordingKeyboardEventSender()
+        sender.shouldFail = true
+        let store = KeyboardDriveStore(
+            passThroughToggler: SystemKeyboardPassThroughToggler(eventSender: sender)
+        )
+
+        XCTAssertThrowsError(try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 30,
+            confirm: true,
+            navigationMode: .navigation,
+            fromPassThrough: true
+        )) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .navigationModeTransitionFailed)
+        }
+        XCTAssertNil(store.activeLease())
+        XCTAssertTrue(store.isNavigationRestorationPending)
+        XCTAssertThrowsError(try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 30,
+            confirm: true
+        )) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .navigationModeRestorationPending)
+        }
+    }
+
     func testKeyboardDriveLeaseDecodesLegacyPayloadAsSharedInput() throws {
         let data = Data(#"{"token":"kbd_legacy","scope":"session","application":null,"acquiredAt":"1970-01-01T00:01:40Z","expiresAt":"1970-01-01T00:02:10Z"}"#.utf8)
         let lease = try JSONCodec.decode(KeyboardDriveLease.self, from: data)
@@ -934,6 +1188,8 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(lease.token, "kbd_legacy")
         XCTAssertEqual(lease.scope, .session)
         XCTAssertEqual(lease.physicalInputMode, .shared)
+        XCTAssertEqual(lease.navigationMode, .unchanged)
+        XCTAssertFalse(lease.passThroughTransitionOwned)
         XCTAssertNil(lease.application)
         XCTAssertEqual(lease.acquiredAt, Date(timeIntervalSince1970: 100))
         XCTAssertEqual(lease.expiresAt, Date(timeIntervalSince1970: 130))
@@ -1010,6 +1266,91 @@ final class MacCtlCoreTests: XCTestCase {
             .succeeded
         )
         XCTAssertEqual(suppressor.releaseCount, 1)
+    }
+
+    func testKeyboardServiceReportsAndRestoresNavigationModeLease() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let sender = RecordingKeyboardEventSender()
+        let store = KeyboardDriveStore(
+            passThroughToggler: SystemKeyboardPassThroughToggler(eventSender: sender)
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            keyboardDriveStore: store,
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            hasPostEventAccess: { true }
+        )
+
+        let acquired = service.handle(RequestEnvelope(
+            method: "keyboard.lease.acquire",
+            params: [
+                "scope": .string("session"),
+                "confirm": .bool(true),
+                "navigation_mode": .string("navigation"),
+                "from_pass_through": .bool(true)
+            ]
+        ))
+        XCTAssertEqual(acquired.status, .succeeded)
+        XCTAssertEqual(acquired.result["navigation_mode"]?.stringValue, "navigation")
+        XCTAssertEqual(acquired.result["pass_through_transition_owned"]?.boolValue, true)
+        XCTAssertEqual(acquired.result["pass_through_state_source"]?.stringValue, "caller_asserted")
+        XCTAssertEqual(acquired.evidence.map { $0.kind }, ["keyboard_navigation_mode", "keyboard_lease"])
+        XCTAssertEqual(sender.keys, ["ctrl+option+cmd+p"])
+
+        let token = try XCTUnwrap(acquired.result["lease"]?.objectValue?["token"]?.stringValue)
+        let status = service.handle(RequestEnvelope(method: "keyboard.status"))
+        XCTAssertEqual(
+            status.result["activeLease"]?.objectValue?["navigationMode"]?.stringValue,
+            "navigation"
+        )
+        XCTAssertEqual(
+            status.result["navigationRestorationPending"]?.boolValue,
+            false
+        )
+        XCTAssertEqual(
+            service.handle(RequestEnvelope(
+                method: "keyboard.lease.release",
+                params: ["token": .string(token)]
+            )).status,
+            .succeeded
+        )
+        XCTAssertEqual(sender.keys, ["ctrl+option+cmd+p", "ctrl+option+cmd+p"])
+    }
+
+    func testKeyboardServiceRejectsNavigationModeWhenFullKeyboardAccessIsDisabled() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let sender = RecordingKeyboardEventSender()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: false)
+            ),
+            keyboardDriveStore: KeyboardDriveStore(
+                passThroughToggler: SystemKeyboardPassThroughToggler(eventSender: sender)
+            ),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            hasPostEventAccess: { true }
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "keyboard.lease.acquire",
+            params: [
+                "scope": .string("session"),
+                "confirm": .bool(true),
+                "navigation_mode": .string("navigation"),
+                "from_pass_through": .bool(true)
+            ]
+        ))
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.keyboardAccessDisabled.rawValue)
+        XCTAssertTrue(sender.keys.isEmpty)
     }
 
     func testKeyboardServiceRejectsPhysicalSuppressionForAppLease() throws {
@@ -1539,7 +1880,7 @@ final class MacCtlCoreTests: XCTestCase {
         let receipt = try XCTUnwrap(
             receiptStore.list(limit: 10).first(where: { $0.method == "control.perform" })
         )
-        XCTAssertEqual(receipt.schemaVersion, 2)
+        XCTAssertEqual(receipt.schemaVersion, 3)
         XCTAssertEqual(receipt.actionOutcome?.state, .targetAmbiguous)
         XCTAssertEqual(receipt.actionOutcome?.failureClass, "target_ambiguous")
         XCTAssertEqual(receipt.controlTarget?.application.bundleID, app.bundleID)
@@ -1577,6 +1918,48 @@ final class MacCtlCoreTests: XCTestCase {
             )
         ).first)
         XCTAssertFalse(staleBlocker.isFresh)
+    }
+
+    func testSemanticScrollResolutionIncompleteIsDistinctAndNeverFallsBack() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-scroll-resolution-incomplete-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        let app = testApp(name: "Pronto", processID: 42)
+        let performer = RecordingAccessibilityScrollPerformer(
+            failure: .resolutionIncomplete(1)
+        )
+        let input = RecordingInputScrollPerformer()
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "test",
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            accessibilityScrollPerformer: performer,
+            inputScrollPerformer: input
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("scroll"),
+                "app": .string("Pronto"),
+                "confirm": .bool(true),
+                "fallback_route": .string("input_scroll"),
+                "role": .string("AXScrollArea"),
+                "direction": .string("down"),
+                "amount": .number(1)
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(response.error?.details["failure_class"]?.stringValue, "target_resolution_incomplete")
+        XCTAssertEqual(response.error?.details["recommended_provider"]?.stringValue, "computer_use")
+        XCTAssertEqual(response.error?.details["fresh_state_required"]?.boolValue, true)
+        XCTAssertEqual(response.error?.details["fallback_allowed"]?.boolValue, false)
+        XCTAssertEqual(response.outcome?.state, .targetResolutionIncomplete)
+        XCTAssertEqual(response.outcome?.failureClass, "target_resolution_incomplete")
+        XCTAssertEqual(response.outcome?.recommendedProvider, "computer_use")
+        XCTAssertEqual(response.outcome?.nextAction, "get_app_state_then_relocate_target_and_verify_with_computer_use")
+        XCTAssertEqual(input.callCount, 0)
     }
 
     func testKeyboardServiceEnforcesAppAndSessionFocusScopes() throws {
@@ -2276,6 +2659,107 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(action.result["verification"]?.objectValue?["state"]?.stringValue, "passed")
     }
 
+    func testAtomicControlReceiptCarriesExplicitForegroundOracle() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let before = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXTextField",
+            subrole: nil,
+            identifier: "address",
+            title: nil
+        )
+        let after = FocusedElementSnapshot(
+            targetApplication: app,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "reload",
+            title: "Reload"
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: RecordingKeyboardEventSender(),
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            focusedElementInspector: SequencedFocusedElementInspector([before, after]),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "focus_policy": .string("foreground"),
+                "inter_key_ms": .number(0)
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .succeeded)
+        XCTAssertEqual(action.result["focusPolicy"]?.stringValue, "foreground")
+        XCTAssertEqual(action.result["verification"]?.objectValue?["state"]?.stringValue, "passed")
+        XCTAssertEqual(
+            action.result["verification"]?.objectValue?["foregroundChanged"]?.boolValue,
+            false
+        )
+        XCTAssertEqual(action.evidence.first?.metadata["focus_policy"]?.stringValue, "foreground")
+        XCTAssertEqual(
+            action.evidence.first?.metadata["foreground_oracle"]?.stringValue,
+            "target_foreground_unchanged"
+        )
+        XCTAssertEqual(action.evidence.first?.metadata["foreground_state"]?.stringValue, "preserved")
+        XCTAssertEqual(action.outcome?.state, .verifiedSuccess)
+    }
+
+    func testAtomicControlRejectsDirectBackgroundWithTaskRunHandoff() throws {
+        let app = testApp(name: "Chrome", processID: 42)
+        let sender = RecordingKeyboardEventSender()
+        var activationCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardAccessController: KeyboardAccessController(
+                eventSender: sender,
+                preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+            ),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in
+                activationCount += 1
+                return app
+            },
+            hasPostEventAccess: { true }
+        )
+
+        let action = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "focus_policy": .string("background")
+            ]
+        ))
+
+        XCTAssertEqual(action.status, .blocked)
+        XCTAssertEqual(action.error?.code, MacCtlErrorCode.backgroundUnsupported.rawValue)
+        XCTAssertEqual(action.error?.details["focus_policy"]?.stringValue, "background")
+        XCTAssertEqual(action.error?.details["failure_class"]?.stringValue, "action_unavailable")
+        XCTAssertEqual(action.error?.details["recommended_surface"]?.stringValue, "task.run")
+        XCTAssertEqual(
+            action.error?.details["next_action"]?.stringValue,
+            "submit_named_background_task_plan"
+        )
+        XCTAssertEqual(action.outcome?.state, .actionUnavailable)
+        XCTAssertEqual(action.outcome?.nextAction, "submit_named_background_task_plan")
+        XCTAssertEqual(action.evidence.first?.kind, "focus_guard")
+        XCTAssertEqual(activationCount, 0)
+        XCTAssertTrue(sender.keys.isEmpty)
+    }
+
     func testRepeatedTaskRouteSelectionIsCachedWithinHeldLease() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-cache-\(UUID().uuidString)")
@@ -2591,6 +3075,56 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(response.result["handoffProviders"]?.arrayValue?.first?.stringValue, "computer_use")
     }
 
+    func testWebContentCapabilitiesAndExecutionReturnBrowserHandoffWithoutActivation() {
+        let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
+        var activationCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in
+                activationCount += 1
+                return app
+            }
+        )
+
+        let capabilities = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: [
+                "app": .string("Chrome"),
+                "target_surface": .string("web_content")
+            ]
+        ))
+
+        XCTAssertEqual(capabilities.status, .succeeded)
+        XCTAssertEqual(capabilities.result["targetSurface"]?.stringValue, "web_content")
+        XCTAssertEqual(capabilities.result["localExecution"]?.stringValue, "provider_handoff_required")
+        XCTAssertEqual(capabilities.result["foregroundRequirement"]?.stringValue, "not_required_by_surface")
+        XCTAssertEqual(capabilities.result["providerHandoffRequired"]?.boolValue, true)
+        XCTAssertEqual(capabilities.result["recommendedProvider"]?.stringValue, "browser_dom")
+        XCTAssertTrue(
+            capabilities.result["handoffProviders"]?.arrayValue?.contains(.string("browser_dom")) == true
+        )
+
+        let execution = service.handle(RequestEnvelope(
+            method: "control.perform",
+            params: [
+                "action": .string("next-control"),
+                "app": .string("Chrome"),
+                "confirm": .bool(true),
+                "target_surface": .string("web_content")
+            ]
+        ))
+
+        XCTAssertEqual(execution.status, .blocked)
+        XCTAssertEqual(execution.error?.code, MacCtlErrorCode.providerHandoffRequired.rawValue)
+        XCTAssertEqual(execution.error?.details["recommended_surface"]?.stringValue, "browser_connector")
+        XCTAssertEqual(execution.outcome?.state, .actionUnavailable)
+        XCTAssertEqual(execution.outcome?.recommendedProvider, "browser_dom")
+        XCTAssertEqual(execution.outcome?.nextAction, "submit_browser_target_plan")
+        XCTAssertEqual(activationCount, 0)
+    }
+
     func testRouteBenchmarkExecutesAndVerifiesDaemonSamplesBeforePersistence() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-benchmark-\(UUID().uuidString)")
@@ -2735,6 +3269,117 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(osMismatch.invalidationReasons.contains(.osChanged))
     }
 
+    func testCapabilityScrollLocatorsUseAncestorDigestsToDisambiguateRepeatedTargets() throws {
+        let app = testApp(name: "Pronto", processID: 42, bundleVersion: "1")
+        let state = AccessibilityTreeNodeState(
+            enabled: true,
+            focused: false,
+            selected: false,
+            expanded: nil,
+            visible: true,
+            settable: false,
+            hasValue: false
+        )
+        let main = AccessibilityTreeNode(
+            path: "0/0",
+            depth: 1,
+            role: "AXGroup",
+            subrole: nil,
+            identifier: "main-content",
+            label: "Main",
+            actions: [],
+            state: state,
+            bounds: nil,
+            childCount: 1,
+            scrollable: false
+        )
+        let sidebar = AccessibilityTreeNode(
+            path: "0/1",
+            depth: 1,
+            role: "AXGroup",
+            subrole: nil,
+            identifier: "sidebar",
+            label: "Sidebar",
+            actions: [],
+            state: state,
+            bounds: nil,
+            childCount: 1,
+            scrollable: false
+        )
+        let mainScroll = AccessibilityTreeNode(
+            path: "0/0/0",
+            depth: 2,
+            role: "AXScrollArea",
+            subrole: nil,
+            identifier: nil,
+            label: "Content",
+            actions: ["AXScrollDown"],
+            state: state,
+            bounds: CGRect(x: 320, y: 80, width: 960, height: 640),
+            childCount: 0,
+            scrollable: true
+        )
+        let sidebarScroll = AccessibilityTreeNode(
+            path: "0/1/0",
+            depth: 2,
+            role: "AXScrollArea",
+            subrole: nil,
+            identifier: nil,
+            label: "Content",
+            actions: ["AXScrollDown"],
+            state: state,
+            bounds: CGRect(x: 0, y: 80, width: 300, height: 640),
+            childCount: 0,
+            scrollable: true
+        )
+        let tree = AccessibilityTreeReport(
+            application: app,
+            maxNodes: 20,
+            maxDepth: 4,
+            nodeCount: 4,
+            truncated: false,
+            nodes: [main, sidebar, mainScroll, sidebarScroll],
+            identifierMatchCounts: ["main-content": 1, "sidebar": 1],
+            nameMatchCounts: ["Main": 1, "Sidebar": 1, "Content": 2]
+        )
+        let profile = CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: "macOS Test",
+            providerState: CapabilityProviderState(observedProviders: ["accessibility"]),
+            tree: tree
+        )
+        let scrollLocators = profile.locators.filter(\.scrollable)
+
+        XCTAssertEqual(scrollLocators.count, 2)
+        XCTAssertNotEqual(scrollLocators[0].ancestorDigest, scrollLocators[1].ancestorDigest)
+        XCTAssertNotEqual(scrollLocators[0].geometryDigest, scrollLocators[1].geometryDigest)
+        XCTAssertEqual(Set(scrollLocators.map(\.identityDigest)).count, 1)
+
+        let selected = try XCTUnwrap(scrollLocators.first)
+        let selector = Selector(
+            role: "AXScrollArea",
+            locatorDigest: selected.identityDigest,
+            ancestorDigest: selected.ancestorDigest,
+            geometryDigest: selected.geometryDigest
+        )
+        let actionLocator = try XCTUnwrap(
+            CapabilityLocatorDescriptor.from(selector: selector, route: .scroll)
+        )
+        XCTAssertEqual(actionLocator.identityDigest, selected.identityDigest)
+        XCTAssertEqual(actionLocator.ancestorDigest, selected.ancestorDigest)
+        XCTAssertEqual(actionLocator.geometryDigest, selected.geometryDigest)
+        XCTAssertEqual(
+            try JSONCodec.decode(Selector.self, from: JSONCodec.encode(selector)),
+            selector
+        )
+    }
+
+    func testAccessibilitySearchDoesNotTraverseApplicationWindowAliasesTwice() {
+        XCTAssertFalse(AccessibilityController.shouldTraverseApplicationChild(role: "AXWindow"))
+        XCTAssertTrue(AccessibilityController.shouldTraverseApplicationChild(role: "AXMenu"))
+        XCTAssertTrue(AccessibilityController.shouldTraverseApplicationChild(role: nil))
+    }
+
     func testCapabilityProfilePromotionDemotionAndAmbiguousEvidenceAreExplicit() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-capability-evidence-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2829,6 +3474,51 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(truncatedRecord.state, .candidate)
         XCTAssertEqual(truncatedRecord.ambiguousEvidenceCount, 1)
 
+        let duplicateNode = AccessibilityTreeNode(
+            path: "0/1",
+            depth: 1,
+            role: "AXScrollArea",
+            subrole: nil,
+            identifier: "settings",
+            label: "Public label",
+            actions: ["AXScrollDown"],
+            state: AccessibilityTreeNodeState(
+                enabled: true,
+                focused: false,
+                selected: false,
+                expanded: nil,
+                visible: true,
+                settable: false,
+                hasValue: false
+            ),
+            bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            childCount: 0,
+            scrollable: true
+        )
+        let duplicateTree = capabilityTree(for: app, identifier: "settings", scrollable: true)
+        let ambiguousScrollProfile = CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: "macOS Test",
+            providerState: providerState,
+            tree: AccessibilityTreeReport(
+                application: app,
+                maxNodes: 20,
+                maxDepth: 4,
+                nodeCount: 3,
+                truncated: false,
+                nodes: duplicateTree.nodes + [duplicateNode],
+                identifierMatchCounts: ["settings": 2],
+                nameMatchCounts: ["Public label": 2]
+            ),
+            now: now.addingTimeInterval(3)
+        )
+        let ambiguousScrollRecord = try XCTUnwrap(
+            ambiguousScrollProfile.capabilities.first { $0.id == "semantic_scroll" }
+        )
+        XCTAssertEqual(ambiguousScrollRecord.state, .candidate)
+        XCTAssertEqual(ambiguousScrollRecord.lastReason, "repeated_scroll_locator_ambiguous")
+        XCTAssertEqual(ambiguousScrollRecord.ambiguousEvidenceCount, 1)
+
         let failed = try store.recordTaskVerification(
             application: app,
             osVersion: "macOS Test",
@@ -2841,6 +3531,88 @@ final class MacCtlCoreTests: XCTestCase {
             reason: "verification_failed"
         )
         XCTAssertTrue(failed?.invalidationReasons.contains(.verificationFailed) == true)
+    }
+
+    func testCapabilityProfileDoesNotPromoteIncidentalScrollActions() throws {
+        let app = testApp(name: "Pronto", processID: 42, bundleVersion: "1")
+        let state = AccessibilityTreeNodeState(
+            enabled: true,
+            focused: false,
+            selected: false,
+            expanded: nil,
+            visible: true,
+            settable: false,
+            hasValue: false
+        )
+        let incidentalNode = AccessibilityTreeNode(
+            path: "0/0",
+            depth: 1,
+            role: "AXStaticText",
+            subrole: nil,
+            identifier: "content",
+            label: "Content",
+            actions: ["AXScrollToVisible"],
+            state: state,
+            bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            childCount: 0,
+            scrollable: false
+        )
+        let incidentalProfile = CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: "macOS Test",
+            providerState: CapabilityProviderState(observedProviders: ["accessibility"]),
+            tree: AccessibilityTreeReport(
+                application: app,
+                maxNodes: 20,
+                maxDepth: 4,
+                nodeCount: 1,
+                truncated: false,
+                nodes: [incidentalNode],
+                identifierMatchCounts: ["content": 1],
+                nameMatchCounts: ["Content": 1]
+            )
+        )
+        let incidentalRecord = try XCTUnwrap(
+            incidentalProfile.capabilities.first { $0.id == "semantic_scroll" }
+        )
+        XCTAssertEqual(incidentalRecord.state, .demoted)
+        XCTAssertEqual(incidentalRecord.lastReason, "scrollable_element_not_present_in_complete_tree")
+        XCTAssertTrue(incidentalProfile.locators.allSatisfy { !$0.scrollable })
+
+        let roleOnlyNode = AccessibilityTreeNode(
+            path: "0/0",
+            depth: 1,
+            role: "AXScrollArea",
+            subrole: nil,
+            identifier: "content",
+            label: "Content",
+            actions: ["AXScrollToVisible", "AXShowMenu"],
+            state: state,
+            bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+            childCount: 0,
+            scrollable: true
+        )
+        let roleOnlyProfile = CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: "macOS Test",
+            providerState: CapabilityProviderState(observedProviders: ["accessibility"]),
+            tree: AccessibilityTreeReport(
+                application: app,
+                maxNodes: 20,
+                maxDepth: 4,
+                nodeCount: 1,
+                truncated: false,
+                nodes: [roleOnlyNode],
+                identifierMatchCounts: ["content": 1],
+                nameMatchCounts: ["Content": 1]
+            )
+        )
+        let roleOnlyRecord = try XCTUnwrap(
+            roleOnlyProfile.capabilities.first { $0.id == "semantic_scroll" }
+        )
+        XCTAssertEqual(roleOnlyRecord.state, .candidate)
+        XCTAssertEqual(roleOnlyRecord.lastReason, "directional_scroll_action_not_observed")
+        XCTAssertEqual(roleOnlyProfile.locators.filter(\.scrollable).count, 1)
     }
 
     func testCapabilityProfileStorePreservesUnrelatedApplicationProfiles() throws {
@@ -3445,6 +4217,72 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(scroll.calls.count, 1)
     }
 
+    func testSemanticScrollRouteBenchmarkRecordsTaskFailureWithoutManifest() throws {
+        let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
+        let warmPathDirectory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-task-failure-\(UUID().uuidString)")
+        let profileDirectory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-task-profile-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: warmPathDirectory)
+            try? FileManager.default.removeItem(at: profileDirectory)
+        }
+        let warmPathStore = WarmPathStore(directory: warmPathDirectory)
+        let providerState = CapabilityProviderState(
+            permissionStatuses: PermissionDiagnostics.unknownReport()
+        )
+        let profileStore = CapabilityProfileStore(directory: profileDirectory)
+        _ = try profileStore.save(CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            providerState: providerState,
+            tree: capabilityTree(for: app, identifier: "main-scroll", scrollable: true)
+        ))
+        let scroll = RecordingAccessibilityScrollPerformer(verification: .noObservedChange)
+        let service = MacCtlService(
+            permissionContext: "test",
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(sleep: { _ in }),
+            hasPostEventAccess: { true },
+            warmPathStore: warmPathStore,
+            capabilityProfileStore: profileStore,
+            accessibilityScrollPerformer: scroll
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "route.benchmark",
+            params: [
+                "app": .string("Chrome"),
+                "task": .string("scroll-main"),
+                "target_fingerprint": .string("scroll-v1"),
+                "verification_oracle": .string("viewport changed"),
+                "action": .string("scroll"),
+                "route": .string("scroll"),
+                "selector": .object([
+                    "role": .string("AXScrollArea"),
+                    "identifier": .string("main-scroll")
+                ]),
+                "direction": .string("down"),
+                "amount": .number(1),
+                "samples": .number(1),
+                "warmups": .number(0),
+                "confirm": .bool(true)
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertTrue(response.error?.message.contains("no route manifest was written") == true)
+        XCTAssertTrue(warmPathStore.list().isEmpty)
+        let profile = try XCTUnwrap(profileStore.list().first)
+        let taskCapability = try XCTUnwrap(
+            profile.capabilities.first { $0.id == "task.scroll-main.scroll" }
+        )
+        XCTAssertEqual(taskCapability.state, .demoted)
+        XCTAssertEqual(taskCapability.lastReason, "verification_failed")
+        XCTAssertEqual(profile.state, .stale)
+        XCTAssertTrue(profile.invalidationReasons.contains(.verificationFailed))
+    }
+
     func testSemanticScrollRouteBenchmarkRequiresResetForRepeatedSamples() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-scroll-reset-\(UUID().uuidString)")
@@ -3491,7 +4329,22 @@ final class MacCtlCoreTests: XCTestCase {
     func testRouteBenchmarkRejectsUnverifiedWarmupBeforePersistence() throws {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-route-warmup-\(UUID().uuidString)")
+        let profileDirectory = URL(fileURLWithPath: "/private/tmp/macctl-route-warmup-profile-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: profileDirectory)
+        }
         let warmPathStore = WarmPathStore(directory: directory)
+        let providerState = CapabilityProviderState(
+            permissionStatuses: PermissionDiagnostics.unknownReport()
+        )
+        let profileStore = CapabilityProfileStore(directory: profileDirectory)
+        _ = try profileStore.save(CapabilityProfileBuilder.build(
+            application: app,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            providerState: providerState,
+            tree: capabilityTree(for: app, identifier: "address", scrollable: false)
+        ))
         let focused = FocusedElementSnapshot(
             targetApplication: app,
             role: "AXTextField",
@@ -3510,7 +4363,8 @@ final class MacCtlCoreTests: XCTestCase {
             resolveApplication: { _ in app },
             activateApplication: { _ in app },
             hasPostEventAccess: { true },
-            warmPathStore: warmPathStore
+            warmPathStore: warmPathStore,
+            capabilityProfileStore: profileStore
         )
 
         let response = service.handle(RequestEnvelope(
@@ -3531,6 +4385,14 @@ final class MacCtlCoreTests: XCTestCase {
 
         XCTAssertEqual(response.status, .blocked)
         XCTAssertTrue(warmPathStore.list().isEmpty)
+        let profile = try XCTUnwrap(profileStore.list().first)
+        let taskCapability = try XCTUnwrap(
+            profile.capabilities.first { $0.id == "task.focus-next.keyboard" }
+        )
+        XCTAssertEqual(taskCapability.state, .demoted)
+        XCTAssertEqual(taskCapability.lastReason, "verification_failed")
+        XCTAssertEqual(profile.state, .stale)
+        XCTAssertTrue(profile.invalidationReasons.contains(.verificationFailed))
     }
 
     func testAtomicControlRequiresOneExplicitAuthorityModeAndConfirmation() throws {
@@ -3753,7 +4615,8 @@ final class MacCtlCoreTests: XCTestCase {
         ))
 
         XCTAssertTrue(chrome.contractCapabilities.contains("window_scoped_accessibility_selector"))
-        XCTAssertEqual(chrome.schemaVersion, 2)
+        XCTAssertEqual(chrome.schemaVersion, 5)
+        XCTAssertTrue(chrome.contractCapabilities.contains("control.capability_leads"))
         XCTAssertTrue(chrome.contractCapabilities.contains("verified_context_menu"))
         XCTAssertTrue(chrome.contractCapabilities.contains("control.blocker_observations"))
         XCTAssertEqual(chrome.unsupportedCapabilities, ["chrome_tab_group_mutation"])
@@ -3878,7 +4741,11 @@ final class MacCtlCoreTests: XCTestCase {
                 "focus_policy": .string("background")
             ]
         ))
-        XCTAssertEqual(executed.status, .succeeded)
+        XCTAssertEqual(
+            executed.status,
+            .succeeded,
+            executed.error.map { "\($0.code): \($0.message) \($0.details)" } ?? "no error"
+        )
         XCTAssertEqual(executed.result["focus_policy"]?.stringValue, "background")
         XCTAssertTrue(executed.evidence.contains { $0.kind == "focus_guard" })
 
@@ -4429,6 +5296,89 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertFalse(invalid.valid)
         XCTAssertTrue(invalid.errors.contains { $0.contains("Accessibility selector") })
         XCTAssertTrue(invalid.errors.contains { $0.contains("target application") })
+    }
+
+    func testBackgroundTaskValidationAdmitsSemanticAndExplicitlySafeAdapterRoutes() {
+        let target = TaskTargetIdentity(application: "Finder")
+        let search = ActionSpec(
+            kind: .search,
+            surface: .macApp,
+            selector: Selector(role: "AXTextField", subrole: "AXSearchField"),
+            parameters: [
+                "text_source": .string("ephemeral"),
+                "input_key": .string("query"),
+                "replace_existing": .bool(true)
+            ]
+        )
+        let scroll = ActionSpec(
+            kind: .scroll,
+            surface: .macApp,
+            selector: Selector(role: "AXScrollArea", identifier: "files"),
+            parameters: ["direction": .string("down"), "amount": .number(1)]
+        )
+        let inspect = ActionSpec(
+            kind: .adapter,
+            surface: .macApp,
+            parameters: [
+                "adapter_id": .string("finder"),
+                "operation": .string("inspect.front-window")
+            ]
+        )
+        let plan = TaskPlan(
+            id: "background.semantic",
+            name: "Background semantic actions",
+            summary: "Use target-addressed operations without foreground input",
+            focusPolicy: .background,
+            steps: [
+                TaskStep(id: "search", action: search, target: target, approvalReason: "Search Finder"),
+                TaskStep(id: "scroll", action: scroll, target: target),
+                TaskStep(
+                    id: "inspect",
+                    action: inspect,
+                    target: target,
+                    approvalReason: "Inspect the Finder window"
+                )
+            ]
+        )
+        let registry = AppAdapterRegistry(permissionChecker: { _ in true })
+
+        let validation = TaskPlanValidator.validate(plan, adapterRegistry: registry)
+
+        XCTAssertTrue(validation.valid, validation.errors.joined(separator: "; "))
+        XCTAssertEqual(
+            try? registry.operation(adapterID: "finder", name: "inspect.front-window").focusSupport,
+            .backgroundSafe
+        )
+
+        let foregroundAdapter = TaskPlan(
+            id: "background.adapter.activate",
+            name: "Unsafe adapter",
+            summary: "Attempt a foreground-only adapter operation",
+            focusPolicy: .background,
+            steps: [TaskStep(
+                id: "activate",
+                action: ActionSpec(
+                    kind: .adapter,
+                    surface: .macApp,
+                    parameters: [
+                        "adapter_id": .string("finder"),
+                        "operation": .string("activate")
+                    ]
+                ),
+                target: target
+            )]
+        )
+        let rejected = TaskPlanValidator.validate(foregroundAdapter, adapterRegistry: registry)
+        XCTAssertFalse(rejected.valid)
+        XCTAssertTrue(rejected.errors.contains { $0.contains("background-safe adapter operation") })
+    }
+
+    func testLegacyAdapterOperationDefaultsToForegroundOnly() throws {
+        let data = Data(#"{"name":"legacy.inspect","mutating":false,"risk":"safe","routes":["accessibility"]}"#.utf8)
+
+        let operation = try JSONDecoder().decode(AppAdapterOperation.self, from: data)
+
+        XCTAssertEqual(operation.focusSupport, .foregroundOnly)
     }
 
     func testTaskInputChannelCannotBeReusedByAnotherTaskOrPlanDigest() throws {
@@ -5384,7 +6334,7 @@ final class MacCtlCoreTests: XCTestCase {
         let completedAt = Date(timeIntervalSince1970: 9_999)
         let taskCapabilities = TaskCapabilityReport()
         let capabilityReport = CapabilityReport(
-            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "route.benchmark", "shortcut.audit", "shortcut.run"],
+            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "shortcut.audit", "shortcut.run"],
             optionalBackends: [],
             permissionGates: [],
             safety: [
@@ -5393,6 +6343,9 @@ final class MacCtlCoreTests: XCTestCase {
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+                "authorization notices are short-lived, owner-local, redacted, and explanatory only; Mac Control never approves or denies the native macOS prompt",
+                "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
+                "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference",
                 "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
                 "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
             ],
@@ -5574,6 +6527,10 @@ final class MacCtlCoreTests: XCTestCase {
             report.checks.first(where: { $0.id == "agent.contract" })?.state,
             .passed
         )
+        XCTAssertEqual(
+            report.checks.first(where: { $0.id == "authorization.notice" })?.state,
+            .passed
+        )
 
         let unverifiedKeyboardReceipts = receipts.map { existing in
             guard existing.method == "keyboard.navigate" else { return existing }
@@ -5713,8 +6670,12 @@ private func testWarmPathContext() -> WarmPathContextIdentity {
 
 private final class RecordingKeyboardEventSender: KeyboardEventSending {
     private(set) var keys: [String] = []
+    var shouldFail = false
 
     func send(keySpecification: String) throws {
+        if shouldFail {
+            throw KeyboardControlError.invalidSequence("test")
+        }
         keys.append(keySpecification)
     }
 }

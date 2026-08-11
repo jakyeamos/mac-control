@@ -129,8 +129,24 @@ public final class WorkflowRegistry {
         if workflow.focusPolicy == .background {
             for (index, action) in workflow.actions.enumerated() {
                 switch action.kind {
-                case .activateWindow, .scroll, .search, .command:
+                case .activateWindow, .command:
                     errors.append("Background action \(index) cannot use \(action.kind.rawValue)")
+                case .search:
+                    if action.surface != .macApp
+                        || action.selector?.addressability != .accessibility
+                        || !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background search action \(index) requires a named macOS app and Accessibility selector")
+                    }
+                    if action.parameters["replace_existing"]?.boolValue == false {
+                        errors.append("Background search action \(index) must replace existing text")
+                    }
+                case .scroll:
+                    if action.surface != .macApp
+                        || action.selector?.addressability != .accessibility
+                        || action.selector?.role != "AXScrollArea"
+                        || !Self.hasAppParameter(action.parameters) {
+                        errors.append("Background scroll action \(index) requires a named AXScrollArea target")
+                    }
                 case .click:
                     if action.surface != .macApp {
                         errors.append("Background click action \(index) must target a macOS app")

@@ -98,6 +98,76 @@ final class ControlCenterTests: XCTestCase {
             XCTAssertFalse(presentation.accessibilityLabel.contains("mca_"))
         }
 
+        let focusedExecution = ControlCenterExecution(
+            executionID: "focused-execution",
+            taskID: "focus-task",
+            summary: "Focus test",
+            applicationName: "Calculator",
+            physicalInputMode: .shared,
+            acquiredAt: now,
+            expiresAt: now.addingTimeInterval(100),
+            focusPolicy: .foreground
+        )
+        let focusedPresentation = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: focusedExecution,
+                permissions: [granted]
+            ),
+            now: now.addingTimeInterval(10)
+        )
+        XCTAssertEqual(focusedPresentation.state, .focused)
+        XCTAssertEqual(focusedPresentation.label, "Focused")
+        XCTAssertTrue(focusedPresentation.tooltip.contains("Focused to Calculator"))
+        XCTAssertTrue(focusedPresentation.accessibilityLabel.contains("Focused to Calculator"))
+
+        let activity = ControlCenterFocusActivity(
+            applicationName: "Google Chrome",
+            phase: .focusing,
+            startedAt: now,
+            expiresAt: now.addingTimeInterval(3)
+        )
+        let focusingPresentation = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [granted],
+                focusActivity: activity
+            ),
+            now: now.addingTimeInterval(1)
+        )
+        XCTAssertEqual(focusingPresentation.state, .focusing)
+        XCTAssertEqual(focusingPresentation.label, "Focusing")
+
+        let completedActivity = ControlCenterFocusActivity(
+            applicationName: activity.applicationName,
+            phase: .focused,
+            startedAt: activity.startedAt,
+            expiresAt: activity.expiresAt
+        )
+        let focusedActivityPresentation = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [granted],
+                focusActivity: completedActivity
+            ),
+            now: now.addingTimeInterval(1)
+        )
+        XCTAssertEqual(focusedActivityPresentation.state, .focused)
+        XCTAssertEqual(focusedActivityPresentation.label, "Focused")
+
+        let expiredActivityPresentation = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [granted],
+                focusActivity: completedActivity
+            ),
+            now: now.addingTimeInterval(4)
+        )
+        XCTAssertEqual(expiredActivityPresentation.state, .idle)
+
         XCTAssertEqual(
             ControlCenterPresentation.make(
                 snapshot: ControlCenterSnapshot(
@@ -109,6 +179,210 @@ final class ControlCenterTests: XCTestCase {
             ).state,
             .degraded
         )
+    }
+
+    func testHandsOffPresentationCoversTheWholeRunAndOutranksTransientFocusNotices() {
+        let now = Date(timeIntervalSince1970: 20_000)
+        let granted = permission("Accessibility", "granted")
+        let session = ControlCenterHandsOffSession(
+            sessionID: "run-1",
+            provider: "computer_use",
+            taskID: "context-menu",
+            applicationName: "Google Chrome",
+            startedAt: now,
+            lastHeartbeatAt: now,
+            expiresAt: now.addingTimeInterval(80)
+        )
+        let execution = ControlCenterExecution(
+            executionID: "execution",
+            taskID: "context-menu",
+            summary: "Computer Use handoff",
+            applicationName: "Google Chrome",
+            physicalInputMode: .shared,
+            acquiredAt: now,
+            expiresAt: now.addingTimeInterval(100),
+            focusPolicy: .foreground
+        )
+        let transientFocus = ControlCenterFocusActivity(
+            applicationName: "Google Chrome",
+            phase: .focused,
+            startedAt: now,
+            expiresAt: now.addingTimeInterval(3)
+        )
+
+        let active = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: execution,
+                permissions: [granted],
+                focusActivity: transientFocus,
+                handsOffSession: session
+            ),
+            now: now.addingTimeInterval(10)
+        )
+        XCTAssertEqual(active.state, .handsOff)
+        XCTAssertEqual(active.label, "Hands Off")
+        XCTAssertTrue(active.tooltip.contains("Hands off"))
+        XCTAssertTrue(active.accessibilityLabel.contains("Hands off to Google Chrome"))
+        XCTAssertEqual(active.ringFraction ?? 0, 0.875, accuracy: 0.001)
+
+        let standalone = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [granted],
+                focusActivity: transientFocus,
+                handsOffSession: session
+            ),
+            now: now.addingTimeInterval(1)
+        )
+        XCTAssertEqual(standalone.state, .handsOff)
+        XCTAssertEqual(standalone.label, "Hands Off")
+        XCTAssertTrue(standalone.tooltip.contains("Google Chrome"))
+        XCTAssertTrue(standalone.tooltip.contains("computer use active"))
+
+        let frozen = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: ControlCenterExecution(
+                    executionID: execution.executionID,
+                    taskID: execution.taskID,
+                    summary: execution.summary,
+                    applicationName: execution.applicationName,
+                    physicalInputMode: .suppressed,
+                    acquiredAt: execution.acquiredAt,
+                    expiresAt: execution.expiresAt,
+                    focusPolicy: execution.focusPolicy
+                ),
+                permissions: [granted],
+                handsOffSession: session
+            ),
+            now: now.addingTimeInterval(10)
+        )
+        XCTAssertEqual(frozen.state, .frozen)
+
+        let expired = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [granted],
+                focusActivity: transientFocus,
+                handsOffSession: session
+            ),
+            now: now.addingTimeInterval(81)
+        )
+        XCTAssertEqual(expired.state, .idle)
+    }
+
+    func testHandsOffSessionIsRunScopedBoundedAndStopsLifecycle() throws {
+        let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-hands-off-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: receiptDirectory) }
+        var now = Date(timeIntervalSince1970: 30_000)
+        let service = MacCtlService(
+            receiptStore: OperationReceiptStore(directory: receiptDirectory),
+            permissionContext: "test",
+            lifecycleNow: { now },
+            lifecycleDrainDuration: 2
+        )
+
+        let missingConfirmation = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: ["provider": .string("computer_use")]
+        ))
+        XCTAssertEqual(missingConfirmation.status, .blocked)
+        XCTAssertEqual(
+            missingConfirmation.error?.code,
+            MacCtlErrorCode.handsOffSessionConfirmationRequired.rawValue
+        )
+
+        let begin = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: [
+                "confirm": .bool(true),
+                "provider": .string("computer_use"),
+                "app": .string("Google Chrome"),
+                "task_id": .string("context-menu"),
+                "seconds": .number(20)
+            ]
+        ))
+        XCTAssertEqual(begin.status, .succeeded)
+        let sessionValue = try XCTUnwrap(begin.result["hands_off_session"])
+        let session = try JSONCodec.decode(
+            ControlCenterHandsOffSession.self,
+            from: try JSONCodec.encode(sessionValue)
+        )
+        XCTAssertEqual(session.provider, "computer_use")
+        XCTAssertEqual(session.applicationName, "Google Chrome")
+        XCTAssertEqual(session.taskID, "context-menu")
+        XCTAssertEqual(service.controlCenterSnapshot().handsOffSession, session)
+
+        let activeStatus = service.handle(RequestEnvelope(method: "control.hands_off.status"))
+        XCTAssertEqual(activeStatus.status, .succeeded)
+        XCTAssertEqual(activeStatus.result["active"]?.boolValue, true)
+
+        let lifecycleBlocked = service.handle(RequestEnvelope(
+            method: "daemon.lifecycle.prepare",
+            params: ["operation": .string(DaemonLifecycleOperation.restart.rawValue)]
+        ))
+        XCTAssertEqual(lifecycleBlocked.status, .blocked)
+        XCTAssertEqual(lifecycleBlocked.error?.code, MacCtlErrorCode.daemonLifecycleBlocked.rawValue)
+        XCTAssertEqual(lifecycleBlocked.error?.details["hands_off_session_active"]?.boolValue, true)
+
+        now = now.addingTimeInterval(5)
+        let heartbeat = service.handle(RequestEnvelope(
+            method: "control.hands_off.heartbeat",
+            params: [
+                "session_id": .string(session.sessionID),
+                "seconds": .number(30)
+            ]
+        ))
+        XCTAssertEqual(heartbeat.status, .succeeded)
+        XCTAssertEqual(service.controlCenterSnapshot().handsOffSession?.lastHeartbeatAt, now)
+        XCTAssertEqual(service.controlCenterSnapshot().handsOffSession?.expiresAt, now.addingTimeInterval(30))
+
+        let duplicate = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: ["confirm": .bool(true)]
+        ))
+        XCTAssertEqual(duplicate.status, .blocked)
+        XCTAssertEqual(duplicate.error?.code, MacCtlErrorCode.handsOffSessionActive.rawValue)
+
+        let ended = service.handle(RequestEnvelope(
+            method: "control.hands_off.end",
+            params: ["session_id": .string(session.sessionID)]
+        ))
+        XCTAssertEqual(ended.status, .succeeded)
+        XCTAssertEqual(ended.result["released"]?.boolValue, true)
+        XCTAssertNil(service.controlCenterSnapshot().handsOffSession)
+
+        let expiring = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: [
+                "confirm": .bool(true),
+                "provider": .string("mac_control"),
+                "seconds": .number(5)
+            ]
+        ))
+        let expiringSessionObject = try XCTUnwrap(expiring.result["hands_off_session"]?.objectValue)
+        let expiringID = try XCTUnwrap(expiringSessionObject["session_id"]?.stringValue)
+        now = now.addingTimeInterval(6)
+        let expiredHeartbeat = service.handle(RequestEnvelope(
+            method: "control.hands_off.heartbeat",
+            params: ["session_id": .string(expiringID)]
+        ))
+        XCTAssertEqual(expiredHeartbeat.status, .blocked)
+        XCTAssertEqual(expiredHeartbeat.error?.code, MacCtlErrorCode.handsOffSessionExpired.rawValue)
+        XCTAssertNil(service.controlCenterSnapshot().handsOffSession)
+
+        let stoppedRun = service.handle(RequestEnvelope(
+            method: "control.hands_off.begin",
+            params: ["confirm": .bool(true), "seconds": .number(20)]
+        ))
+        XCTAssertEqual(stoppedRun.status, .succeeded)
+        let stopped = service.handle(RequestEnvelope(method: "control.stop_active"))
+        XCTAssertEqual(stopped.status, .succeeded)
+        XCTAssertEqual(stopped.result["hands_off_session_ended"]?.boolValue, true)
+        XCTAssertNil(service.controlCenterSnapshot().handsOffSession)
     }
 
     func testHandoffTargetUsesFirstDeclaredForegroundInputTargetOnly() {

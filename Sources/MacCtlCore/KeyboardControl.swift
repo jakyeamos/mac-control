@@ -13,6 +13,11 @@ public enum KeyboardPhysicalInputMode: String, Codable, Equatable, CaseIterable 
     case suppressed
 }
 
+public enum KeyboardNavigationMode: String, Codable, Equatable, CaseIterable {
+    case unchanged
+    case navigation
+}
+
 public enum KeyboardCommand: String, Codable, Equatable, CaseIterable {
     case nextControl = "next-control"
     case previousControl = "previous-control"
@@ -93,6 +98,8 @@ public struct KeyboardDriveLease: Codable, Equatable {
     public let token: String
     public let scope: KeyboardLeaseScope
     public let physicalInputMode: KeyboardPhysicalInputMode
+    public let navigationMode: KeyboardNavigationMode
+    public let passThroughTransitionOwned: Bool
     /// Only presence is retained; the human-supplied reason never enters a
     /// lease response, receipt, or log.
     public let freezeReasonProvided: Bool
@@ -104,6 +111,8 @@ public struct KeyboardDriveLease: Codable, Equatable {
         case token
         case scope
         case physicalInputMode
+        case navigationMode
+        case passThroughTransitionOwned
         case freezeReasonProvided
         case application
         case acquiredAt
@@ -117,11 +126,15 @@ public struct KeyboardDriveLease: Codable, Equatable {
         acquiredAt: Date,
         expiresAt: Date,
         physicalInputMode: KeyboardPhysicalInputMode = .shared,
-        freezeReasonProvided: Bool = false
+        freezeReasonProvided: Bool = false,
+        navigationMode: KeyboardNavigationMode = .unchanged,
+        passThroughTransitionOwned: Bool = false
     ) {
         self.token = token
         self.scope = scope
         self.physicalInputMode = physicalInputMode
+        self.navigationMode = navigationMode
+        self.passThroughTransitionOwned = passThroughTransitionOwned
         self.freezeReasonProvided = freezeReasonProvided
         self.application = application
         self.acquiredAt = acquiredAt
@@ -136,6 +149,14 @@ public struct KeyboardDriveLease: Codable, Equatable {
             KeyboardPhysicalInputMode.self,
             forKey: .physicalInputMode
         ) ?? .shared
+        navigationMode = try container.decodeIfPresent(
+            KeyboardNavigationMode.self,
+            forKey: .navigationMode
+        ) ?? .unchanged
+        passThroughTransitionOwned = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .passThroughTransitionOwned
+        ) ?? false
         freezeReasonProvided = try container.decodeIfPresent(Bool.self, forKey: .freezeReasonProvided) ?? false
         application = try container.decodeIfPresent(AppInfo.self, forKey: .application)
         acquiredAt = try container.decode(Date.self, forKey: .acquiredAt)
@@ -149,19 +170,46 @@ public struct KeyboardAccessStatus: Codable, Equatable {
     public let permissions: [PermissionStatus]
     public let setupPath: String
     public let activeLease: KeyboardDriveLease?
+    public let navigationRestorationPending: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case fullKeyboardAccessEnabled
+        case permissionContext
+        case permissions
+        case setupPath
+        case activeLease
+        case navigationRestorationPending
+    }
 
     public init(
         fullKeyboardAccessEnabled: Bool?,
         permissionContext: String,
         permissions: [PermissionStatus],
         setupPath: String = KeyboardAccessController.settingsPath,
-        activeLease: KeyboardDriveLease? = nil
+        activeLease: KeyboardDriveLease? = nil,
+        navigationRestorationPending: Bool = false
     ) {
         self.fullKeyboardAccessEnabled = fullKeyboardAccessEnabled
         self.permissionContext = permissionContext
         self.permissions = permissions
         self.setupPath = setupPath
         self.activeLease = activeLease
+        self.navigationRestorationPending = navigationRestorationPending
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        fullKeyboardAccessEnabled = try container.decodeIfPresent(Bool.self, forKey: .fullKeyboardAccessEnabled)
+        permissionContext = try container.decodeIfPresent(String.self, forKey: .permissionContext) ?? "unknown"
+        permissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .permissions)
+            ?? PermissionDiagnostics.unknownReport()
+        setupPath = try container.decodeIfPresent(String.self, forKey: .setupPath)
+            ?? KeyboardAccessController.settingsPath
+        activeLease = try container.decodeIfPresent(KeyboardDriveLease.self, forKey: .activeLease)
+        navigationRestorationPending = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .navigationRestorationPending
+        ) ?? false
     }
 
     public static func unknown(permissionContext: String = "unknown") -> KeyboardAccessStatus {
@@ -327,6 +375,11 @@ public enum KeyboardDriveStoreError: Error, LocalizedError, Equatable {
     case physicalKeyboardSuppressionRequiresSession
     case physicalKeyboardSuppressionReasonRequired
     case physicalKeyboardSuppressionUnavailable
+    case navigationModeRequiresSession
+    case navigationModeRequiresPassThroughAssertion
+    case navigationModeRestorationPending
+    case navigationModeTransitionFailed
+    case navigationModeRestorationFailed
     case notFound
     case expired
 
@@ -346,6 +399,16 @@ public enum KeyboardDriveStoreError: Error, LocalizedError, Equatable {
             return "Physical keyboard suppression requires a non-empty human-readable reason"
         case .physicalKeyboardSuppressionUnavailable:
             return "macOS could not enable physical keyboard suppression; verify Accessibility and Input Monitoring permissions"
+        case .navigationModeRequiresSession:
+            return "Keyboard navigation mode is available only for session-scoped leases"
+        case .navigationModeRequiresPassThroughAssertion:
+            return "Keyboard navigation mode requires an explicit assertion that Pass-Through Mode is active"
+        case .navigationModeRestorationPending:
+            return "Pass-Through Mode restoration is pending after an ambiguous keyboard transition; reconcile macOS keyboard state before acquiring another navigation lease"
+        case .navigationModeTransitionFailed:
+            return "macOS Pass-Through Mode could not be toggled; keyboard navigation mode was not acquired"
+        case .navigationModeRestorationFailed:
+            return "macOS Pass-Through Mode could not be restored; keyboard navigation leases are blocked until keyboard state is reconciled"
         case .notFound:
             return "The keyboard lease token is invalid"
         case .expired:
@@ -396,6 +459,25 @@ extension InputController: KeyboardEventSending {
     }
 }
 
+public protocol KeyboardPassThroughToggling {
+    func togglePassThroughMode() throws
+}
+
+public struct SystemKeyboardPassThroughToggler: KeyboardPassThroughToggling {
+    private let eventSender: KeyboardEventSending
+
+    public init(eventSender: KeyboardEventSending = InputController()) {
+        self.eventSender = eventSender
+    }
+
+    public func togglePassThroughMode() throws {
+        guard let specification = KeyboardCommand.passThrough.keySpecifications.first else {
+            throw KeyboardControlError.invalidSequence("pass-through")
+        }
+        try eventSender.send(keySpecification: specification)
+    }
+}
+
 public final class KeyboardDriveStore {
     public static let defaultLifetime: TimeInterval = 120
     public static let maximumLifetime: TimeInterval = 300
@@ -408,18 +490,22 @@ public final class KeyboardDriveStore {
     private let defaultLifetime: TimeInterval
     private let now: () -> Date
     private let physicalKeyboardSuppressor: PhysicalKeyboardSuppressing
+    private let passThroughToggler: KeyboardPassThroughToggling
     private let expiryQueue = DispatchQueue(label: "com.jakyeamos.macctl.keyboard-lease-expiry")
     private var active: ActiveLease?
     private var expiryWorkItem: DispatchWorkItem?
+    private var navigationRestorationPending = false
 
     public init(
         defaultLifetime: TimeInterval = KeyboardDriveStore.defaultLifetime,
         now: @escaping () -> Date = Date.init,
-        physicalKeyboardSuppressor: PhysicalKeyboardSuppressing = SystemPhysicalKeyboardSuppressor()
+        physicalKeyboardSuppressor: PhysicalKeyboardSuppressing = SystemPhysicalKeyboardSuppressor(),
+        passThroughToggler: KeyboardPassThroughToggling = SystemKeyboardPassThroughToggler()
     ) {
         self.defaultLifetime = min(max(defaultLifetime, 0.001), KeyboardDriveStore.maximumLifetime)
         self.now = now
         self.physicalKeyboardSuppressor = physicalKeyboardSuppressor
+        self.passThroughToggler = passThroughToggler
     }
 
     deinit {
@@ -432,7 +518,9 @@ public final class KeyboardDriveStore {
         seconds: TimeInterval?,
         confirm: Bool,
         physicalInputMode: KeyboardPhysicalInputMode = .shared,
-        freezeReason: String? = nil
+        freezeReason: String? = nil,
+        navigationMode: KeyboardNavigationMode = .unchanged,
+        fromPassThrough: Bool = false
     ) throws -> KeyboardDriveLease {
         guard confirm else { throw KeyboardDriveStoreError.confirmationRequired }
         let lifetime = seconds ?? defaultLifetime
@@ -449,12 +537,22 @@ public final class KeyboardDriveStore {
         if physicalInputMode == .suppressed, !hasFreezeReason {
             throw KeyboardDriveStoreError.physicalKeyboardSuppressionReasonRequired
         }
+        if navigationMode == .navigation, scope != .session {
+            throw KeyboardDriveStoreError.navigationModeRequiresSession
+        }
+        if navigationMode == .navigation, !fromPassThrough {
+            throw KeyboardDriveStoreError.navigationModeRequiresPassThroughAssertion
+        }
         lock.lock()
         let current = now()
-        if let expiredMode = removeExpiredLocked(at: current) {
+        if let expiredLease = removeExpiredLocked(at: current) {
             lock.unlock()
-            releasePhysicalInputIfNeeded(expiredMode)
+            try? cleanup(expiredLease, throwOnRestoreFailure: false)
             lock.lock()
+        }
+        guard !navigationRestorationPending else {
+            lock.unlock()
+            throw KeyboardDriveStoreError.navigationModeRestorationPending
         }
         guard active == nil else {
             lock.unlock()
@@ -467,7 +565,9 @@ public final class KeyboardDriveStore {
             acquiredAt: current,
             expiresAt: current.addingTimeInterval(lifetime),
             physicalInputMode: physicalInputMode,
-            freezeReasonProvided: hasFreezeReason
+            freezeReasonProvided: hasFreezeReason,
+            navigationMode: navigationMode,
+            passThroughTransitionOwned: navigationMode == .navigation
         )
 
         if physicalInputMode == .suppressed {
@@ -477,6 +577,18 @@ public final class KeyboardDriveStore {
                 lock.unlock()
                 physicalKeyboardSuppressor.release()
                 throw KeyboardDriveStoreError.physicalKeyboardSuppressionUnavailable
+            }
+        }
+        if navigationMode == .navigation {
+            do {
+                try passThroughToggler.togglePassThroughMode()
+            } catch {
+                if physicalInputMode == .suppressed {
+                    physicalKeyboardSuppressor.release()
+                }
+                navigationRestorationPending = true
+                lock.unlock()
+                throw KeyboardDriveStoreError.navigationModeTransitionFailed
             }
         }
         active = ActiveLease(lease: lease)
@@ -493,9 +605,9 @@ public final class KeyboardDriveStore {
         }
         let current = now()
         guard active.lease.expiresAt > current else {
-            let mode = removeActiveLocked()
+            let expiredLease = removeActiveLocked()
             lock.unlock()
-            releasePhysicalInputIfNeeded(mode)
+            try? cleanup(expiredLease, throwOnRestoreFailure: false)
             throw KeyboardDriveStoreError.expired
         }
         lock.unlock()
@@ -510,9 +622,9 @@ public final class KeyboardDriveStore {
         }
         let current = now()
         guard active.lease.expiresAt > current else {
-            let mode = removeActiveLocked()
+            let expiredLease = removeActiveLocked()
             lock.unlock()
-            releasePhysicalInputIfNeeded(mode)
+            try? cleanup(expiredLease, throwOnRestoreFailure: false)
             return nil
         }
         lock.unlock()
@@ -528,15 +640,15 @@ public final class KeyboardDriveStore {
         }
         let current = now()
         guard active.lease.expiresAt > current else {
-            let mode = removeActiveLocked()
+            let expiredLease = removeActiveLocked()
             lock.unlock()
-            releasePhysicalInputIfNeeded(mode)
+            try? cleanup(expiredLease, throwOnRestoreFailure: false)
             throw KeyboardDriveStoreError.expired
         }
         let lease = active.lease
-        let mode = removeActiveLocked()
+        let removedLease = removeActiveLocked()
         lock.unlock()
-        releasePhysicalInputIfNeeded(mode)
+        try cleanup(removedLease, throwOnRestoreFailure: true)
         return lease
     }
 
@@ -551,9 +663,9 @@ public final class KeyboardDriveStore {
             lock.unlock()
             return false
         }
-        let mode = removeActiveLocked()
+        let removedLease = removeActiveLocked()
         lock.unlock()
-        releasePhysicalInputIfNeeded(mode)
+        try? cleanup(removedLease, throwOnRestoreFailure: false)
         return true
     }
 
@@ -561,27 +673,48 @@ public final class KeyboardDriveStore {
     /// This is called during daemon shutdown and is safe to invoke repeatedly.
     public func shutdown() {
         lock.lock()
-        let mode = removeActiveLocked()
+        let removedLease = removeActiveLocked()
         lock.unlock()
-        releasePhysicalInputIfNeeded(mode)
+        try? cleanup(removedLease, throwOnRestoreFailure: false)
     }
 
-    private func removeActiveLocked() -> KeyboardPhysicalInputMode? {
+    public var isNavigationRestorationPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return navigationRestorationPending
+    }
+
+    private func removeActiveLocked() -> KeyboardDriveLease? {
         guard let active else { return nil }
         self.active = nil
         expiryWorkItem?.cancel()
         expiryWorkItem = nil
-        return active.lease.physicalInputMode
+        return active.lease
     }
 
-    private func removeExpiredLocked(at date: Date) -> KeyboardPhysicalInputMode? {
+    private func removeExpiredLocked(at date: Date) -> KeyboardDriveLease? {
         guard let active, active.lease.expiresAt <= date else { return nil }
         return removeActiveLocked()
     }
 
-    private func releasePhysicalInputIfNeeded(_ mode: KeyboardPhysicalInputMode?) {
-        guard mode == .suppressed else { return }
-        physicalKeyboardSuppressor.release()
+    private func cleanup(_ lease: KeyboardDriveLease?, throwOnRestoreFailure: Bool) throws {
+        guard let lease else { return }
+        if lease.physicalInputMode == .suppressed {
+            physicalKeyboardSuppressor.release()
+        }
+        guard lease.passThroughTransitionOwned else { return }
+        do {
+            try passThroughToggler.togglePassThroughMode()
+        } catch {
+            lock.lock()
+            navigationRestorationPending = true
+            lock.unlock()
+            if throwOnRestoreFailure {
+                // The lease has already been removed, so callers cannot safely
+                // retry this transition through the old token.
+                throw KeyboardDriveStoreError.navigationModeRestorationFailed
+            }
+        }
     }
 
     private func scheduleExpirationLocked(for lease: KeyboardDriveLease) {
@@ -606,9 +739,9 @@ public final class KeyboardDriveStore {
             lock.unlock()
             return
         }
-        let mode = removeActiveLocked()
+        let removedLease = removeActiveLocked()
         lock.unlock()
-        releasePhysicalInputIfNeeded(mode)
+        try? cleanup(removedLease, throwOnRestoreFailure: false)
     }
 }
 
@@ -631,7 +764,8 @@ public final class KeyboardAccessController {
 
     public func status(
         permissionContext: String = "daemon",
-        activeLease: KeyboardDriveLease? = nil
+        activeLease: KeyboardDriveLease? = nil,
+        navigationRestorationPending: Bool = false
     ) -> KeyboardAccessStatus {
         KeyboardAccessStatus(
             fullKeyboardAccessEnabled: permissionContext == "unknown"
@@ -641,7 +775,8 @@ public final class KeyboardAccessController {
             permissions: permissionContext == "unknown"
                 ? PermissionDiagnostics.unknownReport()
                 : PermissionDiagnostics.report(),
-            activeLease: activeLease
+            activeLease: activeLease,
+            navigationRestorationPending: navigationRestorationPending
         )
     }
 
@@ -652,14 +787,19 @@ public final class KeyboardAccessController {
     public func enable(
         confirm: Bool,
         permissionContext: String = "daemon",
-        activeLease: KeyboardDriveLease? = nil
+        activeLease: KeyboardDriveLease? = nil,
+        navigationRestorationPending: Bool = false
     ) throws -> KeyboardAccessStatus {
         guard confirm else { throw KeyboardControlError.confirmationRequired }
         try preferenceStore.enableFullKeyboardAccess()
         guard preferenceStore.fullKeyboardAccessEnabled else {
             throw KeyboardControlError.enableVerificationFailed
         }
-        return status(permissionContext: permissionContext, activeLease: activeLease)
+        return status(
+            permissionContext: permissionContext,
+            activeLease: activeLease,
+            navigationRestorationPending: navigationRestorationPending
+        )
     }
 
     public func send(

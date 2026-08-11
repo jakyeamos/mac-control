@@ -65,6 +65,35 @@ private struct DaemonLifecycleAdmissionError: Error, LocalizedError {
     }
 }
 
+private enum HandsOffSessionError: Error, LocalizedError {
+    case confirmationRequired
+    case invalidProvider(String)
+    case invalidDuration
+    case active
+    case notFound
+    case expired
+    case mismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .confirmationRequired:
+            return "Starting a hands-off run requires explicit confirmation"
+        case let .invalidProvider(provider):
+            return "Unsupported hands-off provider: \(provider)"
+        case .invalidDuration:
+            return "Hands-off duration must be between 5 and 300 seconds"
+        case .active:
+            return "A hands-off run is already active"
+        case .notFound:
+            return "Hands-off session was not found"
+        case .expired:
+            return "Hands-off session expired; start a new session before continuing"
+        case .mismatch:
+            return "Hands-off session does not match the active run"
+        }
+    }
+}
+
 private struct SemanticScrollFailure: Error, LocalizedError {
     let failureClass: SemanticScrollFailureClass
     let message: String
@@ -128,7 +157,8 @@ public final class MacCtlService {
     private static let lifecycleReadOnlyMethods: Set<String> = [
         "doctor", "capabilities", "status", "keyboard.status", "keyboard.inspect",
         "keyboard.freeze.status", "task.status", "adapter.capabilities", "control.status",
-        "control.center.snapshot", "control.capabilities", "route.list", "route.inspect",
+        "control.center.snapshot", "control.hands_off.status", "control.capabilities", "route.list", "route.inspect",
+        "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
         "workflow.list", "workflow.validate", "approval.list", "receipts.list",
         "receipts.status", "logs", "shortcut.audit", "shortcut.inspect"
@@ -142,6 +172,7 @@ public final class MacCtlService {
         let leaseToken: String
         let leaseOwnedByDaemon: Bool
         let physicalInputMode: KeyboardPhysicalInputMode
+        let focusPolicy: FocusPolicy?
         let acquiredAt: Date
         let expiresAt: Date
         var stopping: Bool
@@ -155,7 +186,8 @@ public final class MacCtlService {
                 physicalInputMode: physicalInputMode,
                 acquiredAt: acquiredAt,
                 expiresAt: expiresAt,
-                stopping: stopping
+                stopping: stopping,
+                focusPolicy: focusPolicy
             )
         }
     }
@@ -164,6 +196,7 @@ public final class MacCtlService {
         let authority: TaskExecutionAuthority?
         let lease: KeyboardDriveLease?
         let ownedByDaemon: Bool
+        let focusResolution: FocusPolicyResolution
     }
 
     private struct WorkflowLeaseReservation {
@@ -175,6 +208,7 @@ public final class MacCtlService {
     private let workflowRegistry: WorkflowRegistry
     private let workflowExecutor: WorkflowExecutor
     private let approvalStore: ApprovalStore
+    private let authorizationNoticeStore: AuthorizationNoticeStore
     private let keyboardAccessController: KeyboardAccessController
     private let keyboardDriveStore: KeyboardDriveStore
     private let taskApprovalStore: TaskApprovalStore
@@ -202,16 +236,22 @@ public final class MacCtlService {
     private let receiptStore: OperationReceiptStore
     private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
+    private let presentAuthorizationNotice: ((AuthorizationNotice) -> Void)?
     private let executionLock = NSLock()
     private let controlCenterLock = NSLock()
     private let lifecycleLock = NSLock()
     private let lifecycleNow: () -> Date
     private let lifecycleDrainDuration: TimeInterval
+    private static let handsOffDefaultDuration: TimeInterval = 60
+    private static let handsOffMaximumDuration: TimeInterval = 300
+    private static let handsOffProviders: Set<String> = ["mac_control", "computer_use", "hybrid"]
     // Access is serialized by executionLock. The cache is deliberately held
     // only by a single keyboard lease and re-runs permission selection on
     // every action, so a warm manifest cannot bypass a changed permission gate.
     private var routeSelectionCache: RouteSelectionCacheEntry?
     private var activeControlExecution: ActiveControlExecution?
+    private var focusActivity: ControlCenterFocusActivity?
+    private var handsOffSession: ControlCenterHandsOffSession?
     private var activeMutationRequests = 0
     private var lifecycleDrain: ControlCenterLifecycleDrain?
 
@@ -221,7 +261,9 @@ public final class MacCtlService {
         appController: AppController = AppController(),
         workflowRegistry: WorkflowRegistry = WorkflowRegistry(),
         approvalStore: ApprovalStore = ApprovalStore(),
+        authorizationNoticeStore: AuthorizationNoticeStore = AuthorizationNoticeStore(),
         presentApproval: ((ApprovalRecord) -> Void)? = nil,
+        presentAuthorizationNotice: ((AuthorizationNotice) -> Void)? = nil,
         logger: SafeLog = SafeLog(),
         receiptStore: OperationReceiptStore = OperationReceiptStore(),
         permissionContext: String = "daemon",
@@ -260,7 +302,9 @@ public final class MacCtlService {
         self.appController = appController
         self.workflowRegistry = workflowRegistry
         self.approvalStore = approvalStore
+        self.authorizationNoticeStore = authorizationNoticeStore
         self.presentApproval = presentApproval
+        self.presentAuthorizationNotice = presentAuthorizationNotice
         self.logger = logger
         self.receiptStore = receiptStore
         self.permissionContext = permissionContext
@@ -467,7 +511,12 @@ public final class MacCtlService {
                 response = errorResponse(request, error: error)
             }
         }
-        recordReceipt(for: request, response: response, startedAt: startedAt)
+        // Authorization notices are intentionally short-lived, owner-local
+        // state. Do not promote their context into the durable operation
+        // receipt stream.
+        if !request.method.hasPrefix("control.authorization.") {
+            recordReceipt(for: request, response: response, startedAt: startedAt)
+        }
         controlCenterStateChanged?()
         return response
     }
@@ -476,6 +525,7 @@ public final class MacCtlService {
         routeSelectionCache = nil
         controlCenterLock.lock()
         activeControlExecution = nil
+        handsOffSession = nil
         controlCenterLock.unlock()
         lifecycleLock.lock()
         lifecycleDrain = nil
@@ -559,6 +609,7 @@ public final class MacCtlService {
         let approvals = activeApprovalRecords()
         controlCenterLock.lock()
         let controlExecution = activeControlExecution?.snapshot
+        let activeHandsOffSession = currentHandsOffSessionLocked()
         controlCenterLock.unlock()
         let execution = controlExecution ?? keyboardDriveStore.activeLease().map {
             ControlCenterExecution(
@@ -571,11 +622,12 @@ public final class MacCtlService {
                 expiresAt: $0.expiresAt
             )
         }
-        if !approvals.isEmpty || execution != nil {
+        if !approvals.isEmpty || execution != nil || activeHandsOffSession != nil {
             var details: [String: JSONValue] = [
                 "operation": .string(operation.rawValue),
                 "approval_count": .number(Double(approvals.count)),
                 "execution_active": .bool(execution != nil),
+                "hands_off_session_active": .bool(activeHandsOffSession != nil),
                 "active_request_count": .number(0)
             ]
             if let nearestExpiry = approvals.map(\.expiresAt).min() {
@@ -584,6 +636,9 @@ public final class MacCtlService {
             if let execution {
                 details["execution_expires_at"] = .string(execution.expiresAt.ISO8601Format())
                 details["input_mode"] = .string(execution.physicalInputMode.rawValue)
+            }
+            if let activeHandsOffSession {
+                details["hands_off_session_expires_at"] = .string(activeHandsOffSession.expiresAt.ISO8601Format())
             }
             return failure(
                 request,
@@ -669,6 +724,22 @@ public final class MacCtlService {
                 return try controlStatus(request)
             case "control.center.snapshot":
                 return try success(request, value: controlCenterSnapshot())
+            case "control.authorization.prepare":
+                return try prepareAuthorizationNotice(request)
+            case "control.authorization.bind":
+                return try bindAuthorizationNotice(request)
+            case "control.authorization.list":
+                return try success(request, value: authorizationNoticeStore.list())
+            case "control.authorization.resolve":
+                return try resolveAuthorizationNotice(request)
+            case "control.hands_off.begin":
+                return try beginHandsOffSession(request)
+            case "control.hands_off.heartbeat":
+                return try heartbeatHandsOffSession(request)
+            case "control.hands_off.end":
+                return try endHandsOffSession(request)
+            case "control.hands_off.status":
+                return try handsOffSessionStatus(request)
             case "control.perform":
                 return try performControlAction(request)
             case "control.batch":
@@ -705,29 +776,40 @@ public final class MacCtlService {
                 return try success(request, value: appController.listApplications())
             case "app.open":
                 let name = try requiredString(request, key: "name")
-                let focusPolicy = try requestedFocusPolicy(from: request) ?? .foreground
+                let requestedPolicy = try requestedFocusPolicy(from: request) ?? .automatic
+                let resolution = FocusPolicyResolution.resolve(
+                    requestedPolicy: requestedPolicy,
+                    backgroundEligible: true
+                )
                 let app = try withExecutionLock {
-                    switch focusPolicy {
+                    switch resolution.effectivePolicy {
                     case .foreground:
-                        return try activateApplication(name)
+                        return try activateForegroundApplicationWithAnnouncement(name)
                     case .background:
                         return try appController.open(name, focusPolicy: .background)
+                    case .automatic:
+                        preconditionFailure("automatic focus policy reached application execution")
                     }
                 }
                 logger.record(event: "app_opened", metadata: [
                     "app": app.name,
-                    "focus_policy": focusPolicy.rawValue
+                    "requested_focus_policy": requestedPolicy.rawValue,
+                    "focus_policy": resolution.effectivePolicy.rawValue
                 ])
+                var result = try JSONValue.fromEncodable(app).objectValue ?? [:]
+                addFocusResolution(resolution, to: &result)
                 return try success(
                     request,
-                    value: app,
+                    result: result,
                     evidence: [Evidence(
                         kind: "focus_policy",
-                        message: "Application open used the requested focus policy",
+                        message: "Application open used the selected focus route",
                         metadata: [
-                            "policy": .string(focusPolicy.rawValue),
-                            "foreground_verified": .bool(focusPolicy == .foreground),
-                            "foreground_preserved": .bool(focusPolicy == .background)
+                            "requested_policy": .string(requestedPolicy.rawValue),
+                            "policy": .string(resolution.effectivePolicy.rawValue),
+                            "selection_reason": .string(resolution.selectionReason),
+                            "foreground_verified": .bool(resolution.effectivePolicy == .foreground),
+                            "foreground_preserved": .bool(resolution.effectivePolicy == .background)
                         ]
                     )]
                 )
@@ -789,10 +871,17 @@ public final class MacCtlService {
         }
     }
 
+    public func pendingAuthorizationNotices() -> [AuthorizationNotice] {
+        authorizationNoticeStore.list()
+    }
+
     public func controlCenterSnapshot() -> ControlCenterSnapshot {
         let approvals = pendingApprovalRecords().map(ControlCenterApproval.init)
+        let authorizationNotices = pendingAuthorizationNotices()
         controlCenterLock.lock()
         let activeExecution = activeControlExecution?.snapshot
+        let focusActivity = currentFocusActivityLocked()
+        let handsOffSession = currentHandsOffSessionLocked()
         controlCenterLock.unlock()
         let execution: ControlCenterExecution?
         if let activeExecution {
@@ -819,7 +908,81 @@ public final class MacCtlService {
             approvals: approvals,
             execution: execution,
             permissions: permissions,
-            lifecycleDrain: currentLifecycleDrain()
+            lifecycleDrain: currentLifecycleDrain(),
+            focusActivity: focusActivity,
+            handsOffSession: handsOffSession,
+            authorizationNotices: authorizationNotices
+        )
+    }
+
+    private func prepareAuthorizationNotice(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let draft = try AuthorizationNoticeRequest.from(params: request.params)
+        let prepared = try authorizationNoticeStore.prepare(
+            draft,
+            observedPeer: request.transportPeerIdentity,
+            requestID: request.requestID
+        )
+        if !prepared.deduplicated {
+            presentAuthorizationNotice?(prepared.notice)
+        }
+        return try success(
+            request,
+            status: .prepared,
+            value: prepared,
+            evidence: [Evidence(
+                kind: "authorization_notice",
+                message: prepared.deduplicated
+                    ? "An equivalent owner-local authorization notice is already pending"
+                    : "A short-lived sensitive-request notice was prepared; native macOS approval remains outside Mac Control",
+                source: "macctld",
+                metadata: [
+                    "provenance": .string(prepared.notice.provenance.rawValue),
+                    "deduplicated": .bool(prepared.deduplicated),
+                    "native_decision_controlled_by_mac_control": .bool(false)
+                ]
+            )]
+        )
+    }
+
+    private func bindAuthorizationNotice(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let requestID = try requiredString(request, key: "request_id")
+        guard let processValue = request.params["process_id"]?.intValue,
+              let processID = Int32(exactly: processValue),
+              processID > 0 else {
+            throw AuthorizationNoticeStoreError.invalidField("process_id")
+        }
+        let notice = try authorizationNoticeStore.bind(requestID: requestID, processID: processID)
+        return try success(
+            request,
+            value: notice,
+            evidence: [Evidence(
+                kind: "authorization_notice_binding",
+                message: "The notice was correlated with the caller's command process; no native prompt action was performed",
+                source: "macctld",
+                metadata: ["request_id": .string(requestID)]
+            )]
+        )
+    }
+
+    private func resolveAuthorizationNotice(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let requestID = try requiredString(request, key: "request_id")
+        let rawOutcome = try requiredString(request, key: "outcome")
+        guard let outcome = AuthorizationNoticeOutcome(rawValue: rawOutcome.lowercased()) else {
+            throw AuthorizationNoticeStoreError.invalidField("outcome")
+        }
+        let notice = try authorizationNoticeStore.resolve(requestID: requestID, outcome: outcome)
+        return try success(
+            request,
+            value: notice,
+            evidence: [Evidence(
+                kind: "authorization_notice_resolution",
+                message: "Completion was recorded for the notice; Mac Control did not allow or deny the native macOS request",
+                source: "macctld",
+                metadata: [
+                    "request_id": .string(requestID),
+                    "native_decision_controlled_by_mac_control": .bool(false)
+                ]
+            )]
         )
     }
 
@@ -1052,7 +1215,8 @@ public final class MacCtlService {
     private func keyboardStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let status = keyboardAccessController.status(
             permissionContext: permissionContext,
-            activeLease: keyboardDriveStore.activeLease()
+            activeLease: keyboardDriveStore.activeLease(),
+            navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
         )
         return try success(
             request,
@@ -1081,7 +1245,8 @@ public final class MacCtlService {
         let status = try keyboardAccessController.enable(
             confirm: request.params["confirm"]?.boolValue == true,
             permissionContext: permissionContext,
-            activeLease: keyboardDriveStore.activeLease()
+            activeLease: keyboardDriveStore.activeLease(),
+            navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
         )
         return try success(
             request,
@@ -1122,6 +1287,27 @@ public final class MacCtlService {
         guard let physicalInputMode = KeyboardPhysicalInputMode(rawValue: rawPhysicalInputMode.lowercased()) else {
             throw KeyboardControlError.invalidSequence("physical_input_mode")
         }
+        let rawNavigationMode = request.params["navigation_mode"]?.stringValue ?? "unchanged"
+        guard let navigationMode = KeyboardNavigationMode(rawValue: rawNavigationMode.lowercased()) else {
+            throw KeyboardControlError.invalidSequence("navigation_mode")
+        }
+        let fromPassThrough = request.params["from_pass_through"]?.boolValue == true
+        if navigationMode == .navigation {
+            guard scope == .session else {
+                throw KeyboardDriveStoreError.navigationModeRequiresSession
+            }
+            guard fromPassThrough else {
+                throw KeyboardDriveStoreError.navigationModeRequiresPassThroughAssertion
+            }
+            let status = keyboardAccessController.status(
+                permissionContext: permissionContext,
+                activeLease: keyboardDriveStore.activeLease(),
+                navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
+            )
+            guard status.fullKeyboardAccessEnabled == true else {
+                throw KeyboardControlError.fullKeyboardAccessDisabled
+            }
+        }
         guard hasPostEventAccess() else {
             throw KeyboardControlError.permissionDenied("Post Events")
         }
@@ -1153,12 +1339,29 @@ public final class MacCtlService {
             seconds: try requestedKeyboardLifetime(from: request),
             confirm: request.params["confirm"]?.boolValue == true,
             physicalInputMode: physicalInputMode,
-            freezeReason: freezeReason
+            freezeReason: freezeReason,
+            navigationMode: navigationMode,
+            fromPassThrough: fromPassThrough
         )
-        let message = physicalInputMode == .suppressed
+        let message = navigationMode == .navigation
+            ? "Keyboard driving lease acquired; Pass-Through Mode was toggled off for this session and will be toggled back on during release, expiry, or shutdown"
+            : physicalInputMode == .suppressed
             ? "Keyboard driving lease acquired; physical keyboard events are suppressed until release or expiry; use the mouse or daemon quit action for emergency release"
             : "Keyboard driving lease acquired; keep the physical keyboard and trackpad idle while driving"
-        let evidence: [Evidence] = physicalInputMode == .suppressed
+        let evidence: [Evidence] = navigationMode == .navigation
+            ? [
+                Evidence(
+                    kind: "keyboard_navigation_mode",
+                    message: "Pass-Through Mode was toggled using the caller-provided active-state assertion; Apple does not expose pass-through readback",
+                    source: "macctld"
+                ),
+                Evidence(
+                    kind: "keyboard_lease",
+                    message: "A short-lived session keyboard lease owns restoration of the pass-through transition",
+                    source: "macctld"
+                )
+            ]
+            : physicalInputMode == .suppressed
             ? [
                 Evidence(
                     kind: "keyboard_lease",
@@ -1188,6 +1391,9 @@ public final class MacCtlService {
                 "lease": try JSONValue.fromEncodable(lease),
                 "scope": .string(scope.rawValue),
                 "physical_input_mode": .string(physicalInputMode.rawValue),
+                "navigation_mode": .string(navigationMode.rawValue),
+                "pass_through_transition_owned": .bool(lease.passThroughTransitionOwned),
+                "pass_through_state_source": navigationMode == .navigation ? .string("caller_asserted") : .string("not_applicable"),
                 "freeze_reason_present": .bool(lease.freezeReasonProvided),
                 "expires_at": try JSONValue.fromEncodable(lease.expiresAt)
             ],
@@ -1401,8 +1607,205 @@ public final class MacCtlService {
         )
     }
 
+    private func beginHandsOffSession(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw HandsOffSessionError.confirmationRequired
+        }
+        let provider = (request.params["provider"]?.stringValue ?? "hybrid")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+        guard Self.handsOffProviders.contains(provider) else {
+            throw HandsOffSessionError.invalidProvider(provider)
+        }
+        let duration = try requestedPositiveDouble(
+            from: request,
+            key: "seconds",
+            defaultValue: Self.handsOffDefaultDuration
+        )
+        guard (5...Self.handsOffMaximumDuration).contains(duration) else {
+            throw HandsOffSessionError.invalidDuration
+        }
+        let taskID = request.params["task_id"]?.stringValue
+        let applicationName = request.params["app"]?.stringValue
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let now = lifecycleNow()
+        let session: ControlCenterHandsOffSession
+        controlCenterLock.lock()
+        if currentHandsOffSessionLocked() != nil {
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.active
+        }
+        session = ControlCenterHandsOffSession(
+            sessionID: UUID().uuidString,
+            provider: provider,
+            taskID: taskID,
+            applicationName: applicationName,
+            startedAt: now,
+            lastHeartbeatAt: now,
+            expiresAt: now.addingTimeInterval(duration)
+        )
+        handsOffSession = session
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+        return try success(
+            request,
+            result: [
+                "message": .string("Hands-off run active; keep the keyboard and trackpad untouched"),
+                "hands_off_session": try JSONValue.fromEncodable(session)
+            ],
+            evidence: [Evidence(
+                kind: "hands_off_session",
+                message: "A bounded caller-owned hands-off run was started; native actions and provider handoffs may share it",
+                source: "macctld",
+                metadata: [
+                    "provider": .string(provider),
+                    "heartbeat_interval_seconds": .number(Double(heartbeatIntervalSeconds(for: duration)))
+                ]
+            )]
+        )
+    }
+
+    private func heartbeatHandsOffSession(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let sessionID = try requiredString(request, key: "session_id")
+        let duration = try requestedPositiveDouble(
+            from: request,
+            key: "seconds",
+            defaultValue: Self.handsOffDefaultDuration
+        )
+        guard (5...Self.handsOffMaximumDuration).contains(duration) else {
+            throw HandsOffSessionError.invalidDuration
+        }
+        let session = try refreshHandsOffSession(sessionID: sessionID, duration: duration)
+        return try success(
+            request,
+            result: [
+                "message": .string("Hands-off run heartbeat accepted"),
+                "hands_off_session": try JSONValue.fromEncodable(session)
+            ],
+            evidence: [Evidence(
+                kind: "hands_off_session",
+                message: "The caller refreshed the bounded hands-off run lease",
+                source: "macctld",
+                metadata: [
+                    "heartbeat_interval_seconds": .number(Double(heartbeatIntervalSeconds(for: duration)))
+                ]
+            )]
+        )
+    }
+
+    private func endHandsOffSession(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let sessionID = try requiredString(request, key: "session_id")
+        let now = lifecycleNow()
+        let wasExpired: Bool
+        controlCenterLock.lock()
+        guard let active = handsOffSession else {
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.notFound
+        }
+        guard active.sessionID == sessionID else {
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.mismatch
+        }
+        wasExpired = active.expiresAt <= now
+        handsOffSession = nil
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+        return try success(
+            request,
+            result: [
+                "message": .string(wasExpired ? "Hands-off run had already expired" : "Hands-off run ended"),
+                "released": .bool(!wasExpired),
+                "expired": .bool(wasExpired)
+            ],
+            evidence: [Evidence(
+                kind: "hands_off_session",
+                message: wasExpired
+                    ? "The expired hands-off run was cleared"
+                    : "The caller explicitly ended the hands-off run",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func handsOffSessionStatus(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let session = controlCenterSnapshot().handsOffSession
+        return try success(
+            request,
+            result: [
+                "active": .bool(session != nil),
+                "hands_off_session": session.map { (try? JSONValue.fromEncodable($0)) ?? .null } ?? .null
+            ],
+            evidence: [Evidence(
+                kind: "hands_off_session",
+                message: "The current run-level hands-off state was inspected without changing it",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func refreshHandsOffSession(
+        sessionID: String,
+        duration: TimeInterval
+    ) throws -> ControlCenterHandsOffSession {
+        let now = lifecycleNow()
+        controlCenterLock.lock()
+        guard let active = handsOffSession else {
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.notFound
+        }
+        guard active.sessionID == sessionID else {
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.mismatch
+        }
+        guard active.expiresAt > now else {
+            handsOffSession = nil
+            controlCenterLock.unlock()
+            throw HandsOffSessionError.expired
+        }
+        let refreshed = ControlCenterHandsOffSession(
+            sessionID: active.sessionID,
+            provider: active.provider,
+            taskID: active.taskID,
+            applicationName: active.applicationName,
+            startedAt: active.startedAt,
+            lastHeartbeatAt: now,
+            expiresAt: now.addingTimeInterval(duration)
+        )
+        handsOffSession = refreshed
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+        return refreshed
+    }
+
+    private func heartbeatIntervalSeconds(for duration: TimeInterval) -> Int {
+        max(1, Int(ceil(duration / 2)))
+    }
+
+    private func refreshHandsOffSessionIfRequested(_ request: RequestEnvelope) throws {
+        guard let sessionID = request.params["hands_off_session_id"]?.stringValue,
+              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        _ = try refreshHandsOffSession(
+            sessionID: sessionID,
+            duration: Self.handsOffDefaultDuration
+        )
+    }
+
+    private func currentHandsOffSessionLocked() -> ControlCenterHandsOffSession? {
+        guard let handsOffSession else { return nil }
+        guard handsOffSession.expiresAt > lifecycleNow() else {
+            self.handsOffSession = nil
+            return nil
+        }
+        return handsOffSession
+    }
+
     private func controlCapabilities(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let application = try resolveApplication(try requiredString(request, key: "app"))
+        let targetSurface = try requestedControlTargetSurface(from: request)
         let taskID = request.params["task"]?.stringValue
         let targetFingerprint = request.params["target_fingerprint"]?.stringValue
         if taskID != nil && targetFingerprint == nil {
@@ -1442,7 +1845,8 @@ public final class MacCtlService {
             currentContextIdentity: routeContext,
             deepAuditAvailable: application.isRunning && application.processID != nil,
             cachedBroadProfile: cachedProfile.summary,
-            recentBlockers: recentBlockers
+            recentBlockers: recentBlockers,
+            targetSurface: targetSurface
         )
         return try success(
             request,
@@ -1907,6 +2311,22 @@ public final class MacCtlService {
         guard request.params["confirm"]?.boolValue == true else {
             throw KeyboardControlError.confirmationRequired
         }
+        let requestedBatchFocusPolicy = try requestedFocusPolicy(from: request) ?? .automatic
+        let batchFocusResolution = FocusPolicyResolution.resolve(
+            requestedPolicy: requestedBatchFocusPolicy,
+            backgroundEligible: false,
+            backgroundUnavailableReason: "control_batch_requires_named_task_plan"
+        )
+        let batchFocusPolicy = batchFocusResolution.effectivePolicy
+        let targetSurface = try requestedControlTargetSurface(from: request)
+        if targetSurface == .webContent {
+            throw ControlProviderHandoffRequired(targetSurface: targetSurface)
+        }
+        guard requestedBatchFocusPolicy != .background else {
+            throw WorkflowExecutionError.backgroundUnsupported(
+                "control.batch requires an authority-bound task plan for background execution; use task.run"
+            )
+        }
         guard request.params["lease_token"]?.stringValue == nil else {
             throw WorkflowExecutionError.unsafeInput("control.batch owns one ephemeral app lease; do not provide lease_token")
         }
@@ -1919,9 +2339,11 @@ public final class MacCtlService {
         }
         let batchTaskID = request.params["task"]?.stringValue
         let batchTargetFingerprint = request.params["target_fingerprint"]?.stringValue
+        let handsOffSessionID = request.params["hands_off_session_id"]?.stringValue
         if batchTaskID != nil && batchTargetFingerprint == nil {
             throw WarmPathSelectionError.targetFingerprintRequired
         }
+        try refreshHandsOffSessionIfRequested(request)
         let parsedActions = try actions.enumerated().map { index, value -> (Int, [String: JSONValue]) in
             guard let object = value.objectValue else {
                 throw WorkflowExecutionError.unsafeInput("control.batch action \(index) must be a JSON object")
@@ -1929,6 +2351,12 @@ public final class MacCtlService {
             guard let rawAction = object["action"]?.stringValue,
                   !rawAction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw WorkflowExecutionError.missingParameter("actions[\(index)].action")
+            }
+            if let rawFocusPolicy = object["focus_policy"]?.stringValue,
+               ![FocusPolicy.automatic.rawValue, FocusPolicy.foreground.rawValue].contains(rawFocusPolicy) {
+                throw WorkflowExecutionError.backgroundUnsupported(
+                    "control.batch steps cannot request background execution; use task.run"
+                )
             }
             if rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "scroll" {
                 throw WorkflowExecutionError.unsafeInput(
@@ -1964,7 +2392,11 @@ public final class MacCtlService {
                     if stepParams["target_fingerprint"] == nil, let batchTargetFingerprint {
                         stepParams["target_fingerprint"] = .string(batchTargetFingerprint)
                     }
+                    if stepParams["hands_off_session_id"] == nil, let handsOffSessionID {
+                        stepParams["hands_off_session_id"] = .string(handsOffSessionID)
+                    }
                     let stepRequest = RequestEnvelope(method: "control.perform", params: stepParams)
+                    try refreshHandsOffSessionIfRequested(stepRequest)
                     let command = try KeyboardCommand.resolve(try requiredString(stepRequest, key: "action"))
                     let execution = try performControlActionWithLease(
                         command: command,
@@ -1978,6 +2410,7 @@ public final class MacCtlService {
                         application: foregroundApplication(),
                         leaseToken: lease.token,
                         foregroundFastPathUsed: activation.foregroundFastPathUsed,
+                        focusPolicy: batchFocusPolicy,
                         expectedMenuItems: try requestedStringArray(from: stepRequest, key: "expected_menu_items")
                     )
                     guard execution.report.verification.state == .passed else {
@@ -2015,9 +2448,11 @@ public final class MacCtlService {
             )
         }
 
+        var result = try JSONValue.fromEncodable(batch).objectValue ?? [:]
+        addFocusResolution(batchFocusResolution, to: &result)
         return try success(
             request,
-            value: batch,
+            result: result,
             evidence: [Evidence(
                 kind: "control_batch",
                 message: "A bounded sequence shared one app-scoped lease while revalidating every action and route selection",
@@ -2027,7 +2462,10 @@ public final class MacCtlService {
                     "completed_count": .number(Double(batch.completedCount)),
                     "route_selection_cache_hits": .number(Double(batch.routeSelectionCacheHits)),
                     "foreground_fast_path": .bool(batch.foregroundFastPathUsed),
-                    "lease_released": .bool(batch.leaseReleased)
+                    "lease_released": .bool(batch.leaseReleased),
+                    "requested_focus_policy": .string(requestedBatchFocusPolicy.rawValue),
+                    "focus_policy": .string(batchFocusPolicy.rawValue),
+                    "focus_selection_reason": .string(batchFocusResolution.selectionReason)
                 ]
             )],
             outcome: AgentActionOutcome(
@@ -2050,9 +2488,29 @@ public final class MacCtlService {
                 "control.perform accepts either lease_token or app, not both"
             )
         }
+        let requestedFocusPolicy = try requestedFocusPolicy(from: request) ?? .automatic
+        let focusResolution = FocusPolicyResolution.resolve(
+            requestedPolicy: requestedFocusPolicy,
+            backgroundEligible: false,
+            backgroundUnavailableReason: "control_perform_requires_named_task_plan"
+        )
+        let focusPolicy = focusResolution.effectivePolicy
+        let targetSurface = try requestedControlTargetSurface(from: request)
+        if targetSurface == .webContent {
+            throw ControlProviderHandoffRequired(targetSurface: targetSurface)
+        }
+        guard requestedFocusPolicy != .background else {
+            throw WorkflowExecutionError.backgroundUnsupported(
+                "control.perform is a foreground-bound low-level surface; use task.run with a named background plan"
+            )
+        }
+        try refreshHandsOffSessionIfRequested(request)
         let rawAction = try requiredString(request, key: "action")
         if rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "scroll" {
-            return try performSemanticScroll(request)
+            return response(
+                try performSemanticScroll(request),
+                adding: focusResolution
+            )
         }
         let command = try KeyboardCommand.resolve(rawAction)
         let selector = try requestedControlSelector(from: request)
@@ -2079,6 +2537,7 @@ public final class MacCtlService {
                     taskID: taskID,
                     targetFingerprint: targetFingerprint,
                     requestedRoute: requestedRoute,
+                    focusPolicy: focusPolicy,
                     expectedMenuItems: expectedMenuItems
                 )
             }
@@ -2095,23 +2554,35 @@ public final class MacCtlService {
                 application: foregroundApplication(),
                 leaseToken: token,
                 foregroundFastPathUsed: false,
+                focusPolicy: focusPolicy,
                 expectedMenuItems: expectedMenuItems
             )
         }
         // Existing-lease callers retain the lower-level dispatch report. The
         // atomic app-scoped surface and commands with concrete postconditions
         // must fail closed when the result cannot be observed.
+        guard !execution.report.verification.foregroundChanged else {
+            throw ControlFocusPolicyFailure(
+                policy: focusPolicy,
+                route: execution.report.route,
+                foregroundBefore: execution.report.verification.foregroundBefore,
+                foregroundAfter: execution.report.verification.foregroundAfter
+            )
+        }
         guard (!usesEphemeralLease && execution.report.verification.postcondition == nil)
                 || execution.report.verification.state == .passed else {
             throw ControlVerificationFailure(
                 route: execution.report.route,
                 state: execution.report.verification.state,
-                postcondition: execution.report.verification.postcondition
+                postcondition: execution.report.verification.postcondition,
+                focusPolicy: focusPolicy
             )
         }
+        var result = try JSONValue.fromEncodable(execution.report).objectValue ?? [:]
+        addFocusResolution(focusResolution, to: &result)
         return try success(
             request,
-            value: execution.report,
+            result: result,
             evidence: [Evidence(
                 kind: "control_action",
                 message: "Semantic control used the strongest available route and verified the resulting foreground state",
@@ -2120,6 +2591,16 @@ public final class MacCtlService {
                     "route": .string(execution.report.route.rawValue),
                     "fallback_used": .bool(execution.report.fallbackUsed),
                     "fallback_chain": .array(execution.report.fallbackChain.map { .string($0.rawValue) }),
+                    "requested_focus_policy": .string(requestedFocusPolicy.rawValue),
+                    "focus_policy": .string(execution.report.focusPolicy.rawValue),
+                    "focus_selection_reason": .string(focusResolution.selectionReason),
+                    "background_unavailable_reason": .string(
+                        focusResolution.backgroundUnavailableReason ?? "none"
+                    ),
+                    "foreground_oracle": .string("target_foreground_unchanged"),
+                    "foreground_state": .string(
+                        execution.report.verification.foregroundChanged ? "changed" : "preserved"
+                    ),
                     "verification": .string(execution.report.verification.state.rawValue),
                     "foreground_changed": .bool(execution.report.verification.foregroundChanged),
                     "focus_changed": .bool(execution.report.verification.focusChanged),
@@ -2159,6 +2640,7 @@ public final class MacCtlService {
         application: AppInfo?,
         leaseToken: String,
         foregroundFastPathUsed: Bool,
+        focusPolicy: FocusPolicy = .foreground,
         expectedMenuItems: [String] = []
     ) throws -> ControlActionExecution {
         var attemptedRoute = requestedRoute ?? .keyboard
@@ -2174,7 +2656,7 @@ public final class MacCtlService {
                 attemptedRoute = selectedRoute
                 selectedWarmRoute = selectedRoute
             }
-            let report = try semanticActionRouter.perform(
+            let baseReport = try semanticActionRouter.perform(
                 command: command,
                 selector: selector,
                 leaseToken: leaseToken,
@@ -2186,6 +2668,7 @@ public final class MacCtlService {
                 routeSelection: selection.report,
                 expectedMenuItems: expectedMenuItems
             )
+            let report = baseReport.withFocusPolicy(focusPolicy)
             let kind: CapabilityEvidenceKind = report.verification.state == .passed
                 ? .positive
                 : .ambiguous
@@ -2283,10 +2766,14 @@ public final class MacCtlService {
         taskID: String?,
         targetFingerprint: String?,
         requestedRoute: ControlActionRoute?,
+        focusPolicy: FocusPolicy = .foreground,
         expectedMenuItems: [String] = []
     ) throws -> ControlActionExecution {
+        beginFocusActivity(applicationName: applicationName)
+        defer { finishFocusActivity() }
         let activation = try activateAndStabilizeApplication(applicationName)
         let stableForeground = activation.application
+        markFocusActivityFocused(applicationName: stableForeground.name)
         let foregroundFastPathUsed = activation.foregroundFastPathUsed
 
         let lease = try keyboardDriveStore.acquire(
@@ -2311,6 +2798,7 @@ public final class MacCtlService {
             application: stableForeground,
             leaseToken: lease.token,
             foregroundFastPathUsed: foregroundFastPathUsed,
+            focusPolicy: focusPolicy,
             expectedMenuItems: expectedMenuItems
         )
     }
@@ -2550,10 +3038,18 @@ public final class MacCtlService {
             return parsed
         } ?? route
 
-        let benchmark = try withExecutionLock {
-            var durations: [Double] = []
-            var recoveries = 0
-            var foregroundFastPathSamples = 0
+        let benchmark: (
+            latencyMs: Double,
+            p50LatencyMs: Double,
+            p95LatencyMs: Double,
+            recoveries: Int,
+            foregroundFastPathSamples: Int
+        )
+        do {
+            benchmark = try withExecutionLock {
+                var durations: [Double] = []
+                var recoveries = 0
+                var foregroundFastPathSamples = 0
 
             func runResetIfNeeded() throws {
                 guard let resetCommand else { return }
@@ -2628,13 +3124,26 @@ public final class MacCtlService {
             let p50Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.50)) - 1))
             let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
             let average = durations.reduce(0, +) / Double(durations.count)
-            return (
-                latencyMs: average,
-                p50LatencyMs: sorted[p50Index],
-                p95LatencyMs: sorted[p95Index],
-                recoveries: recoveries,
-                foregroundFastPathSamples: foregroundFastPathSamples
+                return (
+                    latencyMs: average,
+                    p50LatencyMs: sorted[p50Index],
+                    p95LatencyMs: sorted[p95Index],
+                    recoveries: recoveries,
+                    foregroundFastPathSamples: foregroundFastPathSamples
+                )
+            }
+        } catch {
+            let (kind, reason) = capabilityEvidence(for: error)
+            recordCapabilityVerification(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: route,
+                selector: selector,
+                kind: kind,
+                reason: reason
             )
+            throw error
         }
 
         let manifest = try warmPathStore.recordBenchmark(
@@ -2750,9 +3259,16 @@ public final class MacCtlService {
             )
         }
 
-        let benchmark = try withExecutionLock {
-            var durations: [Double] = []
-            var foregroundFastPathSamples = 0
+        let benchmark: (
+            latencyMs: Double,
+            p50LatencyMs: Double,
+            p95LatencyMs: Double,
+            foregroundFastPathSamples: Int
+        )
+        do {
+            benchmark = try withExecutionLock {
+                var durations: [Double] = []
+                var foregroundFastPathSamples = 0
 
             func execute(
                 direction: AccessibilityScrollDirection,
@@ -2814,12 +3330,25 @@ public final class MacCtlService {
             let p50Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.50)) - 1))
             let p95Index = min(sorted.count - 1, max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1))
             let average = durations.reduce(0, +) / Double(durations.count)
-            return (
-                latencyMs: average,
-                p50LatencyMs: sorted[p50Index],
-                p95LatencyMs: sorted[p95Index],
-                foregroundFastPathSamples: foregroundFastPathSamples
+                return (
+                    latencyMs: average,
+                    p50LatencyMs: sorted[p50Index],
+                    p95LatencyMs: sorted[p95Index],
+                    foregroundFastPathSamples: foregroundFastPathSamples
+                )
+            }
+        } catch {
+            let (kind, reason) = capabilityEvidence(for: error)
+            recordCapabilityVerification(
+                application: application,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: .scroll,
+                selector: selector,
+                kind: kind,
+                reason: reason
             )
+            throw error
         }
 
         let manifest = try warmPathStore.recordBenchmark(
@@ -3160,10 +3689,12 @@ public final class MacCtlService {
             }
         } catch let error as SemanticScrollFailure {
             let kind: CapabilityEvidenceKind = error.failureClass == .targetAmbiguous
+                || error.failureClass == .targetResolutionIncomplete
                 ? .ambiguous
                 : .negative
             let reason: String = switch error.failureClass {
             case .targetAmbiguous: CapabilityProfileInvalidationReason.targetAmbiguous.rawValue
+            case .targetResolutionIncomplete: CapabilityProfileInvalidationReason.targetResolutionIncomplete.rawValue
             case .noObservedChange, .verificationUnavailable: CapabilityProfileInvalidationReason.verificationFailed.rawValue
             default: CapabilityProfileInvalidationReason.actionFailed.rawValue
             }
@@ -3285,6 +3816,14 @@ public final class MacCtlService {
                 localFallbackDispatched: localFallbackDispatched,
                 localFallbackVerification: localFallbackVerification
             )
+        case .resolutionIncomplete:
+            return semanticScrollFailure(
+                for: .targetResolutionIncomplete,
+                requestedFallback: requestedFallback,
+                message: error.localizedDescription,
+                localFallbackDispatched: localFallbackDispatched,
+                localFallbackVerification: localFallbackVerification
+            )
         case .scrollUnavailable:
             return semanticScrollFailure(
                 for: .actionUnavailable,
@@ -3301,7 +3840,7 @@ public final class MacCtlService {
                 localFallbackDispatched: localFallbackDispatched,
                 localFallbackVerification: localFallbackVerification
             )
-        case .actionUnavailable:
+        case .actionUnavailable, .semanticActivationUnavailable:
             return semanticScrollFailure(
                 for: .actionUnavailable,
                 requestedFallback: requestedFallback,
@@ -3347,7 +3886,7 @@ public final class MacCtlService {
         switch failureClass {
         case .targetMissing, .actionUnavailable, .permissionDenied:
             fallbackAllowed = true
-        case .targetAmbiguous, .actionFailed, .noObservedChange, .verificationUnavailable:
+        case .targetAmbiguous, .targetResolutionIncomplete, .actionFailed, .noObservedChange, .verificationUnavailable:
             fallbackAllowed = false
         }
         let recommendsComputerUse = failureClass != .targetAmbiguous
@@ -3451,6 +3990,26 @@ public final class MacCtlService {
     }
 
     private func capabilityEvidence(for error: Error) -> (CapabilityEvidenceKind, String) {
+        if let benchmarkError = error as? RouteBenchmarkError {
+            switch benchmarkError {
+            case .verificationFailed, .scrollVerificationFailed:
+                return (.negative, CapabilityProfileInvalidationReason.verificationFailed.rawValue)
+            case .routeMismatch:
+                return (.negative, CapabilityProfileInvalidationReason.actionFailed.rawValue)
+            }
+        }
+        if let scrollFailure = error as? SemanticScrollFailure {
+            switch scrollFailure.failureClass {
+            case .targetAmbiguous:
+                return (.ambiguous, CapabilityProfileInvalidationReason.targetAmbiguous.rawValue)
+            case .targetResolutionIncomplete:
+                return (.ambiguous, CapabilityProfileInvalidationReason.targetResolutionIncomplete.rawValue)
+            case .noObservedChange, .verificationUnavailable:
+                return (.negative, CapabilityProfileInvalidationReason.verificationFailed.rawValue)
+            default:
+                return (.negative, CapabilityProfileInvalidationReason.actionFailed.rawValue)
+            }
+        }
         let description = error.localizedDescription.lowercased()
         if description.contains("ambiguous") {
             return (.ambiguous, CapabilityProfileInvalidationReason.targetAmbiguous.rawValue)
@@ -3636,7 +4195,8 @@ public final class MacCtlService {
         if requireFullKeyboardAccess {
             let status = keyboardAccessController.status(
                 permissionContext: permissionContext,
-                activeLease: lease
+                activeLease: lease,
+                navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
             )
             guard status.fullKeyboardAccessEnabled == true else {
                 throw KeyboardControlError.fullKeyboardAccessDisabled
@@ -3729,6 +4289,7 @@ public final class MacCtlService {
                 taskID: plan.id,
                 summary: plan.summary,
                 applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
+                focusPolicy: reservation.focusResolution.effectivePolicy,
                 lease: $0,
                 leaseOwnedByDaemon: reservation.ownedByDaemon
             )
@@ -3744,14 +4305,16 @@ public final class MacCtlService {
                 plan: plan,
                 approvalToken: token,
                 ephemeralInputs: inputs,
-                authority: reservation.authority
+                authority: reservation.authority,
+                effectiveFocusPolicy: reservation.focusResolution.effectivePolicy
             )
         }
         return try taskResponse(
             request,
             report: report,
             message: "Task completed",
-            inputChannel: reservation.authority?.inputChannel
+            inputChannel: reservation.authority?.inputChannel,
+            focusResolution: reservation.focusResolution
         )
     }
 
@@ -3778,6 +4341,7 @@ public final class MacCtlService {
                 taskID: plan.id,
                 summary: plan.summary,
                 applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
+                focusPolicy: reservation.focusResolution.effectivePolicy,
                 lease: $0,
                 leaseOwnedByDaemon: reservation.ownedByDaemon
             )
@@ -3793,14 +4357,16 @@ public final class MacCtlService {
                 plan: plan,
                 approvalToken: token,
                 ephemeralInputs: inputs,
-                authority: authority
+                authority: authority,
+                effectiveFocusPolicy: reservation.focusResolution.effectivePolicy
             )
         }
         return try taskResponse(
             request,
             report: report,
             message: "Task resumed and completed",
-            inputChannel: authority.inputChannel
+            inputChannel: authority.inputChannel,
+            focusResolution: reservation.focusResolution
         )
     }
 
@@ -3816,6 +4382,8 @@ public final class MacCtlService {
     private func stopActiveControl(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         controlCenterLock.lock()
         let execution = activeControlExecution
+        let hadHandsOffSession = currentHandsOffSessionLocked() != nil
+        handsOffSession = nil
         if var stopping = execution {
             stopping.stopping = true
             activeControlExecution = stopping
@@ -3841,7 +4409,8 @@ public final class MacCtlService {
             request,
             result: [
                 "cancellation_requested": .bool(cancellationRequested),
-                "released": .bool(released)
+                "released": .bool(released),
+                "hands_off_session_ended": .bool(hadHandsOffSession)
             ],
             evidence: [Evidence(
                 kind: "control_stop",
@@ -3856,6 +4425,7 @@ public final class MacCtlService {
         taskID: String?,
         summary: String,
         applicationName: String?,
+        focusPolicy: FocusPolicy?,
         lease: KeyboardDriveLease,
         leaseOwnedByDaemon: Bool
     ) -> String {
@@ -3869,6 +4439,7 @@ public final class MacCtlService {
             leaseToken: lease.token,
             leaseOwnedByDaemon: leaseOwnedByDaemon,
             physicalInputMode: lease.physicalInputMode,
+            focusPolicy: focusPolicy,
             acquiredAt: lease.acquiredAt,
             expiresAt: lease.expiresAt,
             stopping: false
@@ -3876,6 +4447,67 @@ public final class MacCtlService {
         controlCenterLock.unlock()
         controlCenterStateChanged?()
         return executionID
+    }
+
+    private func activateForegroundApplicationWithAnnouncement(_ applicationName: String) throws -> AppInfo {
+        beginFocusActivity(applicationName: applicationName)
+        defer { finishFocusActivity() }
+        let application = try activateApplication(applicationName)
+        markFocusActivityFocused(applicationName: application.name)
+        return application
+    }
+
+    private func beginFocusActivity(applicationName: String) {
+        let now = lifecycleNow()
+        controlCenterLock.lock()
+        focusActivity = ControlCenterFocusActivity(
+            applicationName: applicationName,
+            phase: .focusing,
+            startedAt: now,
+            expiresAt: now.addingTimeInterval(30)
+        )
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+    }
+
+    private func markFocusActivityFocused(applicationName: String) {
+        let now = lifecycleNow()
+        controlCenterLock.lock()
+        if let activity = focusActivity {
+            focusActivity = ControlCenterFocusActivity(
+                applicationName: applicationName,
+                phase: .focused,
+                startedAt: activity.startedAt,
+                expiresAt: now.addingTimeInterval(30)
+            )
+        }
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+    }
+
+    private func finishFocusActivity() {
+        let now = lifecycleNow()
+        controlCenterLock.lock()
+        if let activity = focusActivity {
+            let visibleFor: TimeInterval = activity.phase == .focused ? 3 : 1.5
+            focusActivity = ControlCenterFocusActivity(
+                applicationName: activity.applicationName,
+                phase: activity.phase,
+                startedAt: activity.startedAt,
+                expiresAt: now.addingTimeInterval(visibleFor)
+            )
+        }
+        controlCenterLock.unlock()
+        controlCenterStateChanged?()
+    }
+
+    private func currentFocusActivityLocked() -> ControlCenterFocusActivity? {
+        guard let focusActivity else { return nil }
+        guard focusActivity.expiresAt > lifecycleNow() else {
+            self.focusActivity = nil
+            return nil
+        }
+        return focusActivity
     }
 
     private func finishControlCenterExecution(executionID: String) {
@@ -3913,14 +4545,67 @@ public final class MacCtlService {
             plan: plan,
             ephemeralInputs: ephemeralInputs
         )
-        if plan.focusPolicy == .background {
+        var focusResolution: FocusPolicyResolution
+        switch plan.focusPolicy {
+        case .background:
+            focusResolution = FocusPolicyResolution.resolve(
+                requestedPolicy: .background,
+                backgroundEligible: true
+            )
             guard force || plan.requiresInputAuthority(using: adapterRegistry) else {
-                return TaskAuthorityReservation(authority: nil, lease: nil, ownedByDaemon: false)
+                return TaskAuthorityReservation(
+                    authority: nil,
+                    lease: nil,
+                    ownedByDaemon: false,
+                    focusResolution: focusResolution
+                )
             }
             return TaskAuthorityReservation(
                 authority: try backgroundTaskAuthority(for: plan, ephemeralInputs: ephemeralInputs),
                 lease: nil,
-                ownedByDaemon: false
+                ownedByDaemon: false,
+                focusResolution: focusResolution
+            )
+        case .automatic:
+            let backgroundValidation = TaskPlanValidator.validate(
+                plan.withFocusPolicy(.background),
+                adapterRegistry: adapterRegistry
+            )
+            if backgroundValidation.valid {
+                do {
+                    let authority = force || plan.requiresInputAuthority(using: adapterRegistry)
+                        ? try backgroundTaskAuthority(for: plan, ephemeralInputs: ephemeralInputs)
+                        : nil
+                    return TaskAuthorityReservation(
+                        authority: authority,
+                        lease: nil,
+                        ownedByDaemon: false,
+                        focusResolution: FocusPolicyResolution.resolve(
+                            requestedPolicy: .automatic,
+                            backgroundEligible: true
+                        )
+                    )
+                } catch {
+                    guard let reason = automaticBackgroundFallbackReason(for: error) else {
+                        throw error
+                    }
+                    focusResolution = FocusPolicyResolution.resolve(
+                        requestedPolicy: .automatic,
+                        backgroundEligible: false,
+                        backgroundUnavailableReason: reason
+                    )
+                }
+            } else {
+                focusResolution = FocusPolicyResolution.resolve(
+                    requestedPolicy: .automatic,
+                    backgroundEligible: false,
+                    backgroundUnavailableReason: "task_plan_not_background_safe"
+                )
+            }
+        case .foreground:
+            focusResolution = FocusPolicyResolution.resolve(
+                requestedPolicy: .foreground,
+                backgroundEligible: false
             )
         }
         if let target = ApprovalHandoffTargetResolver.resolve(for: plan) {
@@ -3975,11 +4660,30 @@ public final class MacCtlService {
             return TaskAuthorityReservation(
                 authority: authority,
                 lease: lease,
-                ownedByDaemon: ownedByDaemon
+                ownedByDaemon: ownedByDaemon,
+                focusResolution: focusResolution
             )
         } catch {
             if ownedByDaemon { keyboardDriveStore.invalidate(token: lease.token) }
             throw error
+        }
+    }
+
+    private func automaticBackgroundFallbackReason(for error: Error) -> String? {
+        guard let error = error as? TaskControlError else { return nil }
+        switch error {
+        case .leaseRequired:
+            return "background_target_not_uniquely_addressable"
+        case .blocked(let reason):
+            let preDispatchReasons: Set<String> = [
+                "background_target_not_running",
+                "background_target_is_foreground",
+                "background_target_process_changed",
+                "foreground_unavailable"
+            ]
+            return preDispatchReasons.contains(reason) ? reason : nil
+        default:
+            return nil
         }
     }
 
@@ -3988,10 +4692,12 @@ public final class MacCtlService {
         ephemeralInputs: [String: String]
     ) throws -> TaskExecutionAuthority {
         let inputSteps = plan.steps.filter {
-            [.click, .type, .key].contains($0.action.kind)
+            [.click, .type, .key, .search, .scroll, .adapter].contains($0.action.kind)
         }
         let targetNames = Set(inputSteps.compactMap {
-            $0.target?.bundleID ?? $0.target?.application
+            $0.target?.bundleID
+                ?? $0.target?.application
+                ?? $0.action.parameters["app"]?.stringValue
         })
         guard targetNames.count == 1, let targetName = targetNames.first else {
             throw TaskControlError.leaseRequired
@@ -4016,7 +4722,7 @@ public final class MacCtlService {
         }
 
         var routes: [TaskInputChannelRoute] = []
-        if inputSteps.contains(where: { [.click, .type].contains($0.action.kind) }) {
+        if inputSteps.contains(where: { [.click, .type, .search, .scroll, .adapter].contains($0.action.kind) }) {
             routes.append(.accessibility)
         }
         if inputSteps.contains(where: { $0.action.kind == .key }) {
@@ -4117,7 +4823,8 @@ public final class MacCtlService {
         _ request: RequestEnvelope,
         report: TaskStatusReport,
         message: String,
-        inputChannel: TaskInputChannel? = nil
+        inputChannel: TaskInputChannel? = nil,
+        focusResolution: FocusPolicyResolution? = nil
     ) throws -> ResponseEnvelope {
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["task_id"] = .string(report.taskID)
@@ -4127,6 +4834,9 @@ public final class MacCtlService {
             result["last_step_id"] = .string(lastStepID)
         }
         result["message"] = .string(message)
+        if let focusResolution {
+            addFocusResolution(focusResolution, to: &result)
+        }
         var evidence = [Evidence(
             kind: "task_checkpoint",
             message: "Task status was derived from a redacted durable checkpoint",
@@ -4158,6 +4868,9 @@ public final class MacCtlService {
                     "routes": .array(inputChannel.routes.map { .string($0.rawValue) })
                 ]
             ))
+        }
+        if let focusResolution {
+            evidence.append(focusResolutionEvidence(focusResolution))
         }
         return try success(
             request,
@@ -4232,7 +4945,7 @@ public final class MacCtlService {
             return failure(request, status: .failed, code: .workflowNotFound, message: "Workflow does not exist")
         }
         let requestedPolicy = try requestedFocusPolicy(from: request)
-        let workflow = baseWorkflow.withFocusPolicy(requestedPolicy ?? baseWorkflow.focusPolicy)
+        let workflow = baseWorkflow.withFocusPolicy(requestedPolicy ?? .automatic)
         let validation = workflowRegistry.validate(workflow)
         guard validation.valid else {
             return failure(
@@ -4309,22 +5022,23 @@ public final class MacCtlService {
                 keyboardLeaseToken: request.params["lease_token"]?.stringValue
             )
         }
-        let report = try executeWorkflow(
+        let execution = try executeWorkflow(
             workflow,
             ephemeralInputs: suppliedInputs,
             keyboardLeaseToken: request.params["lease_token"]?.stringValue
         )
+        let report = execution.report
         logger.record(event: "workflow_succeeded", metadata: ["workflow": workflow.id])
         var result = try JSONValue.fromEncodable(report).objectValue ?? [:]
         result["workflow_id"] = .string(workflow.id)
         result["plan_digest"] = .string(ApprovalStore.digest(workflow, ephemeralInputs: suppliedInputs))
         result["run_id"] = .string(report.runID)
-        result["focus_policy"] = .string(report.focusPolicy.rawValue)
+        addFocusResolution(execution.focusResolution, to: &result)
         result["target_process_ids"] = .array(report.targetProcessIDs.map { .number(Double($0)) })
         return try success(
             request,
             result: result,
-            evidence: report.evidence
+            evidence: report.evidence + [focusResolutionEvidence(execution.focusResolution)]
         )
     }
 
@@ -4333,7 +5047,9 @@ public final class MacCtlService {
         if token.hasPrefix("mct_") {
             do {
                 if request.params["source"]?.stringValue == "control_center",
-                   let target = taskApprovalStore.record(for: token)?.handoffTarget {
+                   let record = taskApprovalStore.record(for: token),
+                   record.focusPolicy == .foreground,
+                   let target = record.handoffTarget {
                     _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
                 }
                 let prepared = try taskApprovalStore.approve(token: token)
@@ -4362,7 +5078,9 @@ public final class MacCtlService {
         }
         do {
             if request.params["source"]?.stringValue == "control_center",
-               let target = approvalStore.record(for: token)?.handoffTarget {
+               let record = approvalStore.record(for: token),
+               record.focusPolicy == .foreground,
+               let target = record.handoffTarget {
                 _ = try activateAndStabilizeApplication(target.bundleID ?? target.applicationName)
             }
             let prepared = try approvalStore.approve(token: token)
@@ -4430,8 +5148,10 @@ public final class MacCtlService {
                 operationID: prepared.record.operationID
             )
         }
+        let focusResolution = focusResolution(for: prepared.workflow)
+        let effectiveWorkflow = prepared.workflow.withFocusPolicy(focusResolution.effectivePolicy)
         let reservation = try approvedWorkflowLease(
-            workflow: prepared.workflow,
+            workflow: effectiveWorkflow,
             suppliedToken: keyboardLeaseToken ?? request.params["lease_token"]?.stringValue
         )
         let executionID = reservation.lease.map {
@@ -4439,6 +5159,7 @@ public final class MacCtlService {
                 taskID: nil,
                 summary: prepared.workflow.summary,
                 applicationName: prepared.record.handoffTarget?.applicationName,
+                focusPolicy: focusResolution.effectivePolicy,
                 lease: $0,
                 leaseOwnedByDaemon: reservation.ownedByDaemon
             )
@@ -4454,11 +5175,13 @@ public final class MacCtlService {
             workflow: prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs
         )
-        let report = try executeWorkflow(
+        let execution = try executeWorkflow(
             prepared.workflow,
             ephemeralInputs: prepared.ephemeralInputs,
-            keyboardLeaseToken: reservation.lease?.token
+            keyboardLeaseToken: reservation.lease?.token,
+            focusResolution: focusResolution
         )
+        let report = execution.report
         let source = request.params["source"]?.stringValue ?? "cli"
         logger.record(event: "approved_workflow_succeeded", metadata: [
             "workflow": prepared.workflow.id,
@@ -4469,13 +5192,13 @@ public final class MacCtlService {
         result["workflow_id"] = .string(prepared.workflow.id)
         result["plan_digest"] = .string(prepared.planDigest)
         result["run_id"] = .string(report.runID)
-        result["focus_policy"] = .string(report.focusPolicy.rawValue)
+        addFocusResolution(execution.focusResolution, to: &result)
         result["target_process_ids"] = .array(report.targetProcessIDs.map { .number(Double($0)) })
         return try success(
             request,
             operationID: prepared.record.operationID,
             result: result,
-            evidence: report.evidence
+            evidence: report.evidence + [focusResolutionEvidence(execution.focusResolution)]
         )
     }
 
@@ -4565,7 +5288,8 @@ public final class MacCtlService {
         let runtimeIdentity = RuntimeIdentity.current()
         let keyboardAccess = keyboardAccessController.status(
             permissionContext: permissionContext,
-            activeLease: keyboardDriveStore.activeLease()
+            activeLease: keyboardDriveStore.activeLease(),
+            navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
         )
         var warnings = permissions
             .filter { $0.state == "missing" || $0.state == "unknown" }
@@ -4604,10 +5328,11 @@ public final class MacCtlService {
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
                 "workflow.background", "approval.approve", "approval.deny",
                 "keyboard.status", "keyboard.setup", "keyboard.enable", "keyboard.inspect",
-                "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression",
+                "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression", "keyboard.lease.navigation-mode",
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
                 "keyboard.navigate", "keyboard.send",
                 "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
+                "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
                 "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
@@ -4618,13 +5343,18 @@ public final class MacCtlService {
             permissionGates: ["Accessibility", "Input Monitoring", "Post Events", "Screen Recording", "Automation"],
             safety: [
                 "sensitive workflows require a short-lived single-use approval token",
+                "authorization notices are short-lived, owner-local, redacted, and explanatory only; Mac Control never approves or denies the native macOS prompt",
+                "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
+                "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference",
                 "install, restart, removal, and upgrade require an atomic daemon drain; active proposals, approved authority, execution, or mutation block the lifecycle change",
                 "raw coordinates require an explicit coordinate_mode=raw marker",
-                "background workflows require named macOS app targets and preserve foreground focus",
-                "background input is sent to target processes; global mouse, desktop, and foreground paths are rejected",
+                "background workflows require one named macOS app target and preserve foreground focus",
+                "background click, type, replace-only search, and scroll require unique AX selectors; search verifies AXValue and scroll requires observed structural change",
+                "background typed adapters require an explicit background_safe manifest declaration; global mouse, desktop, browser content, and foreground paths are rejected",
                 "Full Keyboard Access is explicit, AppKit-verified, and never enabled at daemon startup",
                 "direct keyboard navigation requires one short-lived, user-confirmed lease with per-key focus checks",
                 "physical keyboard suppression is opt-in, session-scoped, bounded by lease expiry, and leaves mouse emergency release available",
+                "Pass-Through navigation mode is opt-in, session-scoped, requires a caller assertion, owns one restoration toggle, and blocks on ambiguous cleanup",
                 "bare printable keys are rejected from keyboard.send; text remains ephemeral-input plus approval gated",
                 "keyboard focus inspection returns only role, subrole, identifier, title, and target application",
                 "route selection uses a fresh measured app/task/version/target manifest after safety and permission gates",
@@ -4632,6 +5362,7 @@ public final class MacCtlService {
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capabilities is a fast route probe that may read a cached broad profile but never walks the Accessibility tree",
+                "web-content target surfaces fail closed with a machine-readable browser-provider handoff and never activate browser UI",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
                 "selector addressability identifies a requested route but never invents a universal fallback ladder",
@@ -4639,8 +5370,8 @@ public final class MacCtlService {
                 "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
                 "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
-                "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique), re-resolves it, and compares bounded structural viewport metadata",
-                "semantic scroll failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
+                "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique; repeated descriptors can use redacted ancestorDigest and geometryDigest), re-resolves it, and compares bounded structural viewport metadata",
+                "semantic scroll and native row-activation failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
                 "accessibility trees are bounded and redacted; AX values, private text, screenshots, and OCR are excluded",
                 "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
                 "task recovery is capped at three safe, two reversible, and one sensitive attempt",
@@ -4655,7 +5386,8 @@ public final class MacCtlService {
             ],
             keyboardAccess: keyboardAccessController.status(
                 permissionContext: permissionContext,
-                activeLease: keyboardDriveStore.activeLease()
+                activeLease: keyboardDriveStore.activeLease(),
+                navigationRestorationPending: keyboardDriveStore.isNavigationRestorationPending
             ),
             taskCapabilities: TaskCapabilityReport(),
             adapterManifests: adapterRegistry.manifests(),
@@ -4779,32 +5511,117 @@ public final class MacCtlService {
         guard let raw = request.params["focus_policy"] else { return nil }
         guard let value = raw.stringValue, let policy = FocusPolicy(rawValue: value) else {
             throw WorkflowExecutionError.unsafeInput(
-                "focus_policy must be either foreground or background"
+                "focus_policy must be automatic, foreground, or background"
             )
         }
         return policy
+    }
+
+    private func addFocusResolution(
+        _ resolution: FocusPolicyResolution,
+        to result: inout [String: JSONValue]
+    ) {
+        result["requested_focus_policy"] = .string(resolution.requestedPolicy.rawValue)
+        result["focus_policy"] = .string(resolution.effectivePolicy.rawValue)
+        result["focus_selection_reason"] = .string(resolution.selectionReason)
+        if let reason = resolution.backgroundUnavailableReason {
+            result["background_unavailable_reason"] = .string(reason)
+        }
+    }
+
+    private func response(
+        _ response: ResponseEnvelope,
+        adding resolution: FocusPolicyResolution
+    ) -> ResponseEnvelope {
+        var result = response.result.objectValue ?? [:]
+        addFocusResolution(resolution, to: &result)
+        return ResponseEnvelope(
+            requestID: response.requestID,
+            operationID: response.operationID,
+            status: response.status,
+            result: .object(result),
+            evidence: response.evidence + [focusResolutionEvidence(resolution)],
+            error: response.error,
+            outcome: response.outcome,
+            schemaVersion: response.schemaVersion
+        )
+    }
+
+    private func requestedControlTargetSurface(
+        from request: RequestEnvelope
+    ) throws -> ControlTargetSurface {
+        guard let raw = request.params["target_surface"] else { return .macAppUI }
+        guard let value = raw.stringValue,
+              let surface = ControlTargetSurface(rawValue: value) else {
+            throw WorkflowExecutionError.unsafeInput(
+                "target_surface must be either mac_app_ui or web_content"
+            )
+        }
+        return surface
     }
 
     private func workflowApplyingRequestedFocusPolicy(
         _ workflow: WorkflowSpec,
         request: RequestEnvelope
     ) throws -> WorkflowSpec {
-        guard let policy = try requestedFocusPolicy(from: request) else { return workflow }
+        let policy = try requestedFocusPolicy(from: request) ?? .automatic
         return workflow.withFocusPolicy(policy)
+    }
+
+    private func focusResolution(for workflow: WorkflowSpec) -> FocusPolicyResolution {
+        guard workflow.focusPolicy == .automatic else {
+            return FocusPolicyResolution.resolve(
+                requestedPolicy: workflow.focusPolicy,
+                backgroundEligible: workflow.focusPolicy == .background
+            )
+        }
+        let backgroundValidation = workflowRegistry.validate(
+            workflow.withFocusPolicy(.background)
+        )
+        return FocusPolicyResolution.resolve(
+            requestedPolicy: .automatic,
+            backgroundEligible: backgroundValidation.valid,
+            backgroundUnavailableReason: backgroundValidation.valid
+                ? nil
+                : "workflow_not_background_safe"
+        )
     }
 
     private func executeWorkflow(
         _ workflow: WorkflowSpec,
         ephemeralInputs: [String: String],
-        keyboardLeaseToken: String? = nil
-    ) throws -> ExecutionReport {
-        try withExecutionLock {
+        keyboardLeaseToken: String? = nil,
+        focusResolution suppliedResolution: FocusPolicyResolution? = nil
+    ) throws -> (report: ExecutionReport, focusResolution: FocusPolicyResolution) {
+        let resolution = suppliedResolution ?? focusResolution(for: workflow)
+        let effectiveWorkflow = workflow.withFocusPolicy(resolution.effectivePolicy)
+        let report = try withExecutionLock {
             try workflowExecutor.execute(
-                workflow,
+                effectiveWorkflow,
                 ephemeralInputs: ephemeralInputs,
                 keyboardLeaseToken: keyboardLeaseToken
             )
         }
+        return (report, resolution)
+    }
+
+    private func focusResolutionEvidence(_ resolution: FocusPolicyResolution) -> Evidence {
+        var metadata: [String: JSONValue] = [
+            "requested_focus_policy": .string(resolution.requestedPolicy.rawValue),
+            "focus_policy": .string(resolution.effectivePolicy.rawValue),
+            "focus_selection_reason": .string(resolution.selectionReason)
+        ]
+        if let reason = resolution.backgroundUnavailableReason {
+            metadata["background_unavailable_reason"] = .string(reason)
+        }
+        return Evidence(
+            kind: "focus_policy",
+            message: resolution.effectivePolicy == .background
+                ? "A verified background route was selected without activating the target app"
+                : "Foreground execution was selected immediately because no verified background route was eligible",
+            source: "macctld",
+            metadata: metadata
+        )
     }
 
     private func withExecutionLock<T>(_ operation: () throws -> T) rethrows -> T {
@@ -4862,6 +5679,12 @@ public final class MacCtlService {
         let taskRisk = taskStep?.risk
         let taskTargetSurface = taskPlan?.surface
         let taskFocusPolicy = taskPlan?.focusPolicy
+        let requestedFocusPolicy = response.result["requested_focus_policy"]?.stringValue
+            .flatMap(FocusPolicy.init(rawValue:))
+            ?? request.params["focus_policy"]?.stringValue
+                .flatMap(FocusPolicy.init(rawValue:))
+            ?? taskFocusPolicy
+            ?? workflow?.focusPolicy
         let focusPolicy = response.result["focus_policy"]?.stringValue
             .flatMap(FocusPolicy.init(rawValue:))
             ?? response.result["focusPolicy"]?.stringValue
@@ -4934,7 +5757,10 @@ public final class MacCtlService {
             source: receiptSource,
             workflowID: workflowID,
             targetSurface: workflow?.surface ?? taskTargetSurface,
+            requestedFocusPolicy: requestedFocusPolicy,
             focusPolicy: focusPolicy,
+            focusSelectionReason: response.result["focus_selection_reason"]?.stringValue,
+            backgroundUnavailableReason: response.result["background_unavailable_reason"]?.stringValue,
             risk: workflow.map { workflowRegistry.validate($0).risk } ?? taskRisk,
             approvalState: approvalState,
             executionResult: response.status.rawValue,
@@ -4993,7 +5819,7 @@ public final class MacCtlService {
         guard let application else { return nil }
 
         let selectorKeys = [
-            "role", "identifier", "locatorDigest", "title", "subrole", "containsText",
+            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "title", "subrole", "containsText",
             "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor",
             "windowTitle", "windowIdentifier"
         ]
@@ -5005,10 +5831,9 @@ public final class MacCtlService {
             }
         }
         let selectorFields = selectorValues.keys.sorted()
-        let locatorDigest: String? = if selectorFields.isEmpty {
-            nil
-        } else {
-            CapabilityProfileDigest.make(selectorFields.map { key in
+        var locatorDigest: String?
+        if !selectorFields.isEmpty {
+            locatorDigest = CapabilityProfileDigest.make(selectorFields.map { key in
                 let encoded = (try? JSONCodec.encode(selectorValues[key]!)) ?? Data()
                 return "\(key)=\(CapabilityProfileDigest.make(String(decoding: encoded, as: UTF8.self)))"
             }.joined(separator: "|"))
@@ -5177,6 +6002,77 @@ public final class MacCtlService {
                 message: "A new mutating request was rejected during an owner-requested daemon lifecycle drain",
                 source: "macctld"
             )]
+        case let error as HandsOffSessionError:
+            switch error {
+            case .confirmationRequired:
+                status = .blocked
+                code = .handsOffSessionConfirmationRequired
+            case .active:
+                status = .blocked
+                code = .handsOffSessionActive
+            case .notFound, .mismatch:
+                status = .blocked
+                code = .handsOffSessionNotFound
+            case .expired:
+                status = .blocked
+                code = .handsOffSessionExpired
+            case .invalidProvider, .invalidDuration:
+                status = .failed
+                code = .handsOffSessionInvalid
+            }
+            let retryable: Bool = switch error {
+            case .active, .notFound, .expired, .mismatch:
+                true
+            case .confirmationRequired, .invalidProvider, .invalidDuration:
+                false
+            }
+            details = [
+                "hands_off": .bool(true),
+                "retryable": .bool(retryable)
+            ]
+            evidence = [Evidence(
+                kind: "hands_off_session",
+                message: error.localizedDescription,
+                source: "macctld"
+            )]
+        case let error as AuthorizationNoticeStoreError:
+            switch error {
+            case .invalidField, .invalidSourceReference:
+                status = .failed
+                code = .authorizationNoticeInvalid
+            case .notFound:
+                status = .blocked
+                code = .authorizationNoticeNotFound
+            case .expired:
+                status = .expired
+                code = .authorizationNoticeExpired
+            case .alreadyResolved:
+                status = .blocked
+                code = .authorizationNoticeAlreadyResolved
+            case .alreadyBound:
+                status = .blocked
+                code = .authorizationNoticeAlreadyBound
+            case .storeFull:
+                status = .blocked
+                code = .authorizationNoticeStoreFull
+            }
+            let retryable: Bool
+            switch error {
+            case .invalidField, .invalidSourceReference:
+                retryable = false
+            case .notFound, .expired, .alreadyResolved, .alreadyBound, .storeFull:
+                retryable = true
+            }
+            details = [
+                "retryable": .bool(retryable),
+                "native_decision_controlled_by_mac_control": .bool(false)
+            ]
+            evidence = [Evidence(
+                kind: "authorization_notice",
+                message: error.localizedDescription,
+                source: "macctld",
+                metadata: details
+            )]
         case let error as SemanticScrollFailure:
             status = .blocked
             switch error.failureClass {
@@ -5196,9 +6092,28 @@ public final class MacCtlService {
             status = .blocked
             code = .controlVerificationUnavailable
             details = error.details
+            let contextMenuHandoff = error.route == .accessibility
+                && error.postcondition?.kind == "context_menu"
+            if contextMenuHandoff,
+               let handoffPlan = contextMenuHandoffPlan(for: request),
+               let encodedPlan = try? JSONValue.fromEncodable(handoffPlan) {
+                details["handoff_plan"] = encodedPlan
+            }
             evidence = [Evidence(
-                kind: "control_verification",
-                message: "The control action may have been dispatched, but its declared postcondition was not verified; no completion was reported",
+                kind: contextMenuHandoff ? "provider_handoff" : "control_verification",
+                message: contextMenuHandoff
+                    ? "Native context-menu verification was unavailable; execute the fresh-state Computer Use handoff plan without retrying the AX action"
+                    : "The control action may have been dispatched, but its declared postcondition was not verified; no completion was reported",
+                source: "macctld",
+                metadata: details
+            )]
+        case let error as ControlFocusPolicyFailure:
+            status = .blocked
+            code = .focusChanged
+            details = error.details
+            evidence = [Evidence(
+                kind: "focus_guard",
+                message: "The control action crossed its declared foreground boundary; completion was not reported",
                 source: "macctld",
                 metadata: error.details
             )]
@@ -5326,6 +6241,29 @@ public final class MacCtlService {
             case .permissionDenied:
                 status = .blocked
                 code = .permissionDenied
+            case let .semanticActivationUnavailable(role, subrole, advertisedActions):
+                status = .blocked
+                code = .taskBlocked
+                details = [
+                    "failure_class": .string("action_unavailable"),
+                    "route": .string(ControlActionRoute.accessibility.rawValue),
+                    "focus_policy": .string(
+                        request.params["focus_policy"]?.stringValue ?? FocusPolicy.foreground.rawValue
+                    ),
+                    "foreground_oracle": .string("target_foreground_unchanged"),
+                    "fallback_allowed": .bool(true),
+                    "recommended_provider": .string("computer_use"),
+                    "fresh_state_required": .bool(true),
+                    "role": .string(role ?? ""),
+                    "subrole": .string(subrole ?? ""),
+                    "advertised_actions": .array(advertisedActions.sorted().map(JSONValue.string))
+                ]
+                evidence = [Evidence(
+                    kind: "provider_handoff",
+                    message: "Native Accessibility exposed presentation-only row actions but no verified activation action; refresh state and hand off to Computer Use",
+                    source: "macctld",
+                    metadata: details
+                )]
             case .applicationNotRunning:
                 status = .blocked
                 code = .accessibilityTreeUnavailable
@@ -5430,6 +6368,12 @@ public final class MacCtlService {
                 code = .keyboardPhysicalSuppressionUnavailable
             case .physicalKeyboardSuppressionReasonRequired:
                 code = .keyboardFreezeReasonRequired
+            case .navigationModeRequiresSession, .navigationModeRequiresPassThroughAssertion:
+                code = .keyboardNavigationModeInvalid
+            case .navigationModeTransitionFailed, .navigationModeRestorationFailed:
+                code = .keyboardNavigationModeUnavailable
+            case .navigationModeRestorationPending:
+                code = .keyboardNavigationRestorationPending
             case .notFound:
                 code = .keyboardLeaseNotFound
             case .expired:
@@ -5461,6 +6405,24 @@ public final class MacCtlService {
         case is ControlStateVerifierError:
             status = .blocked
             code = .operationFailed
+        case let error as ControlProviderHandoffRequired:
+            status = .blocked
+            code = .providerHandoffRequired
+            details = [
+                "failure_class": .string("action_unavailable"),
+                "target_surface": .string(error.targetSurface.rawValue),
+                "recommended_surface": .string("browser_connector"),
+                "recommended_provider": .string(error.recommendedProvider.rawValue),
+                "fallback_allowed": .bool(true),
+                "fresh_state_required": .bool(true),
+                "next_action": .string(error.nextAction)
+            ]
+            evidence = [Evidence(
+                kind: "provider_handoff",
+                message: "Web content was kept on the tab-addressed browser route without activating browser UI",
+                source: "macctld",
+                metadata: details
+            )]
         case let error as ApprovalStoreError:
             status = .blocked
             switch error {
@@ -5497,11 +6459,18 @@ public final class MacCtlService {
             case .backgroundUnsupported:
                 code = .backgroundUnsupported
                 details["focus_policy"] = .string(FocusPolicy.background.rawValue)
+                details["failure_class"] = .string("action_unavailable")
+                details["recommended_surface"] = .string("task.run")
+                details["next_action"] = .string("submit_named_background_task_plan")
+                details["fresh_state_required"] = .bool(true)
                 evidence = [Evidence(
                     kind: "focus_guard",
                     message: "Background policy rejected an operation that could not be isolated from foreground focus",
                     source: "macctld",
-                    metadata: ["policy": .string(FocusPolicy.background.rawValue)]
+                    metadata: [
+                        "policy": .string(FocusPolicy.background.rawValue),
+                        "recommended_surface": .string("task.run")
+                    ]
                 )]
             case .indeterminate:
                 code = .taskIndeterminate
@@ -5552,6 +6521,7 @@ public final class MacCtlService {
             let state: AgentActionOutcomeState = switch scrollFailure.failureClass {
             case .targetMissing: .targetMissing
             case .targetAmbiguous: .targetAmbiguous
+            case .targetResolutionIncomplete: .targetResolutionIncomplete
             case .actionUnavailable: .actionUnavailable
             case .actionFailed: .actionFailed
             case .permissionDenied: .permissionBlocked
@@ -5578,6 +6548,7 @@ public final class MacCtlService {
         switch failureClass {
         case "target_missing": state = .targetMissing
         case "target_ambiguous": state = .targetAmbiguous
+        case "target_resolution_incomplete": state = .targetResolutionIncomplete
         case "action_unavailable": state = .actionUnavailable
         case "no_observed_change": state = .noObservedChange
         case "verification_unavailable": state = .verificationUnavailable
@@ -5598,7 +6569,15 @@ public final class MacCtlService {
         let recommended = details["recommended_provider"]?.stringValue
         let freshStateRequired = details["fresh_state_required"]?.boolValue ?? false
         let fallbackAllowed = details["fallback_allowed"]?.boolValue ?? false
-        let nextAction: String? = if recommended == ScrollFallbackRoute.computerUse.rawValue {
+        let handoffPlan: AgentProviderHandoffPlan? = if let planValue = details["handoff_plan"],
+                                                        let planData = try? JSONCodec.encode(planValue) {
+            try? JSONCodec.decode(AgentProviderHandoffPlan.self, from: planData)
+        } else {
+            nil
+        }
+        let nextAction: String? = if let declaredNextAction = details["next_action"]?.stringValue {
+            declaredNextAction
+        } else if recommended == ScrollFallbackRoute.computerUse.rawValue {
             "get_app_state_then_relocate_target_and_verify_with_computer_use"
         } else if freshStateRequired {
             "refresh_state_before_retrying"
@@ -5613,7 +6592,83 @@ public final class MacCtlService {
             fallbackAllowed: fallbackAllowed,
             recommendedProvider: recommended,
             freshStateRequired: freshStateRequired,
-            nextAction: nextAction
+            nextAction: nextAction,
+            handoffPlan: handoffPlan
+        )
+    }
+
+    private func contextMenuHandoffPlan(for request: RequestEnvelope) -> AgentProviderHandoffPlan? {
+        let receiptTarget = controlReceiptTarget(for: request)
+        let target = receiptTarget.map {
+            AgentProviderHandoffTarget(
+                application: $0.application.name,
+                bundleID: $0.application.bundleID,
+                targetFingerprintDigest: $0.targetFingerprintDigest,
+                locatorDigest: $0.locatorDigest,
+                selectorFields: $0.selectorFields
+            )
+        }
+        let resolvedTarget = target ?? redactedHandoffTarget(from: request)
+        let expectedItems = request.params["expected_menu_items"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        var expectedItemDigest: String?
+        if !expectedItems.isEmpty {
+            let encoded = (try? JSONCodec.encode(JSONValue.array(expectedItems.map(JSONValue.string)))) ?? Data()
+            expectedItemDigest = CapabilityProfileDigest.make(String(decoding: encoded, as: UTF8.self))
+        }
+        let focusPolicy = (try? requestedFocusPolicy(from: request)) ?? .foreground
+        var handsOffSession: AgentProviderHandoffHandsOffSession?
+        if let sessionID = request.params["hands_off_session_id"]?.stringValue {
+            controlCenterLock.lock()
+            let active = currentHandsOffSessionLocked()
+            controlCenterLock.unlock()
+            if let active, active.sessionID == sessionID {
+                handsOffSession = AgentProviderHandoffHandsOffSession(
+                    sessionID: active.sessionID,
+                    heartbeatIntervalSeconds: heartbeatIntervalSeconds(
+                        for: max(5, active.expiresAt.timeIntervalSince(lifecycleNow()))
+                    ),
+                    expiresAt: active.expiresAt
+                )
+            }
+        }
+        return AgentProviderHandoffPlan.contextMenu(
+            target: resolvedTarget,
+            focusPolicy: focusPolicy,
+            expectedItemCount: expectedItems.count,
+            expectedItemDigest: expectedItemDigest,
+            handsOffSession: handsOffSession
+        )
+    }
+
+    private func redactedHandoffTarget(from request: RequestEnvelope) -> AgentProviderHandoffTarget? {
+        let selectorKeys = [
+            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "title", "subrole", "containsText",
+            "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor", "windowTitle", "windowIdentifier"
+        ]
+        let selectorObject = request.params["selector"]?.objectValue ?? [:]
+        var selectorValues: [String: JSONValue] = [:]
+        for key in selectorKeys {
+            if let value = selectorObject[key] ?? request.params[key], value != .null {
+                selectorValues[key] = value
+            }
+        }
+        let selectorFields = selectorValues.keys.sorted()
+        let locatorDigest: String? = if selectorFields.isEmpty {
+            nil
+        } else {
+            CapabilityProfileDigest.make(selectorFields.map { key in
+                let encoded = (try? JSONCodec.encode(selectorValues[key]!)) ?? Data()
+                return "\(key)=\(CapabilityProfileDigest.make(String(decoding: encoded, as: UTF8.self)))"
+            }.joined(separator: "|"))
+        }
+        let application = request.params["app"]?.stringValue ?? foregroundApplication()?.name
+        guard application != nil || !selectorFields.isEmpty else { return nil }
+        return AgentProviderHandoffTarget(
+            application: application,
+            targetFingerprintDigest: request.params["target_fingerprint"]?.stringValue
+                .map(CapabilityProfileDigest.make),
+            locatorDigest: locatorDigest,
+            selectorFields: selectorFields
         )
     }
 }

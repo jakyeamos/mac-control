@@ -2,13 +2,56 @@ import Foundation
 
 /// Provider preferences are declarative routing hints. They never authorize
 /// execution and they do not replace task-specific measured route evidence.
-public enum AppControlProvider: String, Codable, Equatable, CaseIterable {
+public enum AppControlProvider: String, Codable, Equatable, Hashable, CaseIterable {
     case accessibility
     case semanticScroll = "semantic_scroll"
     case keyboard
     case browserDOM = "browser_dom"
     case cdpDOM = "cdp_dom"
     case computerUse = "computer_use"
+}
+
+/// Where an application publicly describes a capability that can improve its
+/// control path. Advertisements are candidate knowledge only: they must never
+/// authorize execution without task-specific verification.
+public enum AppAdvertisedCapabilitySource: String, Codable, Equatable, Hashable {
+    case accessibilityDisclosure = "accessibility_disclosure"
+    case appMenu = "app_menu"
+    case helpSurface = "help_surface"
+}
+
+public enum AppAdvertisedCapabilityAuthority: String, Codable, Equatable, Hashable {
+    case candidateOnly = "candidate_only"
+}
+
+public struct AppAdvertisedCapability: Codable, Equatable, Hashable {
+    public let id: String
+    public let provider: AppControlProvider
+    public let source: AppAdvertisedCapabilitySource
+    public let taskIDs: [String]
+    public let keyboardShortcut: String?
+    public let discoverySignals: [String]
+    public let verificationMethods: [String]
+    public let authority: AppAdvertisedCapabilityAuthority
+
+    public init(
+        id: String,
+        provider: AppControlProvider,
+        source: AppAdvertisedCapabilitySource,
+        taskIDs: [String] = [],
+        keyboardShortcut: String? = nil,
+        discoverySignals: [String],
+        verificationMethods: [String]
+    ) {
+        self.id = id
+        self.provider = provider
+        self.source = source
+        self.taskIDs = Array(Set(taskIDs)).sorted()
+        self.keyboardShortcut = keyboardShortcut
+        self.discoverySignals = discoverySignals
+        self.verificationMethods = verificationMethods
+        self.authority = .candidateOnly
+    }
 }
 
 public struct AppControlProfile: Codable, Equatable {
@@ -19,6 +62,7 @@ public struct AppControlProfile: Codable, Equatable {
     public let verification: [String]
     public let invalidatesOn: [String]
     public let unsupportedCapabilities: [String]
+    public let advertisedCapabilities: [AppAdvertisedCapability]
     public let layers: [String]
 
     public init(
@@ -29,6 +73,7 @@ public struct AppControlProfile: Codable, Equatable {
         verification: [String] = [],
         invalidatesOn: [String] = [],
         unsupportedCapabilities: [String] = [],
+        advertisedCapabilities: [AppAdvertisedCapability] = [],
         layers: [String] = []
     ) {
         self.archetype = archetype
@@ -38,6 +83,7 @@ public struct AppControlProfile: Codable, Equatable {
         self.verification = verification
         self.invalidatesOn = invalidatesOn
         self.unsupportedCapabilities = unsupportedCapabilities
+        self.advertisedCapabilities = advertisedCapabilities
         self.layers = layers
     }
 
@@ -57,6 +103,7 @@ public struct AppControlProfileOverlay: Codable, Equatable {
     public let verification: [String]
     public let invalidatesOn: [String]
     public let unsupportedCapabilities: [String]
+    public let advertisedCapabilities: [AppAdvertisedCapability]
 
     public init(
         id: String,
@@ -67,7 +114,8 @@ public struct AppControlProfileOverlay: Codable, Equatable {
         anchors: [String] = [],
         verification: [String] = [],
         invalidatesOn: [String] = [],
-        unsupportedCapabilities: [String] = []
+        unsupportedCapabilities: [String] = [],
+        advertisedCapabilities: [AppAdvertisedCapability] = []
     ) {
         self.id = id
         self.bundleIDs = bundleIDs.map { $0.lowercased() }
@@ -78,6 +126,7 @@ public struct AppControlProfileOverlay: Codable, Equatable {
         self.verification = verification
         self.invalidatesOn = invalidatesOn
         self.unsupportedCapabilities = unsupportedCapabilities
+        self.advertisedCapabilities = advertisedCapabilities
     }
 
     fileprivate func matches(_ application: WarmPathApplicationIdentity) -> Bool {
@@ -146,6 +195,10 @@ public struct AppControlProfileRegistry {
             unsupportedCapabilities: Self.orderedUnion(
                 baseline.unsupportedCapabilities,
                 overlay.unsupportedCapabilities
+            ),
+            advertisedCapabilities: Self.orderedUnion(
+                baseline.advertisedCapabilities,
+                overlay.advertisedCapabilities
             ),
             layers: Self.orderedUnion(baseline.layers, ["app:\(overlay.id)"])
         )
@@ -236,6 +289,45 @@ public struct AppControlProfileRegistry {
             id: "system_settings",
             bundleIDs: ["com.apple.systemsettings", "com.apple.systempreferences"],
             archetype: .systemSettings
+        ),
+        AppControlProfileOverlay(
+            id: "discord",
+            bundleIDs: ["com.hnc.Discord"],
+            archetype: .electronChromium,
+            taskProviderPreferences: [
+                "discord.keyboard_navigation": [.keyboard, .accessibility, .computerUse],
+                "discord.quick_switcher": [.keyboard, .accessibility, .computerUse],
+                "discord.shortcut_catalog": [.keyboard, .accessibility, .computerUse]
+            ],
+            verification: ["focused_element_change", "discord_surface_present"],
+            advertisedCapabilities: [
+                AppAdvertisedCapability(
+                    id: "discord.keyboard_navigation",
+                    provider: .keyboard,
+                    source: .accessibilityDisclosure,
+                    taskIDs: ["next-control", "previous-control"],
+                    discoverySignals: ["navigate discord with your tab and arrow keys"],
+                    verificationMethods: ["focused_element_change", "foreground_unchanged"]
+                ),
+                AppAdvertisedCapability(
+                    id: "discord.shortcut_catalog",
+                    provider: .keyboard,
+                    source: .accessibilityDisclosure,
+                    taskIDs: ["discord.shortcut_catalog"],
+                    keyboardShortcut: "cmd+/",
+                    discoverySignals: ["list of keyboard shortcuts"],
+                    verificationMethods: ["shortcut_catalog_present", "foreground_unchanged"]
+                ),
+                AppAdvertisedCapability(
+                    id: "discord.quick_switcher",
+                    provider: .keyboard,
+                    source: .accessibilityDisclosure,
+                    taskIDs: ["discord.quick_switcher"],
+                    keyboardShortcut: "cmd+k",
+                    discoverySignals: ["open the quick switcher", "fastest way to move around"],
+                    verificationMethods: ["quick_switcher_present", "foreground_unchanged"]
+                )
+            ]
         ),
     ]
 

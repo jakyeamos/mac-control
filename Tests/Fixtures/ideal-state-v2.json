@@ -1,0 +1,66 @@
+{
+  "schema": "mac-control-task-manifest/v2",
+  "repository_id": "repo-fixture",
+  "repository_name": "fixture",
+  "applicability": "applicable",
+  "applicability_reason": "The fixture exposes a supported settings task.",
+  "app": {
+    "name": "Fixture App",
+    "bundle_id": "com.example.fixture"
+  },
+  "criteria": {
+    "stable_identity": true,
+    "correct_semantics": true,
+    "observable_state": true,
+    "useful_hierarchy": true,
+    "efficient_navigation": true,
+    "verifiable_outcomes": true,
+    "route_flexibility": true,
+    "stable_change_behavior": true
+  },
+  "tasks": [
+    {
+      "task_id": "open-settings",
+      "stable_target_id": "fixture.settings",
+      "hierarchy": "Window > Settings",
+      "semantic_action": "open settings",
+      "observable_postcondition": "Settings is visible",
+      "observable_states": ["enabled", "visible", "completed"],
+      "state_exemptions": {
+        "focused": "Opening the panel does not retain focus on the trigger.",
+        "selected": "The trigger is not selectable.",
+        "expanded": "The panel is not expandable.",
+        "loading": "The task completes synchronously."
+      },
+      "navigation_strategy": "sequential_tabbing",
+      "change_states": ["loading", "disabled"],
+      "change_state_exemptions": {
+        "modal": "The task does not present a modal.",
+        "permission_unavailable": "The task requires no protected permission."
+      },
+      "focus_policy": "foreground",
+      "foreground_postcondition": "target_foreground",
+      "fallback_policy": "fresh_state_handoff",
+      "verification_oracle": {
+        "oracle_id": "fixture.settings.visible",
+        "kind": "window_state",
+        "expected_state": "settings_visible",
+        "independent_readback": true
+      },
+      "route_candidates": [
+        {
+          "id": "native-accessibility",
+          "provider": "mac_control",
+          "method": "accessibility",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "computer-use-pointer",
+          "provider": "computer_use",
+          "method": "pointer",
+          "interaction_mode": "pointer"
+        }
+      ]
+    }
+  ]
+}

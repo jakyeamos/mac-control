@@ -117,7 +117,10 @@ public struct OperationReceipt: Codable, Equatable {
     public let source: String?
     public let workflowID: String?
     public let targetSurface: SurfaceKind?
+    public let requestedFocusPolicy: FocusPolicy?
     public let focusPolicy: FocusPolicy?
+    public let focusSelectionReason: String?
+    public let backgroundUnavailableReason: String?
     public let risk: RiskLevel?
     public let approvalState: String
     public let executionResult: String
@@ -150,7 +153,10 @@ public struct OperationReceipt: Codable, Equatable {
         case source
         case workflowID
         case targetSurface
+        case requestedFocusPolicy
         case focusPolicy
+        case focusSelectionReason
+        case backgroundUnavailableReason
         case risk
         case approvalState
         case executionResult
@@ -183,7 +189,10 @@ public struct OperationReceipt: Codable, Equatable {
         source: String? = nil,
         workflowID: String?,
         targetSurface: SurfaceKind?,
+        requestedFocusPolicy: FocusPolicy? = nil,
         focusPolicy: FocusPolicy? = nil,
+        focusSelectionReason: String? = nil,
+        backgroundUnavailableReason: String? = nil,
         risk: RiskLevel?,
         approvalState: String = "not_required",
         executionResult: String = "not_run",
@@ -207,7 +216,7 @@ public struct OperationReceipt: Codable, Equatable {
         evidence: [ReceiptEvidence],
         startedAt: Date,
         completedAt: Date,
-        schemaVersion: Int = 2
+        schemaVersion: Int = 3
     ) {
         self.schemaVersion = schemaVersion
         self.operationID = operationID
@@ -216,7 +225,10 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = source
         self.workflowID = workflowID
         self.targetSurface = targetSurface
+        self.requestedFocusPolicy = requestedFocusPolicy
         self.focusPolicy = focusPolicy
+        self.focusSelectionReason = focusSelectionReason
+        self.backgroundUnavailableReason = backgroundUnavailableReason
         self.risk = risk
         self.approvalState = approvalState
         self.executionResult = executionResult
@@ -251,7 +263,13 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.workflowID = try container.decodeIfPresent(String.self, forKey: .workflowID)
         self.targetSurface = try container.decodeIfPresent(SurfaceKind.self, forKey: .targetSurface)
+        self.requestedFocusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .requestedFocusPolicy)
         self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy)
+        self.focusSelectionReason = try container.decodeIfPresent(String.self, forKey: .focusSelectionReason)
+        self.backgroundUnavailableReason = try container.decodeIfPresent(
+            String.self,
+            forKey: .backgroundUnavailableReason
+        )
         self.risk = try container.decodeIfPresent(RiskLevel.self, forKey: .risk)
         self.approvalState = try container.decodeIfPresent(String.self, forKey: .approvalState) ?? "not_required"
         self.executionResult = try container.decodeIfPresent(String.self, forKey: .executionResult) ?? "not_run"

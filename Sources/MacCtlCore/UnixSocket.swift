@@ -36,6 +36,46 @@ public enum UnixSocketError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Identity observed from the local Unix socket. Callers cannot provide or
+/// override these fields because they are collected after accept(2).
+public struct UnixSocketPeerIdentity: Codable, Equatable {
+    public let userID: UInt32?
+    public let groupID: UInt32?
+    public let processID: Int32?
+    public let executablePath: String?
+    public let signingIdentity: String?
+    public let teamIdentifier: String?
+    public let signatureValid: Bool?
+
+    public init(
+        userID: UInt32? = nil,
+        groupID: UInt32? = nil,
+        processID: Int32? = nil,
+        executablePath: String? = nil,
+        signingIdentity: String? = nil,
+        teamIdentifier: String? = nil,
+        signatureValid: Bool? = nil
+    ) {
+        self.userID = userID
+        self.groupID = groupID
+        self.processID = processID
+        self.executablePath = executablePath
+        self.signingIdentity = signingIdentity
+        self.teamIdentifier = teamIdentifier
+        self.signatureValid = signatureValid
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case groupID = "group_id"
+        case processID = "process_id"
+        case executablePath = "executable_path"
+        case signingIdentity = "signing_identity"
+        case teamIdentifier = "team_identifier"
+        case signatureValid = "signature_valid"
+    }
+}
+
 private func errnoMessage() -> String {
     String(cString: strerror(errno))
 }
@@ -112,6 +152,13 @@ public final class UnixSocketServer {
     }
 
     public func start(handler: @escaping (Data) -> Data) throws {
+        try startWithPeer { data, _ in handler(data) }
+    }
+
+    /// Starts the owner-only server while exposing daemon-observed peer
+    /// identity to the request handler. The existing data-only overload stays
+    /// available for compatibility with older tests and embedders.
+    public func startWithPeer(handler: @escaping (Data, UnixSocketPeerIdentity) -> Data) throws {
         try MacCtlPaths.ensureDirectories()
         try removeStaleSocketIfNeeded()
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -139,7 +186,7 @@ public final class UnixSocketServer {
         fileDescriptor = descriptor
         running = true
         queue.async { [weak self] in
-            self?.acceptLoop(handler: handler)
+            self?.acceptLoopWithPeer(handler: handler)
         }
     }
 
@@ -156,7 +203,7 @@ public final class UnixSocketServer {
         }
     }
 
-    private func acceptLoop(handler: @escaping (Data) -> Data) {
+    private func acceptLoopWithPeer(handler: @escaping (Data, UnixSocketPeerIdentity) -> Data) {
         while running {
             var address = sockaddr_un()
             var length = socklen_t(MemoryLayout<sockaddr_un>.size)
@@ -178,11 +225,11 @@ public final class UnixSocketServer {
         }
     }
 
-    private func handle(client: Int32, handler: (Data) -> Data) {
+    private func handle(client: Int32, handler: (Data, UnixSocketPeerIdentity) -> Data) {
         defer { close(client) }
         do {
             let request = try readAll(from: client)
-            let response = handler(request)
+            let response = handler(request, peerIdentity(for: client))
             try writeAll(response, to: client)
         } catch {
             let fallback = ResponseEnvelope(
@@ -197,6 +244,43 @@ public final class UnixSocketServer {
                 try? writeAll(data, to: client)
             }
         }
+    }
+
+    private func peerIdentity(for client: Int32) -> UnixSocketPeerIdentity {
+        var userID: uid_t = 0
+        var groupID: gid_t = 0
+        let peerResult = getpeereid(client, &userID, &groupID)
+        let observedUserID = peerResult == 0 ? UInt32(userID) : nil
+        let observedGroupID = peerResult == 0 ? UInt32(groupID) : nil
+
+        var processID: pid_t = 0
+        var processLength = socklen_t(MemoryLayout<pid_t>.size)
+        let processResult = withUnsafeMutablePointer(to: &processID) { pointer in
+            getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, pointer, &processLength)
+        }
+        let observedProcessID = processResult == 0 && processID > 0 ? Int32(processID) : nil
+        let executablePath = observedProcessID.flatMap(executablePath(for:))
+        let signature = executablePath.map {
+            MacCtlCodeSigning.inspect(bundleURL: URL(fileURLWithPath: $0))
+        }
+        return UnixSocketPeerIdentity(
+            userID: observedUserID,
+            groupID: observedGroupID,
+            processID: observedProcessID,
+            executablePath: executablePath,
+            signingIdentity: signature?.identity,
+            teamIdentifier: signature?.teamIdentifier,
+            signatureValid: signature.map(\.valid)
+        )
+    }
+
+    private func executablePath(for processID: Int32) -> String? {
+        // The SDK exposes PROC_PIDPATHINFO_MAXSIZE as an unavailable macro to
+        // Swift; this is the documented 4 * MAXPATHLEN upper bound.
+        var buffer = [CChar](repeating: 0, count: 16_384)
+        let length = proc_pidpath(processID, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
     }
 
     private func removeStaleSocketIfNeeded() throws {

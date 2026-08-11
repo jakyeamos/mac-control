@@ -130,6 +130,7 @@ public final class ReleaseGate {
             taskControlCheck(snapshot),
             shortcutCapabilityCheck(snapshot),
             agentContractCheck(snapshot),
+            authorizationNoticeCheck(snapshot),
             approvalSafetyCheck(snapshot)
         ]
         let passed = checks.allSatisfy { $0.state == .passed }
@@ -659,6 +660,43 @@ public final class ReleaseGate {
             message: missing.isEmpty
                 ? "Agent-facing outcomes, provider handoff, bounded batching, and measured route provenance are exposed"
                 : "Agent-facing control contract is incomplete",
+            details: [
+                "missing": .array(missing.map(JSONValue.string)),
+                "capability_count": .number(Double(capabilities.capabilities.count)),
+                "safety_marker_count": .number(Double(capabilities.safety.count))
+            ]
+        )
+    }
+
+    private func authorizationNoticeCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        guard let capabilities = snapshot.capabilityReport else {
+            return ReleaseGateCheck(
+                id: "authorization.notice",
+                state: .blocked,
+                message: "The daemon did not report the authorization-notice contract",
+                details: ["missing": .array([.string("capabilities")])]
+            )
+        }
+        let requiredCapabilities = [
+            "control.authorization.prepare",
+            "control.authorization.bind",
+            "control.authorization.list",
+            "control.authorization.resolve"
+        ]
+        let requiredSafetyMarkers = [
+            "authorization notices are short-lived, owner-local, redacted, and explanatory only; Mac Control never approves or denies the native macOS prompt",
+            "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
+            "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference"
+        ]
+        let missingCapabilities = requiredCapabilities.filter { !capabilities.capabilities.contains($0) }
+        let missingSafetyMarkers = requiredSafetyMarkers.filter { !capabilities.safety.contains($0) }
+        let missing = missingCapabilities + missingSafetyMarkers
+        return ReleaseGateCheck(
+            id: "authorization.notice",
+            state: missing.isEmpty ? .passed : .blocked,
+            message: missing.isEmpty
+                ? "Authorization notice routes, provenance warnings, and native-prompt boundary are exposed"
+                : "Authorization-notice contract is incomplete",
             details: [
                 "missing": .array(missing.map(JSONValue.string)),
                 "capability_count": .number(Double(capabilities.capabilities.count)),

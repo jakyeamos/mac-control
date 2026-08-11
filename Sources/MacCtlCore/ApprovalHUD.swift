@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UserNotifications
 
 private final class MouseOnlyButton: NSButton {
     private var receivedMouseDown = false
@@ -27,11 +28,17 @@ public final class ApprovalHUD: NSObject {
     public var approvalPendingHandler: ((String) -> Bool)?
     public var pendingApprovalsHandler: (() -> [ApprovalRecord])?
     public var snapshotHandler: (() -> ControlCenterSnapshot)?
+    /// A Codex-owned opener may be registered by the host. Arbitrary URLs are
+    /// never opened by the HUD; without this callback the source reference is
+    /// displayed as informational only.
+    public var authorizationSourceOpener: ((String) -> Bool)?
 
     private var statusItem: NSStatusItem?
     let popover = NSPopover()
     private var displayTimer: Timer?
     private var tokenByOperationID: [String: String] = [:]
+    private var sourceByAuthorizationID: [String: String] = [:]
+    private var notifiedAuthorizationIDs: Set<String> = []
     private var actionError: String?
     private let capsLockMonitor: CapsLockMonitor
 
@@ -57,7 +64,7 @@ public final class ApprovalHUD: NSObject {
             item.button?.sendAction(on: [.leftMouseUp])
             self.statusItem = item
             self.capsLockMonitor.onDoubleTap = { [weak self] in
-                guard let self, !self.pendingApprovals().isEmpty else { return }
+                guard let self, self.hasAttention() else { return }
                 self.showControlCenter()
             }
             _ = self.capsLockMonitor.start()
@@ -70,14 +77,25 @@ public final class ApprovalHUD: NSObject {
     }
 
     /// Approval arrivals are ambient. They update the menu-bar item but never
-    /// activate the app, open the popover, post a notification, or steal focus.
+    /// activate the app, open the popover, or steal focus.
     public func present(_ approval: ApprovalRecord) {
         _ = approval
         refresh()
     }
 
+    /// Authorization notices are explanatory alerts. They may produce one
+    /// deduplicated local notification when macOS has already authorized
+    /// notifications, but they never grant or deny the native request.
+    public func present(_ notice: AuthorizationNotice) {
+        onMain { [weak self] in
+            guard let self else { return }
+            self.notifyAuthorizationNoticeIfAuthorized(notice)
+            self.refreshOnMain()
+        }
+    }
+
     public func bringToFront() {
-        guard !pendingApprovals().isEmpty else { return }
+        guard hasAttention() else { return }
         showControlCenter()
     }
 
@@ -114,6 +132,11 @@ public final class ApprovalHUD: NSObject {
             approvals: approvals.map(ControlCenterApproval.init),
             execution: nil,
             permissions: []
+        )
+        sourceByAuthorizationID = Dictionary(
+            uniqueKeysWithValues: snapshot.authorizationNotices.compactMap { notice in
+                notice.sourceReference.map { (notice.requestID, $0) }
+            }
         )
         let presentation = ControlCenterPresentation.make(snapshot: snapshot)
         updateStatusItem(presentation)
@@ -153,7 +176,11 @@ public final class ApprovalHUD: NSObject {
             let fill: NSColor
             switch presentation.state {
             case .idle: fill = NSColor.controlAccentColor.withAlphaComponent(0.16)
+            case .authorization: fill = NSColor.systemRed.withAlphaComponent(0.96)
             case .approval: fill = NSColor.systemOrange.withAlphaComponent(0.92)
+            case .focusing: fill = NSColor.systemBlue.withAlphaComponent(0.48)
+            case .focused: fill = NSColor.systemBlue.withAlphaComponent(0.62)
+            case .handsOff: fill = NSColor.systemBlue.withAlphaComponent(0.92)
             case .leased: fill = NSColor.systemBlue.withAlphaComponent(0.90)
             case .frozen: fill = NSColor.systemPurple.withAlphaComponent(0.92)
             case .stopping, .degraded: fill = NSColor.systemRed.withAlphaComponent(0.90)
@@ -196,8 +223,13 @@ public final class ApprovalHUD: NSObject {
                     .paragraphStyle: paragraph
                 ]
                 (presentation.label as NSString).draw(in: textRect, withAttributes: attributes)
-                if presentation.pendingCount > 0,
-                   [.leased, .frozen, .stopping].contains(presentation.state) {
+                if presentation.authorizationCount > 0,
+                   presentation.state != .authorization {
+                    let badgeRect = NSRect(x: rect.maxX - 14, y: rect.maxY - 10, width: 12, height: 10)
+                    NSColor.systemRed.setFill()
+                    NSBezierPath(roundedRect: badgeRect, xRadius: 5, yRadius: 5).fill()
+                } else if presentation.pendingCount > 0,
+                          [.focusing, .focused, .handsOff, .leased, .frozen, .stopping].contains(presentation.state) {
                     let badgeRect = NSRect(x: rect.maxX - 14, y: rect.maxY - 10, width: 12, height: 10)
                     NSColor.systemOrange.setFill()
                     NSBezierPath(roundedRect: badgeRect, xRadius: 5, yRadius: 5).fill()
@@ -238,9 +270,49 @@ public final class ApprovalHUD: NSObject {
             root.addArrangedSubview(errorLabel)
         }
 
-        if let execution = snapshot.execution {
+        let authorizationNotices = snapshot.authorizationNotices.filter {
+            $0.state == .pending && $0.expiresAt > Date()
+        }
+        if !authorizationNotices.isEmpty {
             root.addArrangedSubview(separator())
-            root.addArrangedSubview(sectionLabel(execution.stopping ? "STOPPING" : "ACTIVE CONTROL"))
+            root.addArrangedSubview(sectionLabel("AUTHORIZATION REQUESTS · \(authorizationNotices.count)"))
+            root.addArrangedSubview(wrappingLabel(
+                "A command may be asking macOS for sensitive access. Review the source and native prompt yourself; Mac Control cannot Allow or Deny it."
+            ))
+            for (index, notice) in authorizationNotices.enumerated() {
+                root.addArrangedSubview(authorizationRow(notice))
+                if index < authorizationNotices.count - 1 {
+                    root.addArrangedSubview(separator())
+                }
+            }
+        }
+
+        let handsOffVisible = (snapshot.handsOffSession?.expiresAt ?? .distantPast) > Date()
+            && snapshot.execution?.physicalInputMode != .suppressed
+            && snapshot.execution?.stopping != true
+        if handsOffVisible, let handsOffSession = snapshot.handsOffSession {
+            root.addArrangedSubview(separator())
+            root.addArrangedSubview(sectionLabel("HANDS OFF"))
+            let target = handsOffSession.applicationName.map { " in \($0)" } ?? ""
+            let provider = handsOffSession.provider.replacingOccurrences(of: "_", with: " ")
+            root.addArrangedSubview(wrappingLabel(
+                "An agent-controlled \(provider) run is active\(target). Do not use the keyboard or trackpad."
+            ))
+            root.addArrangedSubview(secondaryLabel(
+                "\(durationLabel(handsOffSession.expiresAt.timeIntervalSinceNow)) remaining · heartbeat required"
+            ))
+            let stop = NSButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
+            stop.bezelStyle = .rounded
+            stop.focusRingType = .none
+            stop.contentTintColor = .systemRed
+            stop.setAccessibilityLabel("Stop the hands-off Mac Control run and release input authority")
+            root.addArrangedSubview(stop)
+        } else if let execution = snapshot.execution {
+            root.addArrangedSubview(separator())
+            let isFocused = execution.focusPolicy == .foreground && execution.applicationName != nil && !execution.stopping
+            root.addArrangedSubview(sectionLabel(
+                execution.stopping ? "STOPPING" : (isFocused ? "FOCUSED CONTROL" : "ACTIVE CONTROL")
+            ))
             let target = execution.applicationName.map { " · \($0)" } ?? ""
             root.addArrangedSubview(wrappingLabel(execution.summary + target))
             let input = execution.physicalInputMode == .suppressed
@@ -255,6 +327,14 @@ public final class ApprovalHUD: NSObject {
             stop.contentTintColor = .systemRed
             stop.setAccessibilityLabel("Stop active Mac Control task and release input authority")
             root.addArrangedSubview(stop)
+        } else if let focusActivity = snapshot.focusActivity, focusActivity.expiresAt > Date() {
+            root.addArrangedSubview(separator())
+            let focused = focusActivity.phase == .focused
+            root.addArrangedSubview(sectionLabel(focused ? "FOCUSED" : "FOCUSING"))
+            root.addArrangedSubview(wrappingLabel(
+                "Mac Control is \(focused ? "focused on" : "moving focus to") \(focusActivity.applicationName)."
+            ))
+            root.addArrangedSubview(secondaryLabel("The foreground app may change during this test."))
         }
 
         root.addArrangedSubview(separator())
@@ -275,7 +355,11 @@ public final class ApprovalHUD: NSObject {
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.distribution = .fill
-        let available = secondaryLabel(snapshot.execution == nil ? "Computer available" : "Computer leased")
+        let available = secondaryLabel(
+            snapshot.execution == nil && snapshot.handsOffSession == nil
+                ? "Computer available"
+                : "Computer controlled"
+        )
         footer.addArrangedSubview(available)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -336,6 +420,63 @@ public final class ApprovalHUD: NSObject {
         return card
     }
 
+    private func authorizationRow(_ notice: AuthorizationNotice) -> NSView {
+        let card = NSStackView()
+        card.orientation = .vertical
+        card.alignment = .leading
+        card.spacing = 5
+        card.edgeInsets = NSEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
+
+        let title = wrappingLabel(notice.summary)
+        title.font = .systemFont(ofSize: 12, weight: .semibold)
+        title.textColor = notice.provenance == .unverified ? .systemRed : .labelColor
+        card.addArrangedSubview(title)
+
+        var details = ["Project: \(notice.project)"]
+        if let repository = notice.repository { details.append("Repository: \(repository)") }
+        if let task = notice.taskID ?? notice.taskTitle {
+            details.append("Task: \(task)")
+        }
+        if let thread = notice.threadID ?? notice.threadTitle {
+            details.append("Thread: \(thread)")
+        }
+        details.append("Requesting: \(notice.requestingExecutable ?? "unknown executable")")
+        if let helper = notice.requestingHelper { details.append("Helper: \(helper)") }
+        if let observed = notice.observedIdentity {
+            var peer = observed.executableName ?? "unknown executable"
+            if let processID = observed.processID { peer += " · PID \(processID)" }
+            details.append("Observed socket peer: \(peer)")
+        }
+        if let target = notice.targetService { details.append("Target: \(target)") }
+        details.append("Action: \(notice.action)")
+        details.append(
+            "Expires in \(durationLabel(notice.expiresAt.timeIntervalSinceNow)) · provenance: \(notice.provenance.rawValue.uppercased())"
+        )
+        let detail = wrappingLabel(details.joined(separator: "\n"))
+        detail.textColor = notice.provenance == .unverified ? .systemRed : .secondaryLabelColor
+        card.addArrangedSubview(detail)
+
+        if let sourceReference = notice.sourceReference {
+            card.addArrangedSubview(secondaryLabel("Source: \(sourceReference)"))
+            if authorizationSourceOpener != nil {
+                let open = NSButton(title: "Open source", target: self, action: #selector(openAuthorizationSource(_:)))
+                open.identifier = NSUserInterfaceItemIdentifier(notice.requestID)
+                open.bezelStyle = .inline
+                open.focusRingType = .none
+                open.keyEquivalent = ""
+                open.setAccessibilityLabel("Open registered Codex source for authorization request")
+                card.addArrangedSubview(open)
+            } else {
+                card.addArrangedSubview(secondaryLabel(
+                    "Open source unavailable: no registered Codex opener is configured."
+                ))
+            }
+        } else {
+            card.addArrangedSubview(secondaryLabel("Source reference unavailable."))
+        }
+        return card
+    }
+
     @objc private func approve(_ sender: MouseOnlyButton) {
         guard sender.consumeMouseClick(),
               let operationID = sender.identifier?.rawValue,
@@ -368,6 +509,19 @@ public final class ApprovalHUD: NSObject {
         actionError = response?.status == .succeeded
             ? nil
             : response?.error?.message ?? "Could not stop the active execution"
+        refresh()
+    }
+
+    @objc private func openAuthorizationSource(_ sender: NSButton) {
+        guard let requestID = sender.identifier?.rawValue,
+              let source = sourceByAuthorizationID[requestID] else {
+            actionError = "Source opening is unavailable because the registered reference is missing"
+            refresh()
+            return
+        }
+        actionError = authorizationSourceOpener?(source) == true
+            ? nil
+            : "Source opening was unavailable through the registered Codex opener"
         refresh()
     }
 
@@ -421,6 +575,45 @@ public final class ApprovalHUD: NSObject {
     private func durationLabel(_ seconds: TimeInterval) -> String {
         let value = max(0, Int(ceil(seconds)))
         return value >= 60 ? "\(value / 60)m \(value % 60)s" : "\(value)s"
+    }
+
+    private func hasAttention() -> Bool {
+        let snapshot = snapshotHandler?()
+        return !pendingApprovals().isEmpty || snapshot?.authorizationNotices.contains {
+            $0.state == .pending && $0.expiresAt > Date()
+        } == true
+    }
+
+    private func notifyAuthorizationNoticeIfAuthorized(_ notice: AuthorizationNotice) {
+        guard !notifiedAuthorizationIDs.contains(notice.requestID) else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { [weak self] settings in
+            guard let self,
+                  [.authorized, .provisional].contains(settings.authorizationStatus) else {
+                return
+            }
+            DispatchQueue.main.async {
+                guard !self.notifiedAuthorizationIDs.contains(notice.requestID) else { return }
+                self.notifiedAuthorizationIDs.insert(notice.requestID)
+            }
+            let content = UNMutableNotificationContent()
+            content.title = "Sensitive request needs your attention"
+            let target = notice.targetService.map { " for \($0)" } ?? ""
+            content.body = "\(notice.project): \(notice.action)\(target). Review Mac Control for provenance; macOS Allow/Deny remains yours."
+            content.sound = .default
+            content.threadIdentifier = "macctl-authorization"
+            let request = UNNotificationRequest(
+                identifier: "macctl.authorization.\(notice.requestID)",
+                content: content,
+                trigger: nil
+            )
+            center.add(request) { [weak self] error in
+                guard let self, error != nil else { return }
+                DispatchQueue.main.async {
+                    self.notifiedAuthorizationIDs.remove(notice.requestID)
+                }
+            }
+        }
     }
 
     private func onMain(_ operation: @escaping () -> Void) {

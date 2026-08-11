@@ -28,6 +28,19 @@ public struct ContextMenuReport: Codable, Equatable {
     public let expectedItemCount: Int
     public let matchedItemCount: Int
     public let visibleItemCount: Int
+    public let renderedMenuCount: Int
+    public let ambiguousMenuCandidates: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case targetResolved
+        case menuVisible
+        case expectedItemCount
+        case matchedItemCount
+        case visibleItemCount
+        case renderedMenuCount
+        case ambiguousMenuCandidates
+    }
 
     public init(
         state: ContextMenuVerificationState,
@@ -35,7 +48,9 @@ public struct ContextMenuReport: Codable, Equatable {
         menuVisible: Bool,
         expectedItemCount: Int,
         matchedItemCount: Int,
-        visibleItemCount: Int
+        visibleItemCount: Int,
+        renderedMenuCount: Int? = nil,
+        ambiguousMenuCandidates: Bool = false
     ) {
         self.state = state
         self.targetResolved = targetResolved
@@ -43,6 +58,36 @@ public struct ContextMenuReport: Codable, Equatable {
         self.expectedItemCount = expectedItemCount
         self.matchedItemCount = matchedItemCount
         self.visibleItemCount = visibleItemCount
+        self.renderedMenuCount = renderedMenuCount ?? (menuVisible ? 1 : 0)
+        self.ambiguousMenuCandidates = ambiguousMenuCandidates
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.state = try container.decode(ContextMenuVerificationState.self, forKey: .state)
+        self.targetResolved = try container.decode(Bool.self, forKey: .targetResolved)
+        self.menuVisible = try container.decode(Bool.self, forKey: .menuVisible)
+        self.expectedItemCount = try container.decode(Int.self, forKey: .expectedItemCount)
+        self.matchedItemCount = try container.decode(Int.self, forKey: .matchedItemCount)
+        self.visibleItemCount = try container.decode(Int.self, forKey: .visibleItemCount)
+        self.renderedMenuCount = try container.decodeIfPresent(Int.self, forKey: .renderedMenuCount)
+            ?? (menuVisible ? 1 : 0)
+        self.ambiguousMenuCandidates = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .ambiguousMenuCandidates
+        ) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(state, forKey: .state)
+        try container.encode(targetResolved, forKey: .targetResolved)
+        try container.encode(menuVisible, forKey: .menuVisible)
+        try container.encode(expectedItemCount, forKey: .expectedItemCount)
+        try container.encode(matchedItemCount, forKey: .matchedItemCount)
+        try container.encode(visibleItemCount, forKey: .visibleItemCount)
+        try container.encode(renderedMenuCount, forKey: .renderedMenuCount)
+        try container.encode(ambiguousMenuCandidates, forKey: .ambiguousMenuCandidates)
     }
 
     public var actionPostcondition: ControlActionPostcondition {
@@ -55,6 +100,9 @@ public struct ContextMenuReport: Codable, Equatable {
                 "expected_item_count": .number(Double(expectedItemCount)),
                 "matched_item_count": .number(Double(matchedItemCount)),
                 "visible_item_count": .number(Double(visibleItemCount)),
+                "rendered_menu_count": .number(Double(renderedMenuCount)),
+                "menu_geometry_verified": .bool(renderedMenuCount == 1 && !ambiguousMenuCandidates),
+                "ambiguous_menu_candidates": .bool(ambiguousMenuCandidates),
                 "verification_state": .string(state.rawValue)
             ]
         )
@@ -74,6 +122,23 @@ public struct ControlActionPostcondition: Codable, Equatable {
         self.kind = kind
         self.verified = verified
         self.details = details
+    }
+}
+
+/// Result of an Accessibility activation.  The AX runtime action is kept
+/// explicit so provider-specific activation (for example an outline row's
+/// AXShowDefaultUI action) can carry a task-specific readback into the common
+/// control verification contract.
+public struct AccessibilityActivationReport: Equatable {
+    public let action: String
+    public let postcondition: ControlActionPostcondition?
+
+    public init(
+        action: String,
+        postcondition: ControlActionPostcondition? = nil
+    ) {
+        self.action = action
+        self.postcondition = postcondition
     }
 }
 
@@ -218,15 +283,18 @@ public struct ControlVerificationFailure: Error, LocalizedError {
     public let route: ControlActionRoute
     public let state: ControlVerificationState
     public let postcondition: ControlActionPostcondition?
+    public let focusPolicy: FocusPolicy
 
     public init(
         route: ControlActionRoute,
         state: ControlVerificationState,
-        postcondition: ControlActionPostcondition? = nil
+        postcondition: ControlActionPostcondition? = nil,
+        focusPolicy: FocusPolicy = .foreground
     ) {
         self.route = route
         self.state = state
         self.postcondition = postcondition
+        self.focusPolicy = focusPolicy
     }
 
     public var errorDescription: String? {
@@ -238,7 +306,9 @@ public struct ControlVerificationFailure: Error, LocalizedError {
             "failure_class": .string("verification_unavailable"),
             "route": .string(route.rawValue),
             "verification": .string(state.rawValue),
-            "fresh_state_required": .bool(true)
+            "focus_policy": .string(focusPolicy.rawValue),
+            "foreground_oracle": .string("target_foreground_unchanged"),
+                "fresh_state_required": .bool(true)
         ]
         if let postcondition {
             result["postcondition"] = .object([
@@ -246,8 +316,61 @@ public struct ControlVerificationFailure: Error, LocalizedError {
                 "verified": .bool(postcondition.verified),
                 "details": .object(postcondition.details)
             ])
+            if route == .accessibility, postcondition.kind == "context_menu" {
+                result["fallback_allowed"] = .bool(false)
+                result["recommended_provider"] = .string("computer_use")
+                result["next_action"] = .string(
+                    "get_app_state_then_relocate_target_and_verify_with_computer_use"
+                )
+            }
         }
         return result
+    }
+}
+
+/// A completed action crossed the caller-declared foreground boundary. Keep
+/// this distinct from an unverified postcondition so agents can recover the
+/// focus race without treating the action as a generic provider failure.
+public struct ControlFocusPolicyFailure: Error, LocalizedError {
+    public let policy: FocusPolicy
+    public let route: ControlActionRoute
+    public let foregroundBefore: AppInfo
+    public let foregroundAfter: AppInfo
+
+    public init(
+        policy: FocusPolicy,
+        route: ControlActionRoute,
+        foregroundBefore: AppInfo,
+        foregroundAfter: AppInfo
+    ) {
+        self.policy = policy
+        self.route = route
+        self.foregroundBefore = foregroundBefore
+        self.foregroundAfter = foregroundAfter
+    }
+
+    public var errorDescription: String? {
+        "Control action changed foreground focus under the (policy.rawValue) focus policy"
+    }
+
+    public var details: [String: JSONValue] {
+        [
+            "failure_class": .string("foreground_race"),
+            "route": .string(route.rawValue),
+            "focus_policy": .string(policy.rawValue),
+            "foreground_oracle": .string("target_foreground_unchanged"),
+            "foreground_state": .string("changed"),
+            "expected_foreground": .string(foregroundLabel(foregroundBefore)),
+            "actual_foreground": .string(foregroundLabel(foregroundAfter)),
+            "fresh_state_required": .bool(true)
+        ]
+    }
+
+    private func foregroundLabel(_ application: AppInfo) -> String {
+        if let bundleID = application.bundleID, !bundleID.isEmpty {
+            return bundleID
+        }
+        return application.name
     }
 }
 
@@ -288,6 +411,10 @@ public struct ControlSessionSnapshot: Codable, Equatable {
 public struct SemanticActionReport: Codable, Equatable {
     public let action: String
     public let route: ControlActionRoute
+    /// The caller's expected focus boundary. The low-level router remains
+    /// foreground-bound; the service attaches the explicit policy at the
+    /// request boundary so receipts and benchmark lanes cannot infer it.
+    public let focusPolicy: FocusPolicy
     public let fallbackUsed: Bool
     public let keyCount: Int
     public let targetApplication: AppInfo
@@ -298,6 +425,7 @@ public struct SemanticActionReport: Codable, Equatable {
     public init(
         action: String,
         route: ControlActionRoute,
+        focusPolicy: FocusPolicy = .foreground,
         fallbackUsed: Bool,
         keyCount: Int,
         targetApplication: AppInfo,
@@ -307,12 +435,52 @@ public struct SemanticActionReport: Codable, Equatable {
     ) {
         self.action = action
         self.route = route
+        self.focusPolicy = focusPolicy
         self.fallbackUsed = fallbackUsed
         self.keyCount = keyCount
         self.targetApplication = targetApplication
         self.verification = verification
         self.fallbackChain = fallbackChain
         self.routeSelection = routeSelection
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case route
+        case focusPolicy
+        case fallbackUsed
+        case keyCount
+        case targetApplication
+        case verification
+        case fallbackChain
+        case routeSelection
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        action = try container.decode(String.self, forKey: .action)
+        route = try container.decode(ControlActionRoute.self, forKey: .route)
+        focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy) ?? .foreground
+        fallbackUsed = try container.decode(Bool.self, forKey: .fallbackUsed)
+        keyCount = try container.decode(Int.self, forKey: .keyCount)
+        targetApplication = try container.decode(AppInfo.self, forKey: .targetApplication)
+        verification = try container.decode(ControlActionVerification.self, forKey: .verification)
+        fallbackChain = try container.decodeIfPresent([ControlActionRoute].self, forKey: .fallbackChain) ?? []
+        routeSelection = try container.decodeIfPresent(RouteSelectionReport.self, forKey: .routeSelection)
+    }
+
+    public func withFocusPolicy(_ focusPolicy: FocusPolicy) -> SemanticActionReport {
+        SemanticActionReport(
+            action: action,
+            route: route,
+            focusPolicy: focusPolicy,
+            fallbackUsed: fallbackUsed,
+            keyCount: keyCount,
+            targetApplication: targetApplication,
+            verification: verification,
+            fallbackChain: fallbackChain,
+            routeSelection: routeSelection
+        )
     }
 }
 
@@ -538,6 +706,24 @@ public final class ControlSession {
 public protocol AccessibilityActionPerforming {
     @discardableResult
     func press(pid: pid_t, selector: Selector) throws -> CGRect
+
+    /// Providers may override this to use an exposed semantic activation
+    /// action and return a task-specific readback. The default preserves the
+    /// legacy AXPress behavior for test doubles and alternate providers.
+    func activate(
+        pid: pid_t,
+        selector: Selector
+    ) throws -> AccessibilityActivationReport
+}
+
+public extension AccessibilityActionPerforming {
+    func activate(
+        pid: pid_t,
+        selector: Selector
+    ) throws -> AccessibilityActivationReport {
+        _ = try press(pid: pid, selector: selector)
+        return AccessibilityActivationReport(action: "AXPress")
+    }
 }
 
 extension AccessibilityController: AccessibilityActionPerforming {}
@@ -738,8 +924,10 @@ public final class SemanticActionRouter {
                     expectedMenuItems: expectedMenuItems
                 ).actionPostcondition
             } else {
-                _ = try accessibilityActionController.press(pid: pid, selector: selector)
-                postcondition = nil
+                postcondition = try accessibilityActionController.activate(
+                    pid: pid,
+                    selector: selector
+                ).postcondition
             }
             let verification = try session.completeAction(
                 context,

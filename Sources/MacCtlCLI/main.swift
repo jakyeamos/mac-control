@@ -44,8 +44,8 @@ struct CLI {
                 return render(sendOrLocal(method: "logs", params: [:], localFallback: true))
             case "keyboard":
                 return try runKeyboard(commandArguments)
-            case "control":
-                return try runControl(commandArguments)
+        case "control":
+            return try runControl(commandArguments)
             case "shortcut":
                 return try runShortcut(commandArguments)
             case "task":
@@ -108,14 +108,14 @@ struct CLI {
             return render(sendOrLocal(method: "workflow.list", params: [:], localFallback: true))
         case "validate":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow validate <workflow> [--background]")
+                throw CLIError.usage("Usage: macctl workflow validate <workflow> [--focus-policy automatic|foreground|background]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
             try addFocusPolicy(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.validate", params: params, localFallback: true))
         case "prepare":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow prepare <workflow> [--background] [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow prepare <workflow> [--focus-policy automatic|foreground|background] [--ephemeral-stdin]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
             try addFocusPolicy(from: args, to: &params)
@@ -123,7 +123,7 @@ struct CLI {
             return render(sendOrLocal(method: "workflow.prepare", params: params, localFallback: false))
         case "run":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow run <workflow> [--background] [--approval-token <token>] [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow run <workflow> [--focus-policy automatic|foreground|background] [--approval-token <token>] [--ephemeral-stdin]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
             try addFocusPolicy(from: args, to: &params)
@@ -133,7 +133,7 @@ struct CLI {
             try addEphemeralInputs(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.run", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]")
+            throw CLIError.usage("Usage: macctl workflow list|validate|prepare|run <workflow> [--focus-policy automatic|foreground|background] [--ephemeral-stdin]")
         }
     }
 
@@ -141,8 +141,44 @@ struct CLI {
         from args: [String],
         to params: inout [String: JSONValue]
     ) throws {
-        guard args.contains("--background") else { return }
-        params["focus_policy"] = .string(FocusPolicy.background.rawValue)
+        let explicit = try optionalOption("--focus-policy", from: args)
+        let shorthand = args.contains("--background")
+        guard !(explicit != nil && shorthand) else {
+            throw CLIError.usage("Use either --focus-policy or --background, not both")
+        }
+        let raw = explicit ?? (shorthand ? FocusPolicy.background.rawValue : FocusPolicy.automatic.rawValue)
+        guard let policy = FocusPolicy(rawValue: raw) else {
+            throw CLIError.usage("--focus-policy must be automatic, foreground, or background")
+        }
+        params["focus_policy"] = .string(policy.rawValue)
+    }
+
+    private func addControlFocusPolicy(
+        from args: [String],
+        to params: inout [String: JSONValue]
+    ) throws {
+        let explicit = try optionalOption("--focus-policy", from: args)
+        let shorthand = args.contains("--background")
+        guard !(explicit != nil && shorthand) else {
+            throw CLIError.usage("Use either --focus-policy or --background, not both")
+        }
+        let raw = explicit ?? (shorthand ? FocusPolicy.background.rawValue : FocusPolicy.automatic.rawValue)
+        guard let policy = FocusPolicy(rawValue: raw) else {
+            throw CLIError.usage("--focus-policy must be automatic, foreground, or background")
+        }
+        params["focus_policy"] = .string(policy.rawValue)
+    }
+
+    private func addControlTargetSurface(
+        from args: [String],
+        to params: inout [String: JSONValue]
+    ) throws {
+        guard let raw = try optionalOption("--target-surface", from: args) else { return }
+        let normalized = raw.lowercased().replacingOccurrences(of: "-", with: "_")
+        guard let surface = ControlTargetSurface(rawValue: normalized) else {
+            throw CLIError.usage("--target-surface must be mac-app-ui or web-content")
+        }
+        params["target_surface"] = .string(surface.rawValue)
     }
 
     private func addEphemeralInputs(
@@ -290,6 +326,8 @@ struct CLI {
                 ("--role", "role"),
                 ("--identifier", "identifier"),
                 ("--locator-digest", "locatorDigest"),
+                ("--ancestor-digest", "ancestorDigest"),
+                ("--geometry-digest", "geometryDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -538,21 +576,26 @@ struct CLI {
 
     private func runControl(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl control status|perform|batch|capabilities|capability-audit|capability-audit-batch")
+            throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
         }
         switch subcommand {
         case "status":
             return render(sendOrLocal(method: "control.status", params: [:], localFallback: true))
+        case "hands-off":
+            return try runHandsOffSession(Array(args.dropFirst()))
+        case "authorization":
+            return try runAuthorization(Array(args.dropFirst()))
         case "capabilities":
             let application = try requiredOption("--app", from: args)
             var params: [String: JSONValue] = ["app": .string(application)]
+            try addControlTargetSurface(from: args, to: &params)
             if let task = try optionalOption("--task", from: args) {
                 params["task"] = .string(task)
             }
             if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
                 params["target_fingerprint"] = .string(targetFingerprint)
             }
-            return render(sendOrLocal(method: "control.capabilities", params: params, localFallback: false))
+            return render(sendControlRequest(method: "control.capabilities", params: params))
         case "capability-audit":
             var params: [String: JSONValue] = [
                 "app": .string(try requiredOption("--app", from: args))
@@ -618,12 +661,14 @@ struct CLI {
             var params = try controlBatchParameters(from: args)
             params["app"] = .string(application)
             params["confirm"] = .bool(true)
-            return render(sendOrLocal(method: "control.batch", params: params, localFallback: false))
+            return render(sendControlRequest(method: "control.batch", params: params))
         case "perform":
             guard let action = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [selector options]")
+                throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [selector options]")
             }
             var params: [String: JSONValue] = ["action": .string(action)]
+            try addControlFocusPolicy(from: args, to: &params)
+            try addControlTargetSurface(from: args, to: &params)
             let leaseToken = try optionalOption("--lease-token", from: args)
             let application = try optionalOption("--app", from: args)
             guard (leaseToken == nil) != (application == nil) else {
@@ -647,6 +692,9 @@ struct CLI {
             }
             if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
                 params["target_fingerprint"] = .string(targetFingerprint)
+            }
+            if let sessionID = try optionalOption("--hands-off-session-id", from: args) {
+                params["hands_off_session_id"] = .string(sessionID)
             }
             if let route = try optionalOption("--route", from: args) {
                 params["route"] = .string(route)
@@ -697,6 +745,8 @@ struct CLI {
                 ("--role", "role"),
                 ("--identifier", "identifier"),
                 ("--locator-digest", "locatorDigest"),
+                ("--ancestor-digest", "ancestorDigest"),
+                ("--geometry-digest", "geometryDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -729,9 +779,149 @@ struct CLI {
             if !selector.isEmpty {
                 params["selector"] = .object(selector)
             }
-            return render(sendOrLocal(method: "control.perform", params: params, localFallback: false))
+            return render(sendControlRequest(method: "control.perform", params: params))
         default:
-            throw CLIError.usage("Usage: macctl control status|perform|batch|capabilities|capability-audit|capability-audit-batch")
+            throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
+        }
+    }
+
+    private func runAuthorization(_ args: [String]) throws -> Int32 {
+        guard let action = args.first else {
+            throw CLIError.usage("Usage: macctl control authorization prepare|bind|list|resolve")
+        }
+        let forbidden = ["--command", "--args", "--prompt", "--password", "--token", "--secret", "--stdin"]
+        guard args.allSatisfy({ !forbidden.contains($0) }) else {
+            throw CLIError.usage("Authorization notices accept safe context only; raw commands, prompts, passwords, tokens, and private input are rejected")
+        }
+        switch action {
+        case "prepare":
+            var params: [String: JSONValue] = [
+                "project": .string(try requiredOption("--project", from: args)),
+                "action": .string(try requiredOption("--action", from: args)),
+                "summary": .string(try requiredOption("--summary", from: args))
+            ]
+            let stringOptions: [(String, String)] = [
+                ("--repository", "repository"),
+                ("--task-id", "task_id"),
+                ("--task-title", "task_title"),
+                ("--thread-id", "thread_id"),
+                ("--thread-title", "thread_title"),
+                ("--source-reference", "source_reference"),
+                ("--requesting-executable", "requesting_executable"),
+                ("--requesting-helper", "requesting_helper"),
+                ("--target-service", "target_service")
+            ]
+            for (option, key) in stringOptions {
+                if let value = try optionalOption(option, from: args) {
+                    params[key] = .string(value)
+                }
+            }
+            if let kind = try optionalOption("--kind", from: args) {
+                guard AuthorizationNoticeKind(rawValue: kind.lowercased()) != nil else {
+                    throw CLIError.usage("--kind must be keychain, credential, permission, or other")
+                }
+                params["kind"] = .string(kind.lowercased())
+            }
+            if let expires = try optionalOption("--expires-in", from: args) {
+                guard let value = Double(expires), value.isFinite, value > 0 else {
+                    throw CLIError.usage("--expires-in must be a positive number of seconds")
+                }
+                params["expires_in"] = .number(value)
+            }
+            return render(sendOrLocal(
+                method: "control.authorization.prepare",
+                params: params,
+                localFallback: false
+            ))
+        case "bind":
+            guard let requestID = args.dropFirst().first, !requestID.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl control authorization bind <request-id> --process-id <pid>")
+            }
+            guard let processID = Int(try requiredOption("--process-id", from: args)), processID > 0 else {
+                throw CLIError.usage("--process-id must be a positive integer")
+            }
+            return render(sendOrLocal(
+                method: "control.authorization.bind",
+                params: [
+                    "request_id": .string(requestID),
+                    "process_id": .number(Double(processID))
+                ],
+                localFallback: false
+            ))
+        case "list":
+            return render(sendOrLocal(
+                method: "control.authorization.list",
+                params: [:],
+                localFallback: false
+            ))
+        case "resolve":
+            guard let requestID = args.dropFirst().first, !requestID.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl control authorization resolve <request-id> --outcome completed|failed|cancelled|timeout|unknown")
+            }
+            let outcome = try requiredOption("--outcome", from: args).lowercased()
+            guard AuthorizationNoticeOutcome(rawValue: outcome) != nil else {
+                throw CLIError.usage("--outcome must be completed, failed, cancelled, timeout, or unknown")
+            }
+            return render(sendOrLocal(
+                method: "control.authorization.resolve",
+                params: [
+                    "request_id": .string(requestID),
+                    "outcome": .string(outcome)
+                ],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl control authorization prepare|bind|list|resolve")
+        }
+    }
+
+    private func runHandsOffSession(_ args: [String]) throws -> Int32 {
+        guard let action = args.first else {
+            throw CLIError.usage("Usage: macctl control hands-off begin|heartbeat|end|status")
+        }
+        switch action {
+        case "begin":
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("Usage: macctl control hands-off begin --confirm [--provider mac_control|computer_use|hybrid] [--app <app>] [--task <id>] [--seconds N]")
+            }
+            var params: [String: JSONValue] = ["confirm": .bool(true)]
+            if let provider = try optionalOption("--provider", from: args) {
+                params["provider"] = .string(provider)
+            }
+            if let application = try optionalOption("--app", from: args) {
+                params["app"] = .string(application)
+            }
+            if let task = try optionalOption("--task", from: args) {
+                params["task_id"] = .string(task)
+            }
+            if let seconds = try optionalOption("--seconds", from: args) {
+                guard let value = Double(seconds), value.isFinite, value > 0 else {
+                    throw CLIError.usage("--seconds must be a positive number")
+                }
+                params["seconds"] = .number(value)
+            }
+            return render(sendOrLocal(method: "control.hands_off.begin", params: params, localFallback: false))
+        case "heartbeat":
+            var params: [String: JSONValue] = [
+                "session_id": .string(try requiredOption("--session-id", from: args))
+            ]
+            if let seconds = try optionalOption("--seconds", from: args) {
+                guard let value = Double(seconds), value.isFinite, value > 0 else {
+                    throw CLIError.usage("--seconds must be a positive number")
+                }
+                params["seconds"] = .number(value)
+            }
+            return render(sendOrLocal(method: "control.hands_off.heartbeat", params: params, localFallback: false))
+        case "end":
+            return render(sendOrLocal(
+                method: "control.hands_off.end",
+                params: ["session_id": .string(try requiredOption("--session-id", from: args))],
+                localFallback: false
+            ))
+        case "status":
+            return render(sendOrLocal(method: "control.hands_off.status", params: [:], localFallback: true))
+        default:
+            throw CLIError.usage("Usage: macctl control hands-off begin|heartbeat|end|status")
         }
     }
 
@@ -750,11 +940,16 @@ struct CLI {
             throw CLIError.usage("--actions-stdin expects a JSON array or {\"actions\": [...]} envelope")
         }
         var params: [String: JSONValue] = ["actions": actions]
+        try addControlFocusPolicy(from: args, to: &params)
+        try addControlTargetSurface(from: args, to: &params)
         if let task = try optionalOption("--task", from: args) {
             params["task"] = .string(task)
         }
         if let targetFingerprint = try optionalOption("--target-fingerprint", from: args) {
             params["target_fingerprint"] = .string(targetFingerprint)
+        }
+        if let sessionID = try optionalOption("--hands-off-session-id", from: args) {
+            params["hands_off_session_id"] = .string(sessionID)
         }
         return params
     }
@@ -893,8 +1088,23 @@ struct CLI {
                 params["physical_input_mode"] = .string("suppressed")
                 params["reason"] = .string(try requiredOption("--reason", from: args))
             }
+            let navigationMode = args.contains("--navigation-mode")
+            let fromPassThrough = args.contains("--from-pass-through")
+            if navigationMode, scope.lowercased() != KeyboardLeaseScope.session.rawValue {
+                throw CLIError.usage("--navigation-mode requires --scope session")
+            }
+            if fromPassThrough, !navigationMode {
+                throw CLIError.usage("--from-pass-through requires --navigation-mode")
+            }
+            if navigationMode {
+                params["navigation_mode"] = .string("navigation")
+                guard fromPassThrough else {
+                    throw CLIError.usage("--navigation-mode requires --from-pass-through")
+                }
+                params["from_pass_through"] = .bool(true)
+            }
             guard args.contains("--confirm") else {
-                throw CLIError.usage("Usage: macctl keyboard lease acquire --scope app|session [--seconds N] [--suppress-physical-keyboard --reason <text>] --confirm")
+                throw CLIError.usage("Usage: macctl keyboard lease acquire --scope app|session [--seconds N] [--navigation-mode --from-pass-through] [--suppress-physical-keyboard --reason <text>] --confirm")
             }
             return render(sendOrLocal(
                 method: "keyboard.lease.acquire",
@@ -1087,6 +1297,20 @@ struct CLI {
         }
     }
 
+    /// Keep the browser-provider boundary safe across daemon upgrades. An
+    /// older daemon may ignore an unknown target_surface field, so the current
+    /// client resolves web-content capability and handoff responses locally
+    /// and never sends those requests to a potentially stale daemon.
+    private func sendControlRequest(
+        method: String,
+        params: [String: JSONValue]
+    ) -> ResponseEnvelope {
+        if params["target_surface"]?.stringValue == ControlTargetSurface.webContent.rawValue {
+            return localService.localReadOnlyHandle(RequestEnvelope(method: method, params: params))
+        }
+        return sendOrLocal(method: method, params: params, localFallback: false)
+    }
+
     private func render(_ response: ResponseEnvelope) -> Int32 {
         if jsonOutput {
             if let data = try? JSONCodec.encode(response), let text = String(data: data, encoding: .utf8) {
@@ -1123,8 +1347,8 @@ struct CLI {
         macctl capabilities --json
         macctl status --json
         macctl app list [--json]
-        macctl app open <name-or-bundle-id> [--background]
-        macctl workflow list|validate|prepare|run <workflow> [--background] [--ephemeral-stdin]
+        macctl app open <name-or-bundle-id> [--focus-policy automatic|foreground|background] [--background]
+        macctl workflow list|validate|prepare|run <workflow> [--focus-policy automatic|foreground|background] [--background] [--ephemeral-stdin]
         macctl approval list|approve|deny <token>
         macctl receipts list|status
         macctl release check [--json]
@@ -1138,14 +1362,21 @@ struct CLI {
         macctl keyboard navigate <command> --lease-token <token> [--count N]
         macctl keyboard send <key>... --lease-token <token>
         macctl control status [--json]
-        macctl control capabilities --app <app> [--task <id> --target-fingerprint <fingerprint>]
+        macctl control authorization prepare --project <project> --action <safe-action> --summary <safe-summary> [--repository <repo>] [--task-id <id> --task-title <title>] [--thread-id <id> --thread-title <title>] [--source-reference codex://thread/<id>] [--requesting-executable <name>] [--requesting-helper <name>] [--target-service <service>] [--kind keychain|credential|permission|other] [--expires-in N]
+        macctl control authorization bind <request-id> --process-id <pid>
+        macctl control authorization list
+        macctl control authorization resolve <request-id> --outcome completed|failed|cancelled|timeout|unknown
+        macctl control hands-off begin --confirm [--provider mac_control|computer_use|hybrid] [--app <app>] [--task <id>] [--seconds N]
+        macctl control hands-off heartbeat|end --session-id <id> [--seconds N]
+        macctl control hands-off status
+        macctl control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]
         macctl control capability-audit --app <app> [--max-nodes N] [--max-depth N]
         macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
         macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
-        macctl control batch --app <app> --actions-stdin --confirm [--task <id> --target-fingerprint <fingerprint>]
-        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--task <id>] [--route <route>] [selector options]
+        macctl control batch --app <app> --actions-stdin --confirm [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>] [--hands-off-session-id <id>]
+        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id>] [--hands-off-session-id <id>] [--route <route>] [selector options]
         macctl control perform context-menu --app <app> --confirm --role <role> [--identifier <id>] [--title <title>] [--window-title <title> | --window-identifier <id>] [--expected-menu-items "Item A,Item B"]
-        macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
+        macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] [--locator-digest <digest> --ancestor-digest <digest> --geometry-digest <digest>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
         macctl shortcut audit [--app <app>]
         macctl shortcut propose --app <app> --menu-path "Menu->Submenu->Command" [--chord <chord>] [--postconditions-stdin]
         macctl shortcut propose --extension-id <id> --command-id <id> [--chord <chord>] --postconditions-stdin

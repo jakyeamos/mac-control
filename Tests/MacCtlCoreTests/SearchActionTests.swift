@@ -363,6 +363,64 @@ final class SearchActionTests: XCTestCase {
         XCTAssertEqual(harness.textTyper.values, ["workflow-secret"])
         XCTAssertFalse(String(data: try JSONCodec.encode(report), encoding: .utf8)?.contains("workflow-secret") == true)
     }
+
+    func testBackgroundTaskSearchUsesAccessibilityWithoutKeyboardFocus() throws {
+        let app = searchApp()
+        var setValue: (pid_t, String)?
+        let resolver = SearchFieldResolver()
+        let harness = try SearchExecutorHarness(
+            app: app,
+            focusInspector: SearchFocusInspector([searchFocus(for: app)]),
+            resolver: resolver,
+            backgroundSetValue: { pid, _, value in setValue = (pid, value) }
+        )
+
+        let report = try harness.executor.execute(
+            action: searchAction(),
+            context: searchBackgroundContext(app: app, query: "background-query")
+        )
+
+        XCTAssertEqual(report.route, "task_input_accessibility_search")
+        XCTAssertEqual(setValue?.0, app.processID)
+        XCTAssertEqual(setValue?.1, "background-query")
+        XCTAssertEqual(resolver.callCount, 1)
+        XCTAssertTrue(harness.eventSender.keys.isEmpty)
+        XCTAssertTrue(harness.textTyper.values.isEmpty)
+    }
+
+    func testBackgroundTaskScrollRequiresAObservedAccessibilityChange() throws {
+        let app = searchApp()
+        var observedDirection: AccessibilityScrollDirection?
+        let harness = try SearchExecutorHarness(
+            app: app,
+            focusInspector: SearchFocusInspector([searchFocus(for: app)]),
+            resolver: SearchFieldResolver(),
+            backgroundScroll: { _, application, _, direction, amount in
+                observedDirection = direction
+                return AccessibilityScrollReport(
+                    application: application,
+                    targetIdentifier: "results",
+                    direction: direction,
+                    amount: amount,
+                    verification: .passed
+                )
+            }
+        )
+        let action = ActionSpec(
+            kind: .scroll,
+            surface: .macApp,
+            selector: Selector(role: "AXScrollArea", identifier: "results"),
+            parameters: ["direction": .string("down"), "amount": .number(2)]
+        )
+
+        let report = try harness.executor.execute(
+            action: action,
+            context: searchBackgroundContext(app: app, query: "")
+        )
+
+        XCTAssertEqual(report.route, "task_input_accessibility_scroll")
+        XCTAssertEqual(observedDirection, .down)
+    }
 }
 
 private func searchAction(replaceExisting: Bool = true) -> ActionSpec {
@@ -424,6 +482,33 @@ private func searchContext(
         authority: TaskExecutionAuthority(
             leaseToken: lease.token,
             leaseExpiresAt: lease.expiresAt,
+            revalidate: { app }
+        )
+    )
+}
+
+private func searchBackgroundContext(app: AppInfo, query: String) -> TaskActionContext {
+    let expiresAt = Date().addingTimeInterval(30)
+    let channel = TaskInputChannel(
+        taskID: "background-search-test",
+        planDigest: "background-search-digest",
+        focusPolicy: .background,
+        targetApplication: app,
+        routes: [.accessibility],
+        expiresAt: expiresAt
+    )
+    return TaskActionContext(
+        taskID: channel.taskID,
+        stepID: "semantic-action",
+        target: TaskTargetIdentity(application: app.name, processID: app.processID),
+        focusPolicy: .background,
+        planDigest: channel.planDigest,
+        ephemeralInputs: ["query": query],
+        deadline: expiresAt,
+        authority: TaskExecutionAuthority(
+            leaseToken: nil,
+            leaseExpiresAt: expiresAt,
+            inputChannel: channel,
             revalidate: { app }
         )
     )
@@ -510,7 +595,15 @@ private final class SearchExecutorHarness {
         resolver: SearchFieldResolver,
         foregroundApplication: @escaping () -> AppInfo? = { nil },
         hasPostEventAccess: Bool = true,
-        fullKeyboardAccess: Bool = true
+        fullKeyboardAccess: Bool = true,
+        backgroundSetValue: ((pid_t, MacCtlCore.Selector, String) throws -> Void)? = nil,
+        backgroundScroll: ((
+            pid_t,
+            AppInfo,
+            MacCtlCore.Selector,
+            AccessibilityScrollDirection,
+            Int
+        ) throws -> AccessibilityScrollReport)? = nil
     ) throws {
         self.app = app
         eventSender = SearchRecordingKeyboardEventSender()
@@ -554,7 +647,9 @@ private final class SearchExecutorHarness {
             foregroundApplication: foreground,
             searchFieldResolver: resolver,
             focusedElementInspector: focusInspector,
-            searchTextTyper: textTyper
+            searchTextTyper: textTyper,
+            backgroundSetValue: backgroundSetValue,
+            backgroundScroll: backgroundScroll
         )
         workflowExecutor = WorkflowExecutor(
             appController: AppController(),

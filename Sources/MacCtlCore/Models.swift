@@ -96,17 +96,22 @@ public struct RequestEnvelope: Codable, Equatable {
     public let requestID: String
     public let method: String
     public let params: [String: JSONValue]
+    /// Transport-only identity observed by the daemon. This is deliberately
+    /// omitted from Codable so callers cannot self-attest as a socket peer.
+    public var transportPeerIdentity: UnixSocketPeerIdentity? = nil
 
     public init(
         schemaVersion: Int = 1,
         requestID: String = UUID().uuidString,
         method: String,
-        params: [String: JSONValue] = [:]
+        params: [String: JSONValue] = [:],
+        transportPeerIdentity: UnixSocketPeerIdentity? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.requestID = requestID
         self.method = method
         self.params = params
+        self.transportPeerIdentity = transportPeerIdentity
     }
 
     enum CodingKeys: String, CodingKey {
@@ -114,6 +119,16 @@ public struct RequestEnvelope: Codable, Equatable {
         case requestID = "request_id"
         case method
         case params
+    }
+
+    public func withTransportPeerIdentity(_ identity: UnixSocketPeerIdentity?) -> RequestEnvelope {
+        RequestEnvelope(
+            schemaVersion: schemaVersion,
+            requestID: requestID,
+            method: method,
+            params: params,
+            transportPeerIdentity: identity
+        )
     }
 }
 
@@ -145,12 +160,243 @@ public enum AgentActionOutcomeState: String, Codable, Equatable {
     case verifiedSuccess = "verified_success"
     case targetMissing = "target_missing"
     case targetAmbiguous = "target_ambiguous"
+    case targetResolutionIncomplete = "target_resolution_incomplete"
     case actionUnavailable = "action_unavailable"
     case actionFailed = "action_failed"
     case permissionBlocked = "permission_blocked"
     case noObservedChange = "no_observed_change"
     case verificationUnavailable = "verification_unavailable"
     case foregroundRace = "foreground_race"
+}
+
+/// A redacted target descriptor that lets an external provider re-resolve the
+/// original target without receiving a stale AX object or the selector's raw
+/// values. The caller retains the original request; this descriptor is only a
+/// durable identity check and orchestration hint.
+public struct AgentProviderHandoffTarget: Codable, Equatable {
+    public let application: String?
+    public let bundleID: String?
+    public let targetFingerprintDigest: String?
+    public let locatorDigest: String?
+    public let selectorFields: [String]
+
+    public init(
+        application: String? = nil,
+        bundleID: String? = nil,
+        targetFingerprintDigest: String? = nil,
+        locatorDigest: String? = nil,
+        selectorFields: [String] = []
+    ) {
+        self.application = application
+        self.bundleID = bundleID
+        self.targetFingerprintDigest = targetFingerprintDigest
+        self.locatorDigest = locatorDigest
+        self.selectorFields = Array(Set(selectorFields)).sorted()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case application
+        case bundleID = "bundle_id"
+        case targetFingerprintDigest = "target_fingerprint_digest"
+        case locatorDigest = "locator_digest"
+        case selectorFields = "selector_fields"
+    }
+}
+
+/// One provider-neutral step in a caller-owned provider handoff. The daemon
+/// declares the safety and verification boundary; it does not invoke the
+/// external provider or replay a possibly-dispatched native action.
+public struct AgentProviderHandoffStep: Codable, Equatable {
+    public let id: String
+    public let provider: String
+    public let operation: String
+    public let targetSource: String
+    public let verification: String
+    public let parameters: [String: JSONValue]
+
+    public init(
+        id: String,
+        provider: String,
+        operation: String,
+        targetSource: String,
+        verification: String,
+        parameters: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.provider = provider
+        self.operation = operation
+        self.targetSource = targetSource
+        self.verification = verification
+        self.parameters = parameters
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case provider
+        case operation
+        case targetSource = "target_source"
+        case verification
+        case parameters
+    }
+}
+
+/// The live run-level hands-off lease that a caller must keep alive while it
+/// completes a provider handoff. The session ID is an opaque owner-local
+/// handle; selectors and raw Accessibility references never cross this
+/// boundary.
+public struct AgentProviderHandoffHandsOffSession: Codable, Equatable {
+    public let sessionID: String
+    public let heartbeatIntervalSeconds: Int
+    public let expiresAt: Date
+
+    public init(
+        sessionID: String,
+        heartbeatIntervalSeconds: Int,
+        expiresAt: Date
+    ) {
+        self.sessionID = sessionID
+        self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
+        self.expiresAt = expiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case heartbeatIntervalSeconds = "heartbeat_interval_seconds"
+        case expiresAt = "expires_at"
+    }
+}
+
+/// A machine-readable, fresh-state provider handoff. This is intentionally a
+/// plan rather than a Computer Use dependency in MacCtlCore: the receiving
+/// caller owns provider execution and must supply the original task context.
+public struct AgentProviderHandoffPlan: Codable, Equatable {
+    public let schemaVersion: Int
+    public let provider: String
+    public let reason: String
+    public let action: String
+    public let freshStateRequired: Bool
+    public let nativeActionReplayAllowed: Bool
+    public let focusPolicy: FocusPolicy
+    public let foregroundOracle: String
+    public let targetSource: String
+    public let target: AgentProviderHandoffTarget?
+    public let postconditionKind: String
+    public let expectedItemCount: Int?
+    public let expectedItemDigest: String?
+    public let handsOffSession: AgentProviderHandoffHandsOffSession?
+    public let steps: [AgentProviderHandoffStep]
+
+    public init(
+        provider: String,
+        reason: String,
+        action: String,
+        freshStateRequired: Bool,
+        nativeActionReplayAllowed: Bool,
+        focusPolicy: FocusPolicy,
+        foregroundOracle: String,
+        targetSource: String,
+        target: AgentProviderHandoffTarget?,
+        postconditionKind: String,
+        expectedItemCount: Int? = nil,
+        expectedItemDigest: String? = nil,
+        handsOffSession: AgentProviderHandoffHandsOffSession? = nil,
+        steps: [AgentProviderHandoffStep],
+        schemaVersion: Int = 1
+    ) {
+        self.schemaVersion = schemaVersion
+        self.provider = provider
+        self.reason = reason
+        self.action = action
+        self.freshStateRequired = freshStateRequired
+        self.nativeActionReplayAllowed = nativeActionReplayAllowed
+        self.focusPolicy = focusPolicy
+        self.foregroundOracle = foregroundOracle
+        self.targetSource = targetSource
+        self.target = target
+        self.postconditionKind = postconditionKind
+        self.expectedItemCount = expectedItemCount
+        self.expectedItemDigest = expectedItemDigest
+        self.handsOffSession = handsOffSession
+        self.steps = steps
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case provider
+        case reason
+        case action
+        case freshStateRequired = "fresh_state_required"
+        case nativeActionReplayAllowed = "native_action_replay_allowed"
+        case focusPolicy = "focus_policy"
+        case foregroundOracle = "foreground_oracle"
+        case targetSource = "target_source"
+        case target
+        case postconditionKind = "postcondition_kind"
+        case expectedItemCount = "expected_item_count"
+        case expectedItemDigest = "expected_item_digest"
+        case handsOffSession = "hands_off_session"
+        case steps
+    }
+
+    /// The context-menu recovery sequence is fixed and auditable. The caller
+    /// supplies the original selector and expected labels to the provider,
+    /// while every target lookup and readback comes from fresh provider state.
+    public static func contextMenu(
+        target: AgentProviderHandoffTarget?,
+        focusPolicy: FocusPolicy,
+        expectedItemCount: Int,
+        expectedItemDigest: String?,
+        handsOffSession: AgentProviderHandoffHandsOffSession? = nil
+    ) -> AgentProviderHandoffPlan {
+        let provider = "computer_use"
+        return AgentProviderHandoffPlan(
+            provider: provider,
+            reason: "native_context_menu_verification_unavailable",
+            action: "context-menu",
+            freshStateRequired: true,
+            nativeActionReplayAllowed: false,
+            focusPolicy: focusPolicy,
+            foregroundOracle: "target_foreground_unchanged",
+            targetSource: "original_request_selector",
+            target: target,
+            postconditionKind: "context_menu",
+            expectedItemCount: expectedItemCount,
+            expectedItemDigest: expectedItemDigest,
+            handsOffSession: handsOffSession,
+            steps: [
+                AgentProviderHandoffStep(
+                    id: "refresh_state",
+                    provider: provider,
+                    operation: "get_app_state",
+                    targetSource: "application",
+                    verification: "fresh_state_observed"
+                ),
+                AgentProviderHandoffStep(
+                    id: "relocate_target",
+                    provider: provider,
+                    operation: "locate_unique_target",
+                    targetSource: "original_request_selector",
+                    verification: "target_unique_in_fresh_state"
+                ),
+                AgentProviderHandoffStep(
+                    id: "execute_action",
+                    provider: provider,
+                    operation: "click",
+                    targetSource: "fresh_target",
+                    verification: "dispatch_only_until_readback",
+                    parameters: ["mouse_button": .string("right")]
+                ),
+                AgentProviderHandoffStep(
+                    id: "verify_postcondition",
+                    provider: provider,
+                    operation: "get_app_state",
+                    targetSource: "fresh_target",
+                    verification: "rendered_context_menu_contains_expected_items_and_foreground_preserved",
+                    parameters: ["expected_items_source": .string("original_request")]
+                )
+            ]
+        )
+    }
 }
 
 public struct AgentActionOutcome: Codable, Equatable {
@@ -163,6 +409,7 @@ public struct AgentActionOutcome: Codable, Equatable {
     public let recommendedProvider: String?
     public let freshStateRequired: Bool
     public let nextAction: String?
+    public let handoffPlan: AgentProviderHandoffPlan?
 
     public init(
         state: AgentActionOutcomeState,
@@ -173,7 +420,8 @@ public struct AgentActionOutcome: Codable, Equatable {
         fallbackAllowed: Bool = false,
         recommendedProvider: String? = nil,
         freshStateRequired: Bool = false,
-        nextAction: String? = nil
+        nextAction: String? = nil,
+        handoffPlan: AgentProviderHandoffPlan? = nil
     ) {
         self.state = state
         self.provider = provider
@@ -184,6 +432,7 @@ public struct AgentActionOutcome: Codable, Equatable {
         self.recommendedProvider = recommendedProvider
         self.freshStateRequired = freshStateRequired
         self.nextAction = nextAction
+        self.handoffPlan = handoffPlan
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -196,6 +445,7 @@ public struct AgentActionOutcome: Codable, Equatable {
         case recommendedProvider = "recommended_provider"
         case freshStateRequired = "fresh_state_required"
         case nextAction = "next_action"
+        case handoffPlan = "handoff_plan"
     }
 }
 
@@ -276,8 +526,73 @@ public enum SurfaceKind: String, Codable, Equatable, CaseIterable {
 }
 
 public enum FocusPolicy: String, Codable, Equatable, CaseIterable {
+    /// Prefer a verified background route, but immediately use the normal
+    /// foreground path when no such route is eligible before dispatch.
+    case automatic
     case foreground
     case background
+}
+
+public struct FocusPolicyResolution: Codable, Equatable {
+    public let requestedPolicy: FocusPolicy
+    public let effectivePolicy: FocusPolicy
+    public let selectionReason: String
+    public let backgroundUnavailableReason: String?
+
+    public init(
+        requestedPolicy: FocusPolicy,
+        effectivePolicy: FocusPolicy,
+        selectionReason: String,
+        backgroundUnavailableReason: String? = nil
+    ) {
+        precondition(effectivePolicy != .automatic, "automatic must be resolved before execution")
+        self.requestedPolicy = requestedPolicy
+        self.effectivePolicy = effectivePolicy
+        self.selectionReason = selectionReason
+        self.backgroundUnavailableReason = backgroundUnavailableReason
+    }
+
+    public static func resolve(
+        requestedPolicy: FocusPolicy,
+        backgroundEligible: Bool,
+        backgroundUnavailableReason: String? = nil
+    ) -> FocusPolicyResolution {
+        switch requestedPolicy {
+        case .automatic:
+            if backgroundEligible {
+                return FocusPolicyResolution(
+                    requestedPolicy: .automatic,
+                    effectivePolicy: .background,
+                    selectionReason: "verified_background_route"
+                )
+            }
+            return FocusPolicyResolution(
+                requestedPolicy: .automatic,
+                effectivePolicy: .foreground,
+                selectionReason: "foreground_fallback",
+                backgroundUnavailableReason: backgroundUnavailableReason ?? "no_verified_background_route"
+            )
+        case .foreground:
+            return FocusPolicyResolution(
+                requestedPolicy: .foreground,
+                effectivePolicy: .foreground,
+                selectionReason: "explicit_foreground"
+            )
+        case .background:
+            return FocusPolicyResolution(
+                requestedPolicy: .background,
+                effectivePolicy: .background,
+                selectionReason: "explicit_background"
+            )
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestedPolicy = "requested_focus_policy"
+        case effectivePolicy = "effective_focus_policy"
+        case selectionReason = "selection_reason"
+        case backgroundUnavailableReason = "background_unavailable_reason"
+    }
 }
 
 public enum ActionKind: String, Codable, Equatable, CaseIterable {
@@ -321,6 +636,14 @@ public struct Selector: Codable, Equatable {
     /// so callers can reuse an audit-discovered target without persisting its
     /// visible label.
     public let locatorDigest: String?
+    /// Optional redacted digest of the target's Accessibility ancestor chain.
+    /// It disambiguates repeated local descriptors (for example two identical
+    /// scroll areas in one window) without retaining AX element references or
+    /// visible ancestor text.
+    public let ancestorDigest: String?
+    /// Optional redacted geometry digest for repeated descriptors whose
+    /// structural ancestry is still identical. Raw bounds remain in-process.
+    public let geometryDigest: String?
     public let title: String?
     public let subrole: String?
     public let containsText: String?
@@ -339,6 +662,8 @@ public struct Selector: Codable, Equatable {
         role: String? = nil,
         identifier: String? = nil,
         locatorDigest: String? = nil,
+        ancestorDigest: String? = nil,
+        geometryDigest: String? = nil,
         title: String? = nil,
         subrole: String? = nil,
         containsText: String? = nil,
@@ -353,6 +678,8 @@ public struct Selector: Codable, Equatable {
         self.role = role
         self.identifier = identifier
         self.locatorDigest = locatorDigest
+        self.ancestorDigest = ancestorDigest
+        self.geometryDigest = geometryDigest
         self.title = title
         self.subrole = subrole
         self.containsText = containsText
@@ -366,7 +693,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var addressability: SelectorAddressability {
-        if role != nil || identifier != nil || locatorDigest != nil || title != nil || subrole != nil
+        if role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || title != nil || subrole != nil
             || windowTitle != nil || windowIdentifier != nil {
             return .accessibility
         }
@@ -393,7 +720,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var hasTarget: Bool {
-        role != nil || identifier != nil || locatorDigest != nil || title != nil || subrole != nil
+        role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || title != nil || subrole != nil
             || containsText != nil || imageAnchor != nil
             || (normalizedX != nil && normalizedY != nil)
             || (rawX != nil && rawY != nil)
@@ -982,10 +1309,22 @@ public enum MacCtlErrorCode: String {
     case approvalExpired = "approval_expired"
     case approvalAlreadyUsed = "approval_already_used"
     case approvalMismatch = "approval_mismatch"
+    case authorizationNoticeInvalid = "authorization_notice_invalid"
+    case authorizationNoticeNotFound = "authorization_notice_not_found"
+    case authorizationNoticeExpired = "authorization_notice_expired"
+    case authorizationNoticeAlreadyResolved = "authorization_notice_already_resolved"
+    case authorizationNoticeAlreadyBound = "authorization_notice_already_bound"
+    case authorizationNoticeStoreFull = "authorization_notice_store_full"
     case operationFailed = "operation_failed"
+    case handsOffSessionConfirmationRequired = "hands_off_session_confirmation_required"
+    case handsOffSessionActive = "hands_off_session_active"
+    case handsOffSessionNotFound = "hands_off_session_not_found"
+    case handsOffSessionExpired = "hands_off_session_expired"
+    case handsOffSessionInvalid = "hands_off_session_invalid"
     case controlVerificationUnavailable = "control_verification_unavailable"
     case invalidSelector = "invalid_selector"
     case unsafeInput = "unsafe_input"
+    case providerHandoffRequired = "provider_handoff_required"
     case backgroundUnsupported = "background_unsupported"
     case focusChanged = "focus_changed"
     case launchAgentUnhealthy = "launch_agent_unhealthy"
@@ -1001,6 +1340,9 @@ public enum MacCtlErrorCode: String {
     case keyboardPhysicalSuppressionUnavailable = "keyboard_physical_suppression_unavailable"
     case keyboardPhysicalSuppressionRequiresSession = "keyboard_physical_suppression_requires_session"
     case keyboardFreezeReasonRequired = "keyboard_freeze_reason_required"
+    case keyboardNavigationModeInvalid = "keyboard_navigation_mode_invalid"
+    case keyboardNavigationModeUnavailable = "keyboard_navigation_mode_unavailable"
+    case keyboardNavigationRestorationPending = "keyboard_navigation_restoration_pending"
     case keyboardFocusChanged = "keyboard_focus_changed"
     case keyboardFocusUnavailable = "keyboard_focus_unavailable"
     case keyboardCommandInvalid = "keyboard_command_invalid"

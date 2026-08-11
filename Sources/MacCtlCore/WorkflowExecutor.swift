@@ -47,6 +47,14 @@ public final class WorkflowExecutor {
     private let searchFieldResolver: SearchFieldResolving
     private let focusedElementInspector: FocusedElementInspecting
     private let searchTextTyper: SearchTextTyping
+    private let backgroundSetValue: (pid_t, Selector, String) throws -> Void
+    private let backgroundScroll: (
+        pid_t,
+        AppInfo,
+        Selector,
+        AccessibilityScrollDirection,
+        Int
+    ) throws -> AccessibilityScrollReport
     private let foregroundApplication: () -> AppInfo?
 
     public init(
@@ -61,6 +69,14 @@ public final class WorkflowExecutor {
         searchFieldResolver: SearchFieldResolving? = nil,
         focusedElementInspector: FocusedElementInspecting? = nil,
         searchTextTyper: SearchTextTyping? = nil,
+        backgroundSetValue: ((pid_t, Selector, String) throws -> Void)? = nil,
+        backgroundScroll: ((
+            pid_t,
+            AppInfo,
+            Selector,
+            AccessibilityScrollDirection,
+            Int
+        ) throws -> AccessibilityScrollReport)? = nil,
         foregroundApplication: (() -> AppInfo?)? = nil,
         hasPostEventAccess: (() -> Bool)? = nil,
         fullKeyboardAccessEnabled: (() -> Bool)? = nil
@@ -87,6 +103,18 @@ public final class WorkflowExecutor {
         self.focusedElementInspector = resolvedFocusedElementInspector
         self.searchFieldResolver = searchFieldResolver ?? accessibilityController
         self.searchTextTyper = searchTextTyper ?? inputController
+        self.backgroundSetValue = backgroundSetValue ?? { pid, selector, value in
+            _ = try accessibilityController.setValueAndVerify(pid: pid, selector: selector, value: value)
+        }
+        self.backgroundScroll = backgroundScroll ?? { pid, application, selector, direction, amount in
+            try accessibilityController.scroll(
+                pid: pid,
+                application: application,
+                selector: selector,
+                direction: direction,
+                amount: amount
+            )
+        }
         self.semanticActionRouter = semanticActionRouter ?? SemanticActionRouter(
             session: resolvedControlSession,
             keyboardAccessController: keyboardAccessController,
@@ -201,11 +229,6 @@ public final class WorkflowExecutor {
         focusPolicy: FocusPolicy,
         keyboardLeaseToken: String?
     ) throws -> ActionResult {
-        guard focusPolicy == .foreground else {
-            throw WorkflowExecutionError.backgroundUnsupported(
-                "search requires foreground focus"
-            )
-        }
         let parameters: SearchActionParameters
         do {
             parameters = try SearchActionContract.parameters(for: action)
@@ -214,6 +237,37 @@ public final class WorkflowExecutor {
         }
         guard let query = ephemeralInputs[parameters.inputKey] else {
             throw WorkflowExecutionError.unsafeInput("search input is missing")
+        }
+        if focusPolicy == .background {
+            guard parameters.replaceExisting,
+                  let selector = action.selector else {
+                throw WorkflowExecutionError.backgroundUnsupported(
+                    "background search requires replace_existing=true and an Accessibility selector"
+                )
+            }
+            let pid = try requiredTargetPID(for: action)
+            do {
+                try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
+                try backgroundSetValue(pid, selector, query)
+            } catch AccessibilityControllerError.ambiguousMatch {
+                throw WorkflowExecutionError.blocked("ambiguous search field")
+            } catch AccessibilityControllerError.elementNotFound {
+                throw WorkflowExecutionError.blocked("search field is unavailable")
+            } catch AccessibilityControllerError.permissionDenied {
+                throw KeyboardControlError.permissionDenied("Accessibility")
+            }
+            return ActionResult(
+                evidence: [Evidence(
+                    kind: "search",
+                    message: "Ephemeral query was set through the uniquely addressed Accessibility search field",
+                    metadata: [
+                        "focus_policy": .string(focusPolicy.rawValue),
+                        "route": .string("accessibility")
+                    ]
+                )],
+                result: ["searched": .bool(true)],
+                targetProcessIDs: [pid]
+            )
         }
         guard let keyboardLeaseToken,
               !keyboardLeaseToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -451,7 +505,41 @@ public final class WorkflowExecutor {
             )
         case .scroll:
             if focusPolicy == .background {
-                throw WorkflowExecutionError.backgroundUnsupported("scroll uses global mouse input")
+                guard let selector = action.selector,
+                      selector.addressability == .accessibility,
+                      let direction = AccessibilityScrollDirection(
+                        rawValue: try parameter(action, name: "direction")
+                      ) else {
+                    throw WorkflowExecutionError.backgroundUnsupported(
+                        "background scroll requires a semantic Accessibility scroll target"
+                    )
+                }
+                let applicationName = try parameter(action, name: "app")
+                let application = try appController.resolve(applicationName)
+                guard application.isRunning, let pid = application.processID else {
+                    throw WorkflowExecutionError.backgroundUnsupported("the target app is not running")
+                }
+                let amount = action.parameters["amount"]?.intValue ?? 3
+                let report = try backgroundScroll(pid, application, selector, direction, amount)
+                guard report.verification == .passed else {
+                    throw WorkflowExecutionError.indeterminate("background scroll was not verified")
+                }
+                return ActionResult(
+                    evidence: [Evidence(
+                        kind: "scroll",
+                        message: "The uniquely addressed Accessibility scroll area changed without moving foreground focus",
+                        source: application.name,
+                        metadata: [
+                            "focus_policy": .string(focusPolicy.rawValue),
+                            "route": .string(ControlActionRoute.scroll.rawValue)
+                        ]
+                    )],
+                    result: [
+                        "direction": .string(direction.rawValue),
+                        "amount": .number(Double(amount))
+                    ],
+                    targetProcessIDs: [pid]
+                )
             }
             let direction = try parameter(action, name: "direction")
             let amount = action.parameters["amount"]?.intValue ?? 3

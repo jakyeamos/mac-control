@@ -36,6 +36,7 @@ public enum CapabilityProfileInvalidationReason: String, Codable, Equatable, Cas
     case actionFailed = "action_failed"
     case verificationFailed = "verification_failed"
     case targetAmbiguous = "target_ambiguous"
+    case targetResolutionIncomplete = "target_resolution_incomplete"
     case permissionChanged = "permission_changed"
     case deepAuditTruncated = "deep_audit_truncated"
 }
@@ -130,6 +131,14 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
     public let labelDigest: String?
     public let actions: [String]
     public let scrollable: Bool
+    /// Redacted identity of the target's Accessibility ancestor chain. This
+    /// is optional so older audit profiles and local descriptors remain
+    /// readable and addressable.
+    public let ancestorDigest: String?
+    /// Redacted geometry identity for task-specific disambiguation. Raw
+    /// coordinates never leave the process; tree changes invalidate profiles
+    /// that depend on this descriptor.
+    public let geometryDigest: String?
     public let identityDigest: String
 
     public init(
@@ -139,6 +148,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         labelDigest: String? = nil,
         actions: [String] = [],
         scrollable: Bool = false,
+        ancestorDigest: String? = nil,
+        geometryDigest: String? = nil,
         identityDigest: String? = nil
     ) {
         self.role = role
@@ -147,6 +158,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         self.labelDigest = labelDigest
         self.actions = actions.sorted()
         self.scrollable = scrollable
+        self.ancestorDigest = ancestorDigest
+        self.geometryDigest = geometryDigest
         self.identityDigest = identityDigest ?? CapabilityProfileDigest.make([
             role ?? "",
             subrole ?? "",
@@ -157,7 +170,10 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         ].joined(separator: "|"))
     }
 
-    public static func from(treeNode: AccessibilityTreeNode) -> CapabilityLocatorDescriptor? {
+    public static func from(
+        treeNode: AccessibilityTreeNode,
+        ancestorDigest: String? = nil
+    ) -> CapabilityLocatorDescriptor? {
         guard treeNode.role != nil || treeNode.identifier != nil || treeNode.label != nil else {
             return nil
         }
@@ -167,7 +183,9 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             identifier: treeNode.identifier,
             label: treeNode.label,
             actions: treeNode.actions,
-            scrollable: treeNode.scrollable
+            scrollable: treeNode.scrollable,
+            ancestorDigest: ancestorDigest,
+            geometryDigest: treeNode.bounds.map(CapabilityProfileDigest.geometry)
         )
     }
 
@@ -177,7 +195,9 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         identifier: String?,
         label: String?,
         actions: [String],
-        scrollable: Bool
+        scrollable: Bool,
+        ancestorDigest: String? = nil,
+        geometryDigest: String? = nil
     ) -> CapabilityLocatorDescriptor {
         CapabilityLocatorDescriptor(
             role: role,
@@ -185,13 +205,15 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             identifier: identifier,
             labelDigest: label.map(CapabilityProfileDigest.make),
             actions: actions,
-            scrollable: scrollable
+            scrollable: scrollable,
+            ancestorDigest: ancestorDigest,
+            geometryDigest: geometryDigest
         )
     }
 
     public static func from(selector: Selector, route: ControlActionRoute) -> CapabilityLocatorDescriptor? {
-        guard selector.role != nil || selector.identifier != nil || selector.title != nil
-            || selector.locatorDigest != nil else {
+        guard selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil
+            || selector.ancestorDigest != nil || selector.geometryDigest != nil || selector.title != nil else {
             return nil
         }
         let actions: [String]
@@ -210,6 +232,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             labelDigest: selector.title.map(CapabilityProfileDigest.make),
             actions: actions,
             scrollable: route == .scroll,
+            ancestorDigest: selector.ancestorDigest,
+            geometryDigest: selector.geometryDigest,
             identityDigest: selector.locatorDigest
         )
     }
@@ -280,6 +304,160 @@ public struct CapabilityRecord: Codable, Equatable {
     }
 }
 
+public enum AdvertisedCapabilityDiscoveryState: String, Codable, Equatable {
+    case observed
+    case partial
+}
+
+/// A redacted deep-audit observation of an app-published capability. This is
+/// deliberately separate from runtime capability evidence so an advertisement
+/// can never promote an execution route by itself.
+public struct AdvertisedCapabilityObservation: Codable, Equatable {
+    public let capabilityID: String
+    public let provider: AppControlProvider
+    public let source: AppAdvertisedCapabilitySource
+    public let taskIDs: [String]
+    public let keyboardShortcut: String?
+    public let discoveryState: AdvertisedCapabilityDiscoveryState
+    public let disposition: CapabilityEvidenceDisposition
+    public let matchedSignalCount: Int
+    public let requiredSignalCount: Int
+    public let locatorDigests: [String]
+    public let verificationMethods: [String]
+    public let observedAt: Date
+
+    public init(
+        declaration: AppAdvertisedCapability,
+        discoveryState: AdvertisedCapabilityDiscoveryState,
+        matchedSignalCount: Int,
+        locatorDigests: [String],
+        observedAt: Date
+    ) {
+        self.capabilityID = declaration.id
+        self.provider = declaration.provider
+        self.source = declaration.source
+        self.taskIDs = declaration.taskIDs
+        self.keyboardShortcut = declaration.keyboardShortcut
+        self.discoveryState = discoveryState
+        self.disposition = .candidate
+        self.matchedSignalCount = max(0, matchedSignalCount)
+        self.requiredSignalCount = declaration.discoverySignals.count
+        self.locatorDigests = Array(Set(locatorDigests)).sorted()
+        self.verificationMethods = declaration.verificationMethods
+        self.observedAt = observedAt
+    }
+}
+
+public enum CapabilityLeadKind: String, Codable, Equatable, Hashable {
+    case keyboardNavigation = "keyboard_navigation"
+    case shortcutCatalog = "shortcut_catalog"
+    case quickSwitcher = "quick_switcher"
+    case commandPalette = "command_palette"
+    case keyboardSearch = "keyboard_search"
+}
+
+public enum CapabilityLeadConfidence: String, Codable, Equatable {
+    case high
+    case medium
+    case ambiguous
+}
+
+/// A generic, redacted capability candidate inferred from an app-owned menu,
+/// help, onboarding, dialog, or control surface. A lead is planning evidence,
+/// never execution authority or a measured route.
+public struct CapabilityLeadObservation: Codable, Equatable {
+    public let leadID: String
+    public let kind: CapabilityLeadKind
+    public let provider: AppControlProvider
+    public let source: AppAdvertisedCapabilitySource
+    public let taskIDs: [String]
+    public let keyboardShortcut: String?
+    public let signalKinds: [String]
+    public let confidence: CapabilityLeadConfidence
+    public let disposition: CapabilityEvidenceDisposition
+    public let positiveEvidenceCount: Int
+    public let negativeEvidenceCount: Int
+    public let ambiguousEvidenceCount: Int
+    public let locatorDigests: [String]
+    public let matchedAdvertisedCapabilityIDs: [String]
+    public let verificationMethods: [String]
+    public let observedAt: Date
+    public let lastVerifiedAt: Date?
+    public let lastReason: String?
+
+    public init(
+        leadID: String,
+        kind: CapabilityLeadKind,
+        provider: AppControlProvider,
+        source: AppAdvertisedCapabilitySource,
+        taskIDs: [String],
+        keyboardShortcut: String?,
+        signalKinds: [String],
+        confidence: CapabilityLeadConfidence,
+        disposition: CapabilityEvidenceDisposition = .candidate,
+        positiveEvidenceCount: Int = 0,
+        negativeEvidenceCount: Int = 0,
+        ambiguousEvidenceCount: Int = 1,
+        locatorDigests: [String],
+        matchedAdvertisedCapabilityIDs: [String] = [],
+        verificationMethods: [String],
+        observedAt: Date,
+        lastVerifiedAt: Date? = nil,
+        lastReason: String? = "read_only_discovery_requires_task_verification"
+    ) {
+        self.leadID = leadID
+        self.kind = kind
+        self.provider = provider
+        self.source = source
+        self.taskIDs = Array(Set(taskIDs)).sorted()
+        self.keyboardShortcut = keyboardShortcut
+        self.signalKinds = Array(Set(signalKinds)).sorted()
+        self.confidence = confidence
+        self.disposition = disposition
+        self.positiveEvidenceCount = max(0, positiveEvidenceCount)
+        self.negativeEvidenceCount = max(0, negativeEvidenceCount)
+        self.ambiguousEvidenceCount = max(0, ambiguousEvidenceCount)
+        self.locatorDigests = Array(Set(locatorDigests)).sorted()
+        self.matchedAdvertisedCapabilityIDs = Array(Set(matchedAdvertisedCapabilityIDs)).sorted()
+        self.verificationMethods = Array(Set(verificationMethods)).sorted()
+        self.observedAt = observedAt
+        self.lastVerifiedAt = lastVerifiedAt
+        self.lastReason = lastReason
+    }
+
+    func recording(
+        kind evidenceKind: CapabilityEvidenceKind,
+        reason: String,
+        at timestamp: Date
+    ) -> CapabilityLeadObservation {
+        let nextDisposition: CapabilityEvidenceDisposition = switch evidenceKind {
+        case .positive: .promoted
+        case .negative: .demoted
+        case .ambiguous: .candidate
+        }
+        return CapabilityLeadObservation(
+            leadID: leadID,
+            kind: kind,
+            provider: provider,
+            source: source,
+            taskIDs: taskIDs,
+            keyboardShortcut: keyboardShortcut,
+            signalKinds: signalKinds,
+            confidence: confidence,
+            disposition: nextDisposition,
+            positiveEvidenceCount: positiveEvidenceCount + (evidenceKind == .positive ? 1 : 0),
+            negativeEvidenceCount: negativeEvidenceCount + (evidenceKind == .negative ? 1 : 0),
+            ambiguousEvidenceCount: ambiguousEvidenceCount + (evidenceKind == .ambiguous ? 1 : 0),
+            locatorDigests: locatorDigests,
+            matchedAdvertisedCapabilityIDs: matchedAdvertisedCapabilityIDs,
+            verificationMethods: verificationMethods,
+            observedAt: observedAt,
+            lastVerifiedAt: timestamp,
+            lastReason: reason
+        )
+    }
+}
+
 public struct CapabilityAuditProfile: Codable, Equatable {
     public let schemaVersion: Int
     public let identity: CapabilityCacheIdentity
@@ -291,6 +469,12 @@ public struct CapabilityAuditProfile: Codable, Equatable {
     public let treeTruncated: Bool
     public let locators: [CapabilityLocatorDescriptor]
     public let capabilities: [CapabilityRecord]
+    /// Optional preserves decoding of schema-v1 profiles written before app
+    /// advertisement discovery was added. New profiles always write an array.
+    public let advertisedCapabilities: [AdvertisedCapabilityObservation]?
+    /// Optional preserves decoding of profiles written before generic,
+    /// candidate-only capability lead discovery was added.
+    public let capabilityLeads: [CapabilityLeadObservation]?
     public let evidence: [CapabilityEvidenceRecord]
     public let invalidationReasons: [CapabilityProfileInvalidationReason]
     public let createdAt: Date
@@ -307,6 +491,8 @@ public struct CapabilityAuditProfile: Codable, Equatable {
         treeTruncated: Bool,
         locators: [CapabilityLocatorDescriptor],
         capabilities: [CapabilityRecord],
+        advertisedCapabilities: [AdvertisedCapabilityObservation]? = [],
+        capabilityLeads: [CapabilityLeadObservation]? = [],
         evidence: [CapabilityEvidenceRecord] = [],
         invalidationReasons: [CapabilityProfileInvalidationReason] = [],
         createdAt: Date = Date(),
@@ -322,6 +508,8 @@ public struct CapabilityAuditProfile: Codable, Equatable {
         self.treeTruncated = treeTruncated
         self.locators = locators
         self.capabilities = capabilities
+        self.advertisedCapabilities = advertisedCapabilities
+        self.capabilityLeads = capabilityLeads
         self.evidence = evidence
         self.invalidationReasons = Array(Set(invalidationReasons))
         self.createdAt = createdAt
@@ -341,6 +529,8 @@ public struct CapabilityProfileCacheSummary: Codable, Equatable {
     public let promotedCapabilities: [String]
     public let candidateCapabilities: [String]
     public let demotedCapabilities: [String]
+    public let advertisedCapabilities: [AdvertisedCapabilityObservation]
+    public let capabilityLeads: [CapabilityLeadObservation]
     public let invalidationReasons: [CapabilityProfileInvalidationReason]
     public let deepAuditRecommended: Bool
 
@@ -352,6 +542,8 @@ public struct CapabilityProfileCacheSummary: Codable, Equatable {
         promotedCapabilities: [String],
         candidateCapabilities: [String],
         demotedCapabilities: [String],
+        advertisedCapabilities: [AdvertisedCapabilityObservation],
+        capabilityLeads: [CapabilityLeadObservation],
         invalidationReasons: [CapabilityProfileInvalidationReason],
         deepAuditRecommended: Bool
     ) {
@@ -362,6 +554,8 @@ public struct CapabilityProfileCacheSummary: Codable, Equatable {
         self.promotedCapabilities = promotedCapabilities
         self.candidateCapabilities = candidateCapabilities
         self.demotedCapabilities = demotedCapabilities
+        self.advertisedCapabilities = advertisedCapabilities
+        self.capabilityLeads = capabilityLeads
         self.invalidationReasons = invalidationReasons
         self.deepAuditRecommended = deepAuditRecommended
     }
@@ -383,6 +577,8 @@ public struct CapabilityProfileCacheSummary: Codable, Equatable {
             .filter { $0.state == .demoted }
             .map(\.id)
             .sorted() ?? []
+        self.advertisedCapabilities = profile?.advertisedCapabilities ?? []
+        self.capabilityLeads = profile?.capabilityLeads ?? []
         self.invalidationReasons = profile?.invalidationReasons ?? []
         self.deepAuditRecommended = profile?.deepAuditRecommended ?? true
     }
@@ -414,6 +610,8 @@ public struct CapabilityProfileLookup: Codable, Equatable {
             promotedCapabilities: summary.promotedCapabilities,
             candidateCapabilities: summary.candidateCapabilities,
             demotedCapabilities: summary.demotedCapabilities,
+            advertisedCapabilities: summary.advertisedCapabilities,
+            capabilityLeads: summary.capabilityLeads,
             invalidationReasons: Array(Set(summary.invalidationReasons + invalidationReasons)),
             deepAuditRecommended: true
         )
@@ -436,6 +634,16 @@ public enum CapabilityProfileDigest {
     public static func make(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+
+    public static func geometry(_ bounds: CGRect) -> String {
+        let values = [
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height
+        ].map { String(format: "%.1f", Double($0)) }
+        return make(values.joined(separator: "|"))
+    }
 }
 
 public enum CapabilityProfileBuilder {
@@ -449,6 +657,7 @@ public enum CapabilityProfileBuilder {
                 labelDigest,
                 node.actions.sorted().joined(separator: ","),
                 node.scrollable ? "1" : "0",
+                node.bounds.map(CapabilityProfileDigest.geometry) ?? "",
                 String(node.childCount)
             ].joined(separator: "|")
         }.joined(separator: "||")
@@ -465,11 +674,58 @@ public enum CapabilityProfileBuilder {
         tree: AccessibilityTreeReport,
         now: Date = Date()
     ) -> CapabilityAuditProfile {
-        let locators = deduplicateLocators(tree.nodes.compactMap(CapabilityLocatorDescriptor.from))
+        let nodesByPath = Dictionary(uniqueKeysWithValues: tree.nodes.map { ($0.path, $0) })
+        let allLocators = tree.nodes.compactMap { node in
+            CapabilityLocatorDescriptor.from(
+                treeNode: node,
+                ancestorDigest: ancestorDigest(for: node, nodesByPath: nodesByPath)
+            )
+        }
+        let locators = deduplicateLocators(allLocators)
         let hasPress = tree.nodes.contains { $0.actions.contains("AXPress") }
-        let hasScroll = tree.nodes.contains(where: \.scrollable)
+        let activationLocators = allLocators.filter { locator in
+            AccessibilityController.semanticActivationAction(
+                role: locator.role,
+                subrole: locator.subrole,
+                actions: locator.actions
+            ) != nil
+        }
+        let hasSemanticActivation = !activationLocators.isEmpty
+        let presentationLocators = allLocators.filter { locator in
+            AccessibilityController.semanticPresentationAction(
+                role: locator.role,
+                subrole: locator.subrole,
+                actions: locator.actions
+            ) != nil
+        }
+        let hasPresentationAction = !presentationLocators.isEmpty
+        let scrollLocators = allLocators.filter(\.scrollable)
+        let hasScroll = !scrollLocators.isEmpty
+        let hasDirectionalScroll = tree.nodes.contains { node in
+            guard node.role == "AXScrollArea" else { return false }
+            return AccessibilityScrollDirection.allCases.contains { direction in
+                direction.actionName(matching: node.actions) != nil
+            }
+        }
+        let ambiguousScroll = hasDuplicateLocator(scrollLocators)
         let hasSettableValue = tree.nodes.contains { $0.state.settable }
         let complete = !tree.truncated
+        let appProfile = AppControlProfileRegistry.standard.profile(
+            for: WarmPathApplicationIdentity(application: application)
+        )
+        let advertisedCapabilities = advertisedCapabilityObservations(
+            declarations: appProfile.advertisedCapabilities,
+            tree: tree,
+            nodesByPath: nodesByPath,
+            now: now
+        )
+        let capabilityLeads = genericCapabilityLeadObservations(
+            declarations: appProfile.advertisedCapabilities,
+            advertisedObservations: advertisedCapabilities,
+            tree: tree,
+            nodesByPath: nodesByPath,
+            now: now
+        )
         let capabilities = [
             observedCapability(
                 id: "accessibility_tree",
@@ -488,11 +744,45 @@ public enum CapabilityProfileBuilder {
                 locators: locators.filter { $0.actions.contains("AXPress") }
             ),
             observedCapability(
+                id: "ax_activation",
+                provider: "accessibility",
+                positive: hasSemanticActivation,
+                ambiguous: !hasSemanticActivation && tree.truncated,
+                reason: hasSemanticActivation
+                    ? "semantic_activation_action_observed"
+                    : (tree.truncated
+                        ? "semantic_activation_not_observed_in_truncated_tree"
+                        : "semantic_activation_not_present_in_complete_tree"),
+                locators: activationLocators
+            ),
+            observedCapability(
+                id: "ax_presentation",
+                provider: "accessibility",
+                positive: hasPresentationAction,
+                ambiguous: !hasPresentationAction && tree.truncated,
+                reason: hasPresentationAction
+                    ? "presentation_action_observed"
+                    : (tree.truncated
+                        ? "presentation_action_not_observed_in_truncated_tree"
+                        : "presentation_action_not_present_in_complete_tree"),
+                locators: presentationLocators
+            ),
+            observedCapability(
                 id: "semantic_scroll",
                 provider: "accessibility",
-                positive: hasScroll,
-                ambiguous: !hasScroll && tree.truncated,
-                reason: hasScroll ? "scrollable_AX_element_observed" : (tree.truncated ? "scrollable_element_not_observed_in_truncated_tree" : "scrollable_element_not_present_in_complete_tree"),
+                positive: hasDirectionalScroll && !ambiguousScroll,
+                ambiguous: ambiguousScroll
+                    || (hasScroll && !hasDirectionalScroll)
+                    || (!hasScroll && tree.truncated),
+                reason: ambiguousScroll
+                    ? "repeated_scroll_locator_ambiguous"
+                    : (hasDirectionalScroll
+                        ? "directional_scroll_action_observed"
+                        : (hasScroll
+                            ? "directional_scroll_action_not_observed"
+                            : (tree.truncated
+                                ? "scrollable_element_not_observed_in_truncated_tree"
+                                : "scrollable_element_not_present_in_complete_tree"))),
                 locators: locators.filter(\.scrollable)
             ),
             observedCapability(
@@ -539,11 +829,360 @@ public enum CapabilityProfileBuilder {
             treeTruncated: tree.truncated,
             locators: locators,
             capabilities: capabilities,
+            advertisedCapabilities: advertisedCapabilities,
+            capabilityLeads: capabilityLeads,
             evidence: [],
             invalidationReasons: invalidationReasons,
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    private static func advertisedCapabilityObservations(
+        declarations: [AppAdvertisedCapability],
+        tree: AccessibilityTreeReport,
+        nodesByPath: [String: AccessibilityTreeNode],
+        now: Date
+    ) -> [AdvertisedCapabilityObservation] {
+        guard !declarations.isEmpty else { return [] }
+        let labeledNodes = tree.nodes.compactMap { node -> (AccessibilityTreeNode, String)? in
+            guard node.state.visible, let label = node.label else { return nil }
+            let normalized = normalizeDiscoveryText(label)
+            return normalized.isEmpty ? nil : (node, normalized)
+        }
+        let corpus = labeledNodes.map(\.1).joined(separator: " ")
+
+        return declarations.compactMap { declaration -> AdvertisedCapabilityObservation? in
+            let signals = declaration.discoverySignals
+                .map(normalizeDiscoveryText)
+                .filter { !$0.isEmpty }
+            guard !signals.isEmpty else { return nil }
+            let matchedSignals = signals.filter { corpus.contains($0) }
+            guard !matchedSignals.isEmpty else { return nil }
+
+            let matchingLocators = labeledNodes.compactMap { pair -> CapabilityLocatorDescriptor? in
+                let (node, label) = pair
+                guard matchedSignals.contains(where: { label.contains($0) }) else { return nil }
+                return CapabilityLocatorDescriptor.from(
+                    treeNode: node,
+                    ancestorDigest: ancestorDigest(for: node, nodesByPath: nodesByPath)
+                )
+            }
+            return AdvertisedCapabilityObservation(
+                declaration: declaration,
+                discoveryState: matchedSignals.count == signals.count ? .observed : .partial,
+                matchedSignalCount: matchedSignals.count,
+                locatorDigests: matchingLocators.map(\.identityDigest),
+                observedAt: now
+            )
+        }
+    }
+
+    private struct CapabilityLeadCandidate {
+        let kind: CapabilityLeadKind
+        let source: AppAdvertisedCapabilitySource
+        let taskIDs: [String]
+        let shortcuts: Set<String>
+        let signalKinds: [String]
+        let locatorDigests: [String]
+        let verificationMethods: [String]
+    }
+
+    private static func genericCapabilityLeadObservations(
+        declarations: [AppAdvertisedCapability],
+        advertisedObservations: [AdvertisedCapabilityObservation],
+        tree: AccessibilityTreeReport,
+        nodesByPath: [String: AccessibilityTreeNode],
+        now: Date
+    ) -> [CapabilityLeadObservation] {
+        let visibleLabeledNodes = tree.nodes.filter {
+            $0.state.visible && !($0.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let nodesByParent = Dictionary(grouping: visibleLabeledNodes) { parentPath($0.path) }
+        var candidatesByKind: [CapabilityLeadKind: [CapabilityLeadCandidate]] = [:]
+
+        for node in visibleLabeledNodes {
+            let ancestors = ancestorNodes(for: node, nodesByPath: nodesByPath)
+            guard isCapabilityDiscoverySurface(node: node, ancestors: ancestors) else { continue }
+            let normalizedLabel = normalizeDiscoveryText(node.label ?? "")
+            guard !normalizedLabel.isEmpty else { continue }
+            let contextNodes = nodesByParent[parentPath(node.path)] ?? [node]
+            let directShortcuts = Set(extractKeyboardShortcuts(from: node.label ?? ""))
+            let nearbyText = nearbySiblingNodes(for: node, in: contextNodes)
+                .compactMap(\.label)
+                .joined(separator: " ")
+            let nearbyShortcuts = Set(extractKeyboardShortcuts(from: nearbyText))
+            let candidateShortcuts = directShortcuts.isEmpty ? nearbyShortcuts : directShortcuts
+            guard let semantic = classifyCapabilityLead(
+                normalizedLabel: normalizedLabel,
+                shortcuts: candidateShortcuts
+            ) else { continue }
+            let shortcuts = semantic.kind == .keyboardNavigation ? [] : candidateShortcuts
+            guard let locator = CapabilityLocatorDescriptor.from(
+                treeNode: node,
+                ancestorDigest: ancestorDigest(for: node, nodesByPath: nodesByPath)
+            ) else { continue }
+            let candidate = CapabilityLeadCandidate(
+                kind: semantic.kind,
+                source: capabilityLeadSource(node: node, ancestors: ancestors),
+                taskIDs: semantic.taskIDs,
+                shortcuts: shortcuts,
+                signalKinds: semantic.signalKinds + (shortcuts.isEmpty ? [] : ["keyboard_chord"]),
+                locatorDigests: [locator.identityDigest],
+                verificationMethods: semantic.verificationMethods
+            )
+            candidatesByKind[semantic.kind, default: []].append(candidate)
+        }
+
+        let observedDeclarations = declarations.filter { declaration in
+            advertisedObservations.contains { $0.capabilityID == declaration.id }
+        }
+        return candidatesByKind.compactMap { kind, candidates -> CapabilityLeadObservation? in
+            guard !candidates.isEmpty else { return nil }
+            let allShortcuts = Set(candidates.flatMap(\.shortcuts))
+            let locatorDigests = Array(Set(candidates.flatMap(\.locatorDigests))).sorted()
+            let locatorSet = Set(locatorDigests)
+            let matchedDeclarations = observedDeclarations.filter { declaration in
+                guard let observation = advertisedObservations.first(where: {
+                    $0.capabilityID == declaration.id
+                }) else { return false }
+                let locatorMatch = !locatorSet.isDisjoint(with: observation.locatorDigests)
+                let shortcutMatch = declaration.keyboardShortcut.map(allShortcuts.contains) == true
+                return locatorMatch || shortcutMatch
+            }
+            let reconciledShortcuts = allShortcuts.union(
+                matchedDeclarations.compactMap(\.keyboardShortcut)
+            )
+            let keyboardShortcut = reconciledShortcuts.count == 1 ? reconciledShortcuts.first : nil
+            let source = candidates.map(\.source).sorted {
+                capabilitySourceRank($0) < capabilitySourceRank($1)
+            }.first ?? .accessibilityDisclosure
+            let taskIDs = candidates.flatMap(\.taskIDs) + matchedDeclarations.flatMap(\.taskIDs)
+            let verificationMethods = candidates.flatMap(\.verificationMethods)
+                + matchedDeclarations.flatMap(\.verificationMethods)
+            var signalKinds = candidates.flatMap(\.signalKinds)
+            if !matchedDeclarations.isEmpty {
+                signalKinds.append("declared_capability_match")
+            }
+            let confidence: CapabilityLeadConfidence
+            if reconciledShortcuts.count > 1 {
+                confidence = .ambiguous
+            } else if keyboardShortcut != nil || kind == .keyboardNavigation {
+                confidence = .high
+            } else {
+                confidence = .medium
+            }
+            let shortcutIdentity = keyboardShortcut.map(CapabilityProfileDigest.make) ?? "unspecified"
+            return CapabilityLeadObservation(
+                leadID: "lead.\(kind.rawValue).\(shortcutIdentity.prefix(12))",
+                kind: kind,
+                provider: .keyboard,
+                source: source,
+                taskIDs: taskIDs,
+                keyboardShortcut: keyboardShortcut,
+                signalKinds: signalKinds,
+                confidence: confidence,
+                locatorDigests: locatorDigests,
+                matchedAdvertisedCapabilityIDs: matchedDeclarations.map(\.id),
+                verificationMethods: verificationMethods,
+                observedAt: now
+            )
+        }.sorted { $0.leadID < $1.leadID }
+    }
+
+    private static func classifyCapabilityLead(
+        normalizedLabel: String,
+        shortcuts: Set<String>
+    ) -> (
+        kind: CapabilityLeadKind,
+        taskIDs: [String],
+        signalKinds: [String],
+        verificationMethods: [String]
+    )? {
+        if normalizedLabel.contains("quick switcher") {
+            return (
+                .quickSwitcher,
+                ["open-quick-switcher"],
+                ["quick_switcher_label"],
+                ["quick_switcher_present", "foreground_unchanged"]
+            )
+        }
+        if normalizedLabel.contains("command palette")
+            || normalizedLabel.contains("command menu") {
+            return (
+                .commandPalette,
+                ["open-command-palette"],
+                ["command_palette_label"],
+                ["command_palette_present", "foreground_unchanged"]
+            )
+        }
+        if normalizedLabel.contains("keyboard shortcuts")
+            || normalizedLabel.contains("shortcut catalog")
+            || normalizedLabel.contains("shortcut list") {
+            return (
+                .shortcutCatalog,
+                ["open-shortcut-catalog"],
+                ["shortcut_catalog_label"],
+                ["shortcut_catalog_present", "foreground_unchanged"]
+            )
+        }
+        let advertisesNavigation = normalizedLabel.contains("navigate")
+            || normalizedLabel.contains("navigation")
+        let advertisesTab = normalizedLabel.contains(" tab ")
+            || normalizedLabel.hasPrefix("tab ")
+            || normalizedLabel.hasSuffix(" tab")
+        let advertisesArrow = normalizedLabel.contains("arrow")
+        if normalizedLabel.contains("keyboard navigation")
+            || (advertisesNavigation && advertisesTab && advertisesArrow) {
+            return (
+                .keyboardNavigation,
+                ["next-control", "previous-control"],
+                ["keyboard_navigation_label", "tab_and_arrow_keys"],
+                ["focused_element_change", "foreground_unchanged"]
+            )
+        }
+        if normalizedLabel.contains("search"), !shortcuts.isEmpty,
+           normalizedLabel.contains("press")
+            || normalizedLabel.contains("open")
+            || normalizedLabel.contains("focus") {
+            return (
+                .keyboardSearch,
+                ["focus-search"],
+                ["keyboard_search_label"],
+                ["search_field_focused", "foreground_unchanged"]
+            )
+        }
+        return nil
+    }
+
+    private static func isCapabilityDiscoverySurface(
+        node: AccessibilityTreeNode,
+        ancestors: [AccessibilityTreeNode]
+    ) -> Bool {
+        let directRoles = Set(["AXMenuItem", "AXButton", "AXLink"])
+        if let role = node.role, directRoles.contains(role) { return true }
+        let contextRoles = Set(["AXDialog", "AXSheet", "AXPopover", "AXMenu", "AXMenuBar"])
+        if ancestors.contains(where: { $0.role.map(contextRoles.contains) == true }) { return true }
+        let contextIdentity = ([node.identifier].compactMap { $0 } + ancestors.flatMap {
+            [$0.identifier, $0.label].compactMap { $0 }
+        }).map(normalizeDiscoveryText).joined(separator: " ")
+        let contextTerms = [
+            "accessibility", "disclosure", "onboarding", "keyboard", "shortcut",
+            "tutorial", "help", "guide", "quick switcher", "command palette"
+        ]
+        return contextTerms.contains { contextIdentity.contains($0) }
+    }
+
+    private static func capabilityLeadSource(
+        node: AccessibilityTreeNode,
+        ancestors: [AccessibilityTreeNode]
+    ) -> AppAdvertisedCapabilitySource {
+        if ([node] + ancestors).contains(where: {
+            $0.role == "AXMenuItem" || $0.role == "AXMenu" || $0.role == "AXMenuBar"
+        }) {
+            return .appMenu
+        }
+        let context = ([node] + ancestors).flatMap {
+            [$0.identifier, $0.label].compactMap { $0 }
+        }.map(normalizeDiscoveryText).joined(separator: " ")
+        if ["help", "guide", "tutorial", "shortcut"].contains(where: { context.contains($0) }) {
+            return .helpSurface
+        }
+        return .accessibilityDisclosure
+    }
+
+    private static func capabilitySourceRank(_ source: AppAdvertisedCapabilitySource) -> Int {
+        switch source {
+        case .appMenu: 0
+        case .helpSurface: 1
+        case .accessibilityDisclosure: 2
+        }
+    }
+
+    static func extractKeyboardShortcuts(from value: String) -> [String] {
+        let pattern = #"(?i)(?:(?:control|ctrl|⌃|option|opt|alt|⌥|shift|⇧|command|cmd|⌘)[\s+\-]*){1,5}(?:pageup|pagedown|space|return|tab|left|right|up|down|home|end|f(?:[1-9]|1[0-9]|20)|[a-z0-9/.,;=])"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return Array(Set(expression.matches(in: value, range: range).compactMap { match in
+            guard let rawRange = Range(match.range, in: value) else { return nil }
+            return canonicalShortcut(from: String(value[rawRange]))
+        })).sorted()
+    }
+
+    private static func canonicalShortcut(from value: String) -> String? {
+        let lower = value.lowercased()
+        var modifiers = Set<String>()
+        if lower.contains("control") || lower.contains("ctrl") || lower.contains("⌃") {
+            modifiers.insert("ctrl")
+        }
+        if lower.contains("option") || lower.contains("opt")
+            || lower.contains("alt") || lower.contains("⌥") {
+            modifiers.insert("option")
+        }
+        if lower.contains("shift") || lower.contains("⇧") {
+            modifiers.insert("shift")
+        }
+        if lower.contains("command") || lower.contains("cmd") || lower.contains("⌘") {
+            modifiers.insert("cmd")
+        }
+        let keyPattern = #"(?i)(pageup|pagedown|space|return|tab|left|right|up|down|home|end|f(?:[1-9]|1[0-9]|20)|[a-z0-9/.,;=])\s*$"#
+        guard let expression = try? NSRegularExpression(pattern: keyPattern),
+              let match = expression.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..<value.endIndex, in: value)
+              ),
+              let keyRange = Range(match.range(at: 1), in: value) else { return nil }
+        let key = String(value[keyRange]).lowercased()
+        let ordered = ["ctrl", "option", "shift", "cmd"].filter(modifiers.contains)
+        guard let chord = try? ShortcutChord((ordered + [key]).joined(separator: "+")) else {
+            return nil
+        }
+        return chord.canonical
+    }
+
+    private static func parentPath(_ path: String) -> String {
+        guard let separator = path.lastIndex(of: "/") else { return path }
+        return String(path[..<separator])
+    }
+
+    private static func nearbySiblingNodes(
+        for node: AccessibilityTreeNode,
+        in siblings: [AccessibilityTreeNode]
+    ) -> [AccessibilityTreeNode] {
+        guard let index = siblingIndex(node.path) else { return [node] }
+        return siblings.filter { sibling in
+            guard let siblingIndex = siblingIndex(sibling.path) else {
+                return sibling.path == node.path
+            }
+            return abs(siblingIndex - index) <= 2
+        }
+    }
+
+    private static func siblingIndex(_ path: String) -> Int? {
+        guard let component = path.split(separator: "/").last else { return nil }
+        return Int(component)
+    }
+
+    private static func ancestorNodes(
+        for node: AccessibilityTreeNode,
+        nodesByPath: [String: AccessibilityTreeNode]
+    ) -> [AccessibilityTreeNode] {
+        var path = node.path
+        var result: [AccessibilityTreeNode] = []
+        while let separator = path.lastIndex(of: "/") {
+            path = String(path[..<separator])
+            if let ancestor = nodesByPath[path] {
+                result.append(ancestor)
+            }
+        }
+        return result
+    }
+
+    private static func normalizeDiscoveryText(_ value: String) -> String {
+        value.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func observedCapability(
@@ -576,7 +1215,48 @@ public enum CapabilityProfileBuilder {
         _ locators: [CapabilityLocatorDescriptor]
     ) -> [CapabilityLocatorDescriptor] {
         var seen = Set<String>()
-        return locators.filter { seen.insert($0.identityDigest).inserted }
+        return locators.filter {
+            seen.insert(
+                "\($0.identityDigest)|\($0.ancestorDigest ?? "")|\($0.geometryDigest ?? "")"
+            ).inserted
+        }
+    }
+
+    private static func hasDuplicateLocator(
+        _ locators: [CapabilityLocatorDescriptor]
+    ) -> Bool {
+        var counts: [String: Int] = [:]
+        for locator in locators {
+            let key = "\(locator.identityDigest)|\(locator.ancestorDigest ?? "")|\(locator.geometryDigest ?? "")"
+            counts[key, default: 0] += 1
+        }
+        return counts.values.contains { $0 > 1 }
+    }
+
+    private static func ancestorDigest(
+        for node: AccessibilityTreeNode,
+        nodesByPath: [String: AccessibilityTreeNode]
+    ) -> String? {
+        var path = node.path
+        var identities: [String] = []
+        while let separator = path.lastIndex(of: "/") {
+            path = String(path[..<separator])
+            // The recursive audit's application root is a traversal anchor,
+            // not a useful task scope. Windowed audits start at wN and keep
+            // that concrete window descriptor in the chain.
+            guard path != "0", let parent = nodesByPath[path] else { continue }
+            let descriptor = CapabilityLocatorDescriptor.fromAccessibilityIdentity(
+                role: parent.role,
+                subrole: parent.subrole,
+                identifier: parent.identifier,
+                label: parent.label,
+                actions: parent.actions,
+                scrollable: parent.scrollable
+            )
+            identities.append(descriptor.identityDigest)
+        }
+        guard !identities.isEmpty else { return nil }
+        return CapabilityProfileDigest.make(identities.reversed().joined(separator: "|"))
     }
 }
 
@@ -739,11 +1419,19 @@ public final class CapabilityProfileStore {
         } else {
             capabilities.append(updated)
         }
+        let capabilityLeads = profile.capabilityLeads?.map { lead in
+            guard lead.taskIDs.contains(taskID),
+                  providerMatches(route: route, leadProvider: lead.provider) else {
+                return lead
+            }
+            return lead.recording(kind: kind, reason: reason, at: timestamp)
+        }
         var reasons = profile.invalidationReasons
         let invalidationReason: CapabilityProfileInvalidationReason? = switch reason {
         case "stale_element": .staleElement
         case "verification_failed": .verificationFailed
         case "target_ambiguous": .targetAmbiguous
+        case "target_resolution_incomplete": .targetResolutionIncomplete
         default: kind == .negative ? .actionFailed : nil
         }
         if let invalidationReason, !reasons.contains(invalidationReason) {
@@ -762,6 +1450,8 @@ public final class CapabilityProfileStore {
             treeTruncated: profile.treeTruncated,
             locators: profile.locators,
             capabilities: capabilities,
+            advertisedCapabilities: profile.advertisedCapabilities,
+            capabilityLeads: capabilityLeads,
             evidence: Array((profile.evidence + [evidence]).suffix(64)),
             invalidationReasons: reasons,
             createdAt: profile.createdAt,
@@ -804,6 +1494,8 @@ public final class CapabilityProfileStore {
                 treeTruncated: existing.treeTruncated,
                 locators: existing.locators,
                 capabilities: existing.capabilities,
+                advertisedCapabilities: existing.advertisedCapabilities,
+                capabilityLeads: existing.capabilityLeads,
                 evidence: existing.evidence,
                 invalidationReasons: existing.invalidationReasons + [reason],
                 createdAt: existing.createdAt,
@@ -823,6 +1515,22 @@ public final class CapabilityProfileStore {
         lhs.path == rhs.path
             && lhs.bundleID == rhs.bundleID
             && lhs.version == rhs.version
+    }
+
+    private func providerMatches(
+        route: ControlActionRoute,
+        leadProvider: AppControlProvider
+    ) -> Bool {
+        switch route {
+        case .accessibility:
+            leadProvider == .accessibility
+        case .keyboard:
+            leadProvider == .keyboard
+        case .scroll:
+            leadProvider == .semanticScroll
+        case .visual, .normalizedCoordinate, .rawCoordinate:
+            false
+        }
     }
 
     private func persist(_ profile: CapabilityAuditProfile) throws {

@@ -19,6 +19,8 @@ let hud = ApprovalHUD()
 var service: MacCtlService!
 service = MacCtlService(presentApproval: { approval in
     hud.present(approval)
+}, presentAuthorizationNotice: { notice in
+    hud.present(notice)
 })
 hud.approvalPendingHandler = { token in
     service.isApprovalPending(token: token)
@@ -51,9 +53,10 @@ delegate.shutdownHandler = { service.shutdown() }
 
 let server = UnixSocketServer()
 do {
-    try server.start { data in
+    try server.startWithPeer { data, peerIdentity in
         do {
             let request = try JSONCodec.decode(RequestEnvelope.self, from: data)
+                .withTransportPeerIdentity(peerIdentity)
             return try JSONCodec.encode(service.handle(request))
         } catch {
             let response = ResponseEnvelope(
