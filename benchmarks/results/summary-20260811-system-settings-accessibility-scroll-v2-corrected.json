@@ -1,0 +1,113 @@
+{
+  "comparisons": [
+    {
+      "app": "System Settings",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v2",
+      "fastest": {
+        "build_id": "macctl-daemon-20260810",
+        "implementation_id": "mac-control",
+        "lane": "mac-control",
+        "median_ms": 406.304
+      },
+      "focus_policy": "foreground",
+      "foreground_oracle": "foreground_unchanged",
+      "interaction_mode": "scroll",
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "comparable",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "end_to_end_verified_action",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000633",
+          "foreground_preserved": 3,
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 7359.901,
+          "p95_ms": 7567.315,
+          "provenance": "computer_use_node_repl",
+          "recoveries": 0,
+          "route": "computer-use-scroll",
+          "samples": 3,
+          "verified": 3
+        },
+        {
+          "build_id": "macctl-daemon-20260810",
+          "foreground_preserved": 7,
+          "implementation_id": "mac-control",
+          "lane": "mac-control",
+          "median_ms": 406.304,
+          "p95_ms": 886.0,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "accessibility-scroll",
+          "samples": 7,
+          "verified": 7
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-11T04:22:33.807532Z",
+  "groups": [
+    {
+      "app": "System Settings",
+      "build_id": "computer-use-1.0.1000633",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v2",
+      "expand_to_seven": false,
+      "focus_policy": "foreground",
+      "foreground_complete": true,
+      "foreground_oracle": "foreground_unchanged",
+      "foreground_preserved": 3,
+      "implementation_id": "computer-use-agent",
+      "interaction_mode": "scroll",
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 3,
+      "median_ms": 7359.901,
+      "p95_ms": 7567.315,
+      "provenance": "computer_use_node_repl",
+      "range_ms": 1970.294,
+      "recoveries": 0,
+      "route": "computer-use-scroll",
+      "samples": 3,
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "end_to_end_verified_action",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "app": "System Settings",
+      "build_id": "macctl-daemon-20260810",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v2",
+      "expand_to_seven": false,
+      "focus_policy": "foreground",
+      "foreground_complete": true,
+      "foreground_oracle": "foreground_unchanged",
+      "foreground_preserved": 7,
+      "implementation_id": "mac-control",
+      "interaction_mode": "scroll",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 406.304,
+      "p95_ms": 886.0,
+      "provenance": "daemon_executed",
+      "range_ms": 523.527,
+      "recoveries": 0,
+      "route": "accessibility-scroll",
+      "samples": 7,
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "end_to_end_verified_action",
+      "user_help": 0,
+      "verified": 7
+    }
+  ],
+  "schema_version": 4
+}

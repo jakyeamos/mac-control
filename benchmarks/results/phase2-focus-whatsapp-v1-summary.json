@@ -1,0 +1,98 @@
+{
+  "comparisons": [
+    {
+      "app": "WhatsApp",
+      "comparison_id": "phase2-focus-whatsapp-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-reloaded-5137",
+        "implementation_id": "mac-control-agent",
+        "lane": "mac-control",
+        "median_ms": 674.813
+      },
+      "state_fingerprint": "whatsapp-focus-ready-v1",
+      "status": "comparable",
+      "target_fingerprint": "whatsapp-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "agent_action_plus_verification",
+      "variant_count": 2,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000633",
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 7372.648,
+          "p95_ms": 8189.623,
+          "provenance": "computer_use",
+          "recoveries": 0,
+          "route": "computer-use",
+          "samples": 3,
+          "verified": 3
+        },
+        {
+          "build_id": "mac-control-daemon-reloaded-5137",
+          "implementation_id": "mac-control-agent",
+          "lane": "mac-control",
+          "median_ms": 674.813,
+          "p95_ms": 744.673,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "keyboard",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-10T16:14:22.112778Z",
+  "groups": [
+    {
+      "app": "WhatsApp",
+      "build_id": "computer-use-1.0.1000633",
+      "comparison_id": "phase2-focus-whatsapp-v1",
+      "expand_to_seven": false,
+      "implementation_id": "computer-use-agent",
+      "interpretation": "passed",
+      "lane": "generic-gui",
+      "mean_tool_calls": 2,
+      "median_ms": 7372.648,
+      "p95_ms": 8189.623,
+      "provenance": "computer_use",
+      "range_ms": 1625.145,
+      "recoveries": 0,
+      "route": "computer-use",
+      "samples": 3,
+      "state_fingerprint": "whatsapp-focus-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "whatsapp-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "app": "WhatsApp",
+      "build_id": "mac-control-daemon-reloaded-5137",
+      "comparison_id": "phase2-focus-whatsapp-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control-agent",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 674.813,
+      "p95_ms": 744.673,
+      "provenance": "daemon_executed",
+      "range_ms": 103.963,
+      "recoveries": 0,
+      "route": "keyboard",
+      "samples": 3,
+      "state_fingerprint": "whatsapp-focus-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "whatsapp-focus-v1",
+      "task": "focus-next-control",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 2
+}

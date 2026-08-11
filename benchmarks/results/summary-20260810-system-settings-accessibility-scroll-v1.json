@@ -1,0 +1,129 @@
+{
+  "comparisons": [
+    {
+      "app": "System Settings",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v1",
+      "fastest": {
+        "build_id": "macctl-daemon-20260810",
+        "implementation_id": "mac-control",
+        "lane": "mac-control",
+        "median_ms": 830.0
+      },
+      "focus_policy": "foreground",
+      "foreground_oracle": "foreground_unchanged",
+      "interaction_mode": "scroll",
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "external_command_round_trip_plus_daemon_verification",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "macctl-daemon-20260810",
+          "foreground_preserved": 3,
+          "implementation_id": "mac-control",
+          "lane": "mac-control",
+          "median_ms": 830.0,
+          "p95_ms": 902.0,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "accessibility-scroll",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    },
+    {
+      "app": "System Settings",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v1",
+      "fastest": null,
+      "focus_policy": "foreground",
+      "foreground_oracle": "foreground_unchanged",
+      "interaction_mode": "scroll",
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "provider_action_plus_fresh_postcondition_readback",
+      "variant_count": 0,
+      "variants": [
+        {
+          "build_id": "computer-use-1.0.1000633",
+          "foreground_preserved": 0,
+          "implementation_id": "computer-use-agent",
+          "lane": "generic-gui",
+          "median_ms": 8707.188,
+          "p95_ms": 13650.261,
+          "provenance": "computer_use_node_repl",
+          "recoveries": 0,
+          "route": "computer-use-scroll",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-10T22:06:35.602689Z",
+  "groups": [
+    {
+      "app": "System Settings",
+      "build_id": "computer-use-1.0.1000633",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v1",
+      "expand_to_seven": true,
+      "focus_policy": "foreground",
+      "foreground_complete": false,
+      "foreground_oracle": "foreground_unchanged",
+      "foreground_preserved": 0,
+      "implementation_id": "computer-use-agent",
+      "interaction_mode": "scroll",
+      "interpretation": "focus policy or foreground-preservation oracle not satisfied",
+      "lane": "generic-gui",
+      "mean_tool_calls": 3,
+      "median_ms": 8707.188,
+      "p95_ms": 13650.261,
+      "provenance": "computer_use_node_repl",
+      "range_ms": 5960.983,
+      "recoveries": 0,
+      "route": "computer-use-scroll",
+      "samples": 3,
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "provider_action_plus_fresh_postcondition_readback",
+      "user_help": 0,
+      "verified": 3
+    },
+    {
+      "app": "System Settings",
+      "build_id": "macctl-daemon-20260810",
+      "comparison_id": "phase3-system-settings-accessibility-scroll-v1",
+      "expand_to_seven": true,
+      "focus_policy": "foreground",
+      "foreground_complete": true,
+      "foreground_oracle": "foreground_unchanged",
+      "foreground_preserved": 3,
+      "implementation_id": "mac-control",
+      "interaction_mode": "scroll",
+      "interpretation": "expand to 7 samples",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 830.0,
+      "p95_ms": 902.0,
+      "provenance": "daemon_executed",
+      "range_ms": 440.0,
+      "recoveries": 0,
+      "route": "accessibility-scroll",
+      "samples": 3,
+      "state_fingerprint": "system-settings-accessibility-top-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-accessibility-content-scroll-v1",
+      "task": "system-settings-accessibility-pane-scroll",
+      "timing_scope": "external_command_round_trip_plus_daemon_verification",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 4
+}

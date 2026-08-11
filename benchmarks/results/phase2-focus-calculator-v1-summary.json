@@ -1,0 +1,62 @@
+{
+  "comparisons": [
+    {
+      "app": "Calculator",
+      "comparison_id": "phase2-focus-calculator-v1",
+      "fastest": {
+        "build_id": "mac-control-daemon-reloaded-5137",
+        "implementation_id": "mac-control-agent",
+        "lane": "mac-control",
+        "median_ms": 127.745
+      },
+      "state_fingerprint": "calculator-focus-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "calculator-focus-v1",
+      "task": "focus-next-calculator-v1",
+      "timing_scope": "agent_action_plus_verification",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "mac-control-daemon-reloaded-5137",
+          "implementation_id": "mac-control-agent",
+          "lane": "mac-control",
+          "median_ms": 127.745,
+          "p95_ms": 131.34,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "keyboard",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-10T16:58:55.616488Z",
+  "groups": [
+    {
+      "app": "Calculator",
+      "build_id": "mac-control-daemon-reloaded-5137",
+      "comparison_id": "phase2-focus-calculator-v1",
+      "expand_to_seven": false,
+      "implementation_id": "mac-control-agent",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 127.745,
+      "p95_ms": 131.34,
+      "provenance": "daemon_executed",
+      "range_ms": 4.405,
+      "recoveries": 0,
+      "route": "keyboard",
+      "samples": 3,
+      "state_fingerprint": "calculator-focus-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "calculator-focus-v1",
+      "task": "focus-next-calculator-v1",
+      "timing_scope": "agent_action_plus_verification",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 2
+}

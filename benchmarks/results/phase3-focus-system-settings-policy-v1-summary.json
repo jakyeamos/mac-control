@@ -1,0 +1,71 @@
+{
+  "comparisons": [
+    {
+      "app": "System Settings",
+      "comparison_id": "phase3-focus-system-settings-policy-v1",
+      "fastest": {
+        "build_id": "macctld-installed-20260810",
+        "implementation_id": "mac-control",
+        "lane": "mac-control",
+        "median_ms": 207.856
+      },
+      "focus_policy": "foreground",
+      "foreground_oracle": "foreground_unchanged",
+      "interaction_mode": "keyboard",
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "insufficient_evidence",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "phase3-focus-system-settings-policy-v1",
+      "timing_scope": "end_to_end_verified_action",
+      "variant_count": 1,
+      "variants": [
+        {
+          "build_id": "macctld-installed-20260810",
+          "foreground_preserved": 3,
+          "implementation_id": "mac-control",
+          "lane": "mac-control",
+          "median_ms": 207.856,
+          "p95_ms": 223.071,
+          "provenance": "daemon_executed",
+          "recoveries": 0,
+          "route": "keyboard",
+          "samples": 3,
+          "verified": 3
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-08-10T17:40:14.877061Z",
+  "groups": [
+    {
+      "app": "System Settings",
+      "build_id": "macctld-installed-20260810",
+      "comparison_id": "phase3-focus-system-settings-policy-v1",
+      "expand_to_seven": false,
+      "focus_policy": "foreground",
+      "foreground_complete": true,
+      "foreground_oracle": "foreground_unchanged",
+      "foreground_preserved": 3,
+      "implementation_id": "mac-control",
+      "interaction_mode": "keyboard",
+      "interpretation": "passed",
+      "lane": "mac-control",
+      "mean_tool_calls": 1,
+      "median_ms": 207.856,
+      "p95_ms": 223.071,
+      "provenance": "daemon_executed",
+      "range_ms": 53.169,
+      "recoveries": 0,
+      "route": "keyboard",
+      "samples": 3,
+      "state_fingerprint": "system-settings-ready-v1",
+      "status": "passed",
+      "target_fingerprint": "system-settings-focus-v1",
+      "task": "phase3-focus-system-settings-policy-v1",
+      "timing_scope": "end_to_end_verified_action",
+      "user_help": 0,
+      "verified": 3
+    }
+  ],
+  "schema_version": 4
+}
