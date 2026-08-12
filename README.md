@@ -116,7 +116,40 @@ message bodies, and sensitive selector values are not persisted. Version 2
 control receipts additionally retain the provider-neutral outcome, installed
 app identity/version, selector field names, and digests of the app path,
 locator, and optional target fingerprint. This supports recurrence detection
-without retaining raw selector labels or application paths.
+without retaining raw selector labels or application paths. Version 3 adds the
+requested focus policy, effective focus policy, route-selection reason, and any
+background-unavailable reason so an automatic foreground fallback is
+explainable without retaining user content.
+
+## Authorization notices
+
+Codex may prepare a short-lived, explanatory notice before a command that can access a
+credential, Keychain item, or permission-protected service. The daemon exposes the notice
+lifecycle through the owner-only socket:
+
+```sh
+~/.local/bin/macctl control authorization prepare --json \
+  --kind credential --project mac-control --action "read credential" \
+  --summary "Git credential helper access" \
+  --target-service github.com --source-reference codex://thread/<id>
+~/.local/bin/macctl control authorization list --json
+~/.local/bin/macctl control authorization resolve <request-id> \
+  --outcome completed --json
+```
+
+Requests contain only bounded safe context: project/repository, task and thread identity,
+requesting helper, target service, action, summary, expiry, and an allowlisted `codex://`
+source reference. Raw commands, arguments, prompts, passwords, tokens, private input, and
+environment values are rejected or omitted. `bind` records a process correlation after launch;
+it does not grant access or operate the native macOS prompt.
+
+The Control Center raises an attention state and may issue one deduplicated local notification
+when notification permission is already available. It shows the declared source beside the
+daemon-observed peer executable/signing identity and labels provenance as `ATTESTED`, `DECLARED`,
+or `UNVERIFIED`. `ATTESTED` means only that the declared helper correlated with the local socket
+peer; it is not a safety verdict or approval. There is deliberately no Allow/Deny control in
+Mac Control. A source can open only through a registered Codex opener; otherwise the reference
+is informational. An unannounced external dialog remains unverified in v1.
 
 ## Safety boundary
 
@@ -127,15 +160,26 @@ and screenshot/OCR frames are held in memory only for the requested operation.
 
 ### Focus-preserving background workflows
 
-Workflows default to `focusPolicy: "foreground"`. A caller can request
-`focus_policy: "background"` for a workflow or app launch when the operation
-must not bring its target to the front:
+Agent-facing CLI workflow, app-open, and direct-control requests default to
+`focus_policy: "automatic"`. Automatic execution first admits the exact
+operation to a verified background route. If no such route is eligible before
+dispatch, Mac Control immediately uses the normal foreground path; it does not
+wait for idle time, queue the action, or consolidate focus changes. Callers can
+still force `focus_policy: "foreground"`, or request fail-closed
+`focus_policy: "background"` when preserving focus is mandatory:
 
 ```sh
 ~/.local/bin/macctl workflow validate my.workflow --background --json
 ~/.local/bin/macctl workflow prepare my.workflow --background --json
 ~/.local/bin/macctl app open "TextEdit" --background --json
 ```
+
+The requested policy remains part of the approval digest. Automatic is
+resolved only for execution, and results and receipts distinguish
+`requested_focus_policy` from effective `focus_policy`, with
+`focus_selection_reason` and (for fallback) `background_unavailable_reason`.
+This prevents changing approval authority merely because live target state
+made one route eligible or ineligible.
 
 Background workflow execution is deliberately narrower than foreground
 execution. It launches apps with a non-activating AppKit configuration, targets
@@ -175,6 +219,27 @@ control center commits the visible approval without executing the plan. Run the
 exact prepared workflow afterward with its approval token; the token is consumed
 at first dispatch, and ephemeral input is never returned by the daemon or
 written to its log.
+
+When a foreground-bound test or action is about to move the active app, the menu-bar pill turns
+light blue and says `Focusing`; once the handoff is observed it says `Focused` and names the
+target in its tooltip and accessibility label. Those are brief one-shot notices. For an agent run
+that spans multiple native actions or a Computer Use handoff, explicitly start one bounded
+hands-off session so the pill can truthfully cover the entire run:
+
+```sh
+~/.local/bin/macctl control hands-off begin --provider hybrid \
+  --app "Google Chrome" --task context-menu --seconds 60 --confirm --json
+~/.local/bin/macctl control perform context-menu --app "Google Chrome" \
+  --hands-off-session-id <session_id> --confirm --json
+~/.local/bin/macctl control hands-off heartbeat --session-id <session_id> --json
+~/.local/bin/macctl control hands-off end --session-id <session_id> --json
+```
+
+Pass the returned opaque session ID to each native action or batch, and heartbeat before the
+reported interval. While active, the pill says `Hands Off` and the Control Center explicitly tells
+the user not to use the keyboard or trackpad; expiry, Stop & Release, or daemon shutdown clears it.
+The session is caller-owned and never inferred from an individual action. `Frozen` remains the
+higher-salience state when physical keyboard suppression is active.
 
 The built-in `approval.smoke` workflow is the release-evidence path for this
 boundary. It only waits for 0.2 seconds, performs no external input, and is
@@ -327,6 +392,31 @@ available for the status-item `Quit daemon` emergency path, and synthetic
 `macctl` keyboard events are marked so the agent's own input can still run.
 Use the default shared mode for app-scoped or unattended workflows.
 
+If Full Keyboard Access is enabled but the current interaction is in
+Pass-Through Mode, an explicitly opted-in session lease can temporarily enter
+navigation mode:
+
+```sh
+~/.local/bin/macctl keyboard lease acquire \
+  --scope session --seconds 120 --navigation-mode \
+  --from-pass-through --confirm --json
+```
+
+This transition is separate from physical keyboard suppression. The caller
+must assert `--from-pass-through`; macOS documents the toggle shortcut but
+does not expose a pass-through state property for Mac Control to read back.
+The response therefore marks the state source as `caller_asserted`. The lease
+owns the inverse toggle and performs it on release, expiry, or daemon
+shutdown. If that restoration is ambiguous, the lease is removed but new
+navigation leases are blocked and `keyboard.status` reports
+`navigationRestorationPending`. There is no safe agent-side clear or
+pass-through readback; stop input and hand off to the user to restore the
+intended macOS state until an explicit reconciliation path reports the flag
+false.
+Navigation mode is session-only because Pass-Through Mode is global to the
+Full Keyboard Access interaction, so unattended app-scoped leases should use
+the default mode.
+
 Named navigation commands use Apple's Full Keyboard Access sequences:
 
 | Command | Keys |
@@ -365,6 +455,45 @@ action:
   --lease-token "$TOKEN" --role AXButton --title "Save" --json
 ```
 
+Declare the focus expectation on agent-facing calls. The default is
+`focus_policy=automatic`. Direct `control.perform` and `control.batch` do not
+own the named-process authority required for background mutation, so automatic
+requests on those low-level surfaces immediately resolve to foreground with
+`background_unavailable_reason=control_perform_requires_named_task_plan` (or
+the batch equivalent). Foreground execution requires the target identity to
+remain unchanged across the action boundary and returns that oracle in both
+the report and evidence (`foreground_oracle=target_foreground_unchanged`,
+`foreground_state=preserved`). `--background` is a shorthand for
+`focus_policy=background`, but explicit background still fails closed: use an
+approved `task.run` plan for named, process-directed background actions so the
+target, authority, expiry, and unrelated foreground oracle are bound together.
+A rejected background request is an
+`action_unavailable`/`background_unsupported` handoff, not permission to
+fall back to global input.
+
+```sh
+~/.local/bin/macctl control perform activate \
+  --app "Notes" --confirm --focus-policy foreground \
+  --role AXButton --title "New Note" --json
+~/.local/bin/macctl control perform activate \
+  --app "Notes" --confirm --background \
+  --role AXButton --title "New Note" --json
+```
+
+The second request fails closed with `recommended_surface: task.run` and
+`next_action: submit_named_background_task_plan`.
+
+System Settings sidebar rows are a provider-specific boundary: native AX can
+expose an `AXRow`/`AXOutlineRow` with `AXShowDefaultUI` or
+`AXShowAlternateUI` and no `AXPress` or readable AX title. These are
+presentation-only actions, not a verified click/selection route. Use the
+stable locator returned by `accessibility audit`; `control perform activate`
+returns `action_unavailable` with `recommended_provider: computer_use` and
+`fresh_state_required: true`, so the agent can refresh state, relocate the
+named row, click it through Computer Use, and verify the selected pane there.
+Rows that actually expose `AXPress` still require the task-specific
+`selected_pane` postcondition before reporting success.
+
 For a self-contained action, provide the target app and explicit confirmation
 instead of a lease token. The daemon activates the app, waits for two stable
 foreground reads, acquires an app-scoped ephemeral lease, performs and verifies
@@ -395,6 +524,19 @@ the action completed; the service returns it as blocked with
 context-menu capability, but it does not implement Chrome tab/group mutation.
 `control capabilities --app "Google Chrome" --json` reports that boundary as
 `unsupportedCapabilities: ["chrome_tab_group_mutation"]`.
+Context-menu verification also requires one rendered `AXMenu` candidate with
+positive geometry and at least one rendered `AXMenuItem`; zero-sized menu
+templates and multiple rendered candidates remain unverified and report the
+geometry/ambiguity evidence in the action postcondition.
+When that postcondition is unavailable after the native action, the response
+recommends `computer_use` with `fresh_state_required: true` and includes a
+machine-readable `outcome.handoff_plan`. Execute its ordered
+`get_app_state` -> unique fresh-target -> right-click -> fresh verification
+steps, using the original request for selector values and expected labels.
+`fallback_allowed: false` and `native_action_replay_allowed: false` mean the
+agent must not blindly replay the AX action; the daemon makes the handoff
+actionable for the caller without invoking Computer Use or persisting raw
+selectors/menu labels.
 
 Mac Control does not assume one route is fastest for every app. For a known
 task, execute bounded daemon samples for the exact app version, target
@@ -411,6 +553,59 @@ route:
   --task focus-next-control --target-fingerprint "settings-pane" --json
 ```
 
+For a matched agent-versus-provider comparison, the repository benchmark
+runner accepts the named keyboard focus action and its explicit inverse. This
+avoids assuming that plain Tab is the useful navigation primitive in every
+native app:
+
+```sh
+python3 scripts/control_benchmark.py run-mac-focus \
+  --app "Notes" --action next-item --reset-action previous-item \
+  --task focus-next-notes-item-v1 --oracle "Accessibility focus changed to the next Notes item" \
+  --warmups 1 --samples 3 --output benchmarks/results/notes-focus.jsonl \
+  --comparison-id phase2-focus-notes-v1 --target-fingerprint notes-focus-v1 \
+  --state-fingerprint notes-focus-ready-v1 --timing-scope agent_action_plus_verification \
+  --focus-policy foreground --interaction-mode keyboard \
+  --provenance daemon_executed --macctl ~/.local/bin/macctl
+```
+
+`run-mac-focus` makes foreground preservation part of the benchmark oracle. Every
+prime, measured action, and inverse reset must include matching
+`foregroundBefore`/`foregroundAfter` identities and `foregroundChanged: false`;
+missing evidence is `foreground_state=unavailable`, and a changed foreground
+stops the run. The summary keeps the foreground oracle and `focus_policy` in the
+comparison key. `focus_policy=foreground` means the named target must be the
+foreground target throughout the action; `focus_policy=background` means the
+named target may be addressed without changing the unrelated foreground app.
+Both policies still require independently verified `foreground_state=preserved`.
+The `interaction_mode` is also part of the key (`keyboard`, `pointer`, `scroll`,
+`drag`, or `mixed`), so a provider-natural pointer or visual action cannot be
+silently paired with a keyboard-only Tab trial. Historical records without these
+fields remain historical and are not upgraded retroactively.
+
+For an externally timed lane, record the bounded foreground result explicitly:
+
+```sh
+python3 scripts/control_benchmark.py record \
+  --task focus-next-notes-item-v1 --lane generic-gui --phase measured \
+  --sample 1 --duration-ms 480 --tool-calls 5 --recoveries 0 \
+  --status passed --oracle "Accessibility focus changed to the next Notes item" \
+  --foreground-oracle foreground_unchanged --foreground-state preserved \
+  --focus-policy foreground --interaction-mode keyboard \
+  --verified --output benchmarks/results/manual-focus.jsonl \
+  --comparison-id phase2-focus-notes-v1 --app "Notes" \
+  --target-fingerprint notes-focus-v1 --state-fingerprint notes-focus-ready-v1 \
+  --implementation-id direct-ui-scripting --build-id manual-20260810 \
+  --timing-scope agent_action_plus_verification --provenance externally_timed
+```
+
+The Computer Use comparison lane must use the provider's natural action for the
+task: pointer/visual targeting for pointer tasks, `sky.scroll` for scroll tasks,
+and drag actions for drag tasks. A Tab/Shift-Tab run is valid only as a narrow
+`interaction_mode=keyboard` keyboard-parity fixture; keep it separately labeled
+and do not use it as the representative Computer Use result for the broader
+Mac Control-versus-Computer-Use goal.
+
 Semantic scroll routes can be benchmarked by the daemon as well. Use a unique, readable
 `AXScrollArea` identifier and reset to the opposite direction before each repeated invocation:
 
@@ -424,7 +619,13 @@ Semantic scroll routes can be benchmarked by the daemon as well. Use a unique, r
 ```
 
 The benchmark measures the daemon's semantic AX scroll route, verifies every bounded invocation,
-and persists no warm-path manifest when reset or measured scrolling is unverified.
+and persists no warm-path manifest when reset or measured scrolling is unverified. A failed or
+ambiguous benchmark still records bounded task-specific route-health evidence against the supplied
+task and target, when a matching profile or manifest already exists, so the next fast probe can
+avoid replaying the failed route; it never creates benchmark metrics from an unverified sample.
+The benchmark runner also preserves bounded daemon failure metadata such as the failure class,
+fresh-state requirement, and recommended next action when a provider command exits non-zero;
+raw command output and UI content remain excluded.
 
 Safety, permission, target-uniqueness, freshness, and verification gates run
 before speed ranking. Route policy is layered from a provider-neutral app
@@ -445,11 +646,44 @@ key sequences.
 
 `control capabilities` performs the small latency-sensitive probe and exposes
 the resolved profile layers, provider preferences, stable anchors,
-verification methods, invalidation triggers, and whether the cached route
-context is current. The separate bounded capability audit remains the broad
-read-only discovery path. Browser DOM, CDP, and Computer Use entries in a
-profile are routing declarations for their owning providers; they do not turn
-Mac Control into those providers or bypass their verification boundaries.
+verification methods, invalidation triggers, app-published candidate
+capabilities, and whether the cached route context is current. The separate
+bounded capability audit remains the broad read-only discovery path. Browser
+DOM, CDP, Computer Use, and app-advertised entries are routing declarations for
+their owning providers; they do not turn Mac Control into those providers or
+bypass their verification boundaries.
+
+Callers must declare `--target-surface web-content` when the intended target is
+inside a rendered page rather than browser chrome. The probe then reports
+`providerHandoffRequired`, the preferred `browser_dom`/`cdp_dom` provider, and
+`nextAction=submit_browser_target_plan`. Supplying the same surface to
+`control perform` or `control batch` fails closed with
+`provider_handoff_required` before browser activation. Mac Control cannot
+assert connector health, tab identity, or DOM verification; the receiving
+browser provider must refresh and verify those facts.
+The CLI resolves this branch locally, so a pre-v5 daemon cannot silently ignore
+the new field and route the request through foreground Mac control.
+
+App overlays may declare an `advertisedCapabilities` list backed by a public
+in-app accessibility, menu, or help disclosure. Discord currently declares
+Tab/arrow keyboard navigation, Command-/ for its shortcut catalog, and
+Command-K for Quick Switcher from its accessibility onboarding. The fast probe
+reports these declarations as `candidate_only`; it never dispatches them or
+adds them to `freshMeasuredRoutes`.
+
+The deep audit also discovers general `capabilityLeads` without requiring an
+app overlay. It recognizes structured keyboard-navigation, shortcut-catalog,
+quick-switcher, command-palette, and keyboard-search disclosures only on
+app-owned menus, controls, dialogs, help, onboarding, or accessibility surfaces.
+It understands nearby split keycaps such as separate `⌘` and `K` AX nodes,
+reconciles a generic lead with a matching bundle declaration when available,
+and caches only the normalized shortcut, signal categories, confidence,
+verification requirements, and hashed locator identities. Raw disclosure text
+is never persisted. Conflicting shortcuts remain ambiguous, ordinary content
+text is ignored, and every lead starts as a candidate. A matching fresh
+task-specific verification can promote or demote the lead in the broad profile,
+but route eligibility still requires independent measured-route evidence.
+Missing transient UI is absence of evidence rather than negative evidence.
 
 Use `route register` only for explicitly caller-supplied external metadata; it
 is not equivalent to the daemon-executed benchmark.
@@ -460,6 +694,8 @@ within one foreground app:
 ```sh
 ~/.local/bin/macctl control capabilities --app "Chrome" \
   --task focus-next --target-fingerprint focus-v1 --json
+~/.local/bin/macctl control capabilities --app "Chrome" \
+  --target-surface web-content --json
 ~/.local/bin/macctl control capability-audit --app "Chrome" \
   --max-nodes 500 --max-depth 8 --json
 ~/.local/bin/macctl control capability-audit-batch --all-applicable --json
@@ -488,10 +724,19 @@ top-level pages, and 16,000 total nodes. Only complete coverage promotes the
 profile; omitted or truncated pages keep it stale and are reported as evidence.
 A fresh locator's `identityDigest` can be passed back through
 `control perform --locator-digest <digest>` (optionally combined with role,
-subrole, identifier, or window scope). The daemon recomputes the complete
-redacted descriptor from the live AX element and fails closed unless exactly
-one current element matches, closing the audit-to-action handoff without
-persisting its visible label.
+subrole, identifier, window scope, and the locator's redacted
+`ancestorDigest` and optional `geometryDigest`). The ancestor digest
+disambiguates repeated local descriptors inside one window, while the geometry
+digest is a redacted digest of the element bounds; raw coordinates, visible
+ancestor text, and AX element references are never persisted. The daemon
+recomputes the complete redacted descriptor, ancestor chain, and geometry from
+the live AX tree and fails closed unless exactly one current element matches,
+closing the audit-to-action handoff. If duplicate scroll locators remain after
+these discriminators, the broad semantic-scroll capability stays a candidate
+until task-specific evidence resolves the ambiguity. A role-only
+`AXScrollArea` that exposes no directional AX scroll action is also kept as a
+candidate; an incidental `AXScrollToVisible` action on a descendant does not
+promote semantic scrolling.
 A batch holds one bounded app lease, revalidates
 every step, stops on an unverified step, and releases the lease. Scroll is
 intentionally kept on `control perform` so a provider handoff remains explicit.
@@ -522,10 +767,31 @@ without reading AX values or private content:
 ### Mac Control ideal-state audits
 
 Repositories that expose a supported Mac Control task surface can own a
-versioned `.mac-control/ideal-state.json` manifest. The manifest describes the
-stable target, semantic action, observable postcondition, state contract,
-navigation strategy, and eligible routes for each supported task. Validate the
-manifest without touching a running app:
+versioned `.mac-control/ideal-state.json` manifest. The current
+`mac-control-task-manifest/v4` contract describes task surfaces without choosing
+a winner and rejects self-attested `criteria` booleans. Each task declares its
+`surface_kind`, stable target identity, focus policy, semantic action,
+independent verification oracle, task-specific state requirements and
+exemptions, provider/method/interaction-mode route candidates, and typed
+`semantic_evidence` for all eight dimensions. Every dimension references
+repository-relative source anchors and evidence tokens; Quality Runner resolves
+those references only in implementation files and requires the tokens near one
+unique anchor before deriving the score. Docs, tests, fixtures, snapshots, and
+symlinks cannot score. The Mac Control validator checks the claim shape,
+cross-field consistency, source-reference eligibility, and provider boundaries
+without claiming that source or a running app has been observed.
+
+Native app UI must expose a native semantic candidate, web content must hand
+off to a browser connector, and hybrid transitions must declare both sides.
+Accessibility candidates need stable identifiers; visual, pointer, and drag
+candidates need explicit fresh-state handoff. The contract also requires every
+task to account for shortcut acceleration as `built_in_verified`,
+`customizable_verified`, or `not_applicable` with a reason. A usable shortcut
+names a stable command, exposes contextual availability, and carries conflict
+handling; macOS App Shortcut surfaces additionally preserve the exact menu path
+and reversible assignment. V1 through v3 remain readable declaration-only
+migration formats and cannot earn semantic implementation points.
+Validate the manifest without touching a running app:
 
 ```sh
 ~/.local/bin/macctl ideal-state validate \
@@ -544,14 +810,21 @@ redacted structural findings:
 
 This audit does not invent task success from a tree inspection. Measured task
 attempts, selected routes, and readable postconditions remain backed by the
-normal approval-gated `task.*` or route receipts. Quality Runner consumes those
-redacted measurements as `mac-control-task-evidence/v1` sidecars and keeps the
-static, live structural, and task-execution evidence distinct.
+normal approval-gated `task.*` or route receipts. A v2, v3, or v4 repository manifest must
+not contain `selected_route`; Quality Runner adds it only from live task
+evidence. Human accessibility metadata, agent task operability, and runtime
+performance remain distinct evidence even while the v1 report envelope carries
+them together. Quality Runner consumes redacted
+measurements as `mac-control-task-evidence/v1` sidecars and keeps the static,
+live structural, and task-execution evidence distinct.
 
 When a target lives inside a readable scroll container, use semantic scrolling
 with a unique `AXScrollArea` selector. An identifier is preferred, but optional
-when role-only resolution returns exactly one container; Mac Control verifies
-that the container can still be resolved after the action:
+when role-only resolution returns exactly one container. If repeated scroll
+containers share the same local descriptor, pass both the audit's
+`identityDigest` and `ancestorDigest`; when the audit reports repeated
+structural matches, also pass its redacted `geometryDigest`. Mac Control
+verifies that the selected container can still be resolved after the action:
 
 ```sh
 ~/.local/bin/macctl control perform scroll --app "System Settings" \
@@ -618,15 +891,26 @@ ephemeral-input change invalidates it. The daemon automatically grants approved
 foreground work a session-scoped execution lease bounded by the task deadline
 and the 300-second maximum. `--lease-token` remains an exact-mode compatibility
 override and cannot upgrade shared authority into physical-keyboard suppression.
-A `focus_policy: "background"`
-task may instead receive an in-memory input channel without a keyboard lease
+A `focus_policy: "automatic"` task is checked against the same background
+validator immediately before dispatch. If eligible and addressable it receives
+the background input channel; otherwise it immediately takes the existing
+foreground path and reports the reason. An explicit
+`focus_policy: "background"` task may receive an in-memory input channel without a keyboard lease
 when all input targets name one running application that is not currently in
 the foreground. The channel is bound to the exact task, plan digest, process,
-and expiry; Accessibility-addressed click/type and process-directed key routes
-are the only supported inputs. A target-process or foreground change blocks
-dispatch. This is a logical task authority, not a system-wide virtual HID
-device, and it does not make task execution parallel. Private text is supplied
-through owner-only stdin and is used in memory only.
+and expiry. Accessibility-addressed click/type, replace-only search with AXValue
+readback, verified
+semantic `AXScrollArea` scroll, explicitly `background_safe` typed adapter
+operations, and process-directed key routes are supported. Search text still
+comes from ephemeral input; background scroll is successful only when bounded
+Accessibility state changes; and an adapter defaults to `foreground_only`
+until its operation manifest explicitly opts in. Full Keyboard Access,
+activation, global pointer input, arbitrary commands, ambiguous targets, and
+visual/coordinate input remain foreground-only. A target-process or unrelated
+foreground change blocks dispatch. This is a logical task authority, not a
+system-wide virtual HID device, and it does not create multiple macOS first
+responders or make task execution parallel. Private text is supplied through
+owner-only stdin and is used in memory only.
 
 Checkpoints are separate from receipts, atomic, owner-only, retention-bounded,
 and redacted. They contain task and step identity, hashes, route, attempt
@@ -650,7 +934,11 @@ action and at bounded action checkpoints.
 
 `macctl adapter capabilities --json` reports the typed adapter manifests,
 routes, read/mutating behavior, required permissions, risk, redacted
-observation schema, and Automation diagnostics. The initial allowlist covers
+observation schema, `focusSupport`, and Automation diagnostics. Operations are
+`foreground_only` by default. The initial background-safe allowlist is limited
+to the Accessibility-based `inspect.front-window` and `locate.named-object`
+operations; every other operation remains foreground-only until independently
+verified and explicitly declared. The initial app allowlist covers
 Finder, System Settings, Terminal, TextEdit, Preview, Mail, Calendar, Notes,
 and Messages. Adapters prefer native/AppKit, Accessibility, and keyboard
 routes; typed AppleScript is available only for declared operations and never
