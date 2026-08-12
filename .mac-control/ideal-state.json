@@ -1,212 +1,1046 @@
 {
-  "schema": "mac-control-task-manifest/v1",
+  "schema": "mac-control-task-manifest/v4",
   "repository_id": "repo-9d391fb754b67008",
   "repository_name": "mac-control",
   "applicability": "applicable",
-  "applicability_reason": "mac-control packages the supported macOS daemon status item and approval HUD; this manifest records its supported user-facing workflow catalog while live and measured evidence remain outstanding.",
+  "applicability_reason": "Mac Control exposes a native Control Center with app-owned Accessibility identifiers plus typed daemon and CLI command identities whose responses carry explicit state, provenance, and independent readbacks.",
   "app": {
     "name": "macctld",
     "bundle_id": "com.jakyeamos.macctl.daemon"
   },
-  "criteria": {
-    "stable_identity": true,
-    "correct_semantics": true,
-    "observable_state": true,
-    "useful_hierarchy": true,
-    "efficient_navigation": true,
-    "verifiable_outcomes": true,
-    "route_flexibility": true,
-    "stable_change_behavior": true
-  },
+  "criteria": {},
   "tasks": [
     {
+      "surface_kind": "native_app_ui",
+      "focus_policy": "foreground",
+      "foreground_postcondition": "target_foreground",
+      "fallback_policy": "fresh_state_handoff",
+      "change_states": [
+        "permission_unavailable"
+      ],
+      "change_state_exemptions": {
+        "loading": "Snapshot construction is synchronous.",
+        "modal": "The Control Center is a popover.",
+        "disabled": "The queue remains readable when empty or degraded."
+      },
+      "navigation_strategy": "direct_semantic",
+      "route_candidates": [
+        {
+          "id": "mac-control-ax",
+          "provider": "mac_control",
+          "method": "accessibility",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "computer-pointer",
+          "provider": "computer_use",
+          "method": "pointer",
+          "interaction_mode": "pointer"
+        }
+      ],
+      "shortcut_acceleration": {
+        "disposition": "not_applicable",
+        "reason": "No task-specific direct shortcut or reversible shortcut assignment surface is implemented."
+      },
       "task_id": "inspect-approval-window",
       "stable_target_id": "macctl.approval.window",
-      "hierarchy": "macctl > approval > window",
-      "semantic_action": "inspect pending approvals",
-      "observable_postcondition": "Approval records, risk, expiry, and state are readable",
+      "hierarchy": "Mac Control > Menu bar > Control Center > Approvals",
+      "semantic_action": "focus",
+      "observable_postcondition": "The Control Center exposes the approval queue count, risk, expiry, health, and any action error without exposing approval tokens",
       "observable_states": [
         "enabled",
         "focused",
-        "selected",
-        "expanded",
         "visible",
-        "loading",
         "completed"
       ],
-      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
-      "eligible_routes": [
-        "native_api",
-        "adapter",
-        "accessibility",
-        "keyboard"
-      ],
-      "selected_route": "adapter",
-      "change_states": [
-        "loading",
-        "modal",
-        "disabled",
-        "permission_unavailable"
-      ],
+      "state_exemptions": {
+        "selected": "The queue is a read-only container.",
+        "expanded": "The popover is opened before the queue is focused.",
+        "loading": "The snapshot is built synchronously before presentation."
+      },
       "accessibility": {
         "identifier": "macctl.approval.window",
-        "label": "Approval list",
-        "role": "AXWebArea",
-        "required_actions": [
-          "AXFocus"
-        ]
+        "label": "Mac Control approval list",
+        "role": "AXGroup"
+      },
+      "verification_oracle": {
+        "oracle_id": "inspect-approval-window.task-state",
+        "kind": "task_state",
+        "expected_state": "approval_count_reported",
+        "independent_readback": true
+      },
+      "semantic_evidence": {
+        "stable_identity": {
+          "level": "source_grounded",
+          "claims": {
+            "selector_kind": "ax_identifier",
+            "selector_value": "macctl.approval.window",
+            "scope": "macctl-native-control-plane",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "root.setAccessibilityIdentifier(\"macctl.approval.window\")",
+              "evidence_tokens": [
+                "root.setAccessibilityLabel(\"Mac Control approval list\")",
+                "makePopover"
+              ]
+            }
+          ]
+        },
+        "correct_semantics": {
+          "level": "source_grounded",
+          "claims": {
+            "role": "AXGroup",
+            "accessible_name": "Mac Control approval list",
+            "action": "focus"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "root.setAccessibilityIdentifier(\"macctl.approval.window\")",
+              "evidence_tokens": [
+                "root.setAccessibilityLabel(\"Mac Control approval list\")",
+                "makePopover"
+              ]
+            }
+          ]
+        },
+        "observable_state": {
+          "level": "source_grounded",
+          "claims": {
+            "property": "data-task-state",
+            "unavailable_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "approvalHeading.setAccessibilityIdentifier(\"macctl.approval.count\")",
+              "evidence_tokens": [
+                "APPROVALS · \\(approvals.count)",
+                "No approvals are waiting."
+              ]
+            }
+          ]
+        },
+        "useful_hierarchy": {
+          "level": "source_grounded",
+          "claims": {
+            "container": "macctl-native-control-plane",
+            "relationship": "Mac Control > Menu bar > Control Center > Approvals",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "root.setAccessibilityIdentifier(\"macctl.approval.window\")",
+              "evidence_tokens": [
+                "root.setAccessibilityLabel(\"Mac Control approval list\")",
+                "makePopover"
+              ]
+            }
+          ]
+        },
+        "efficient_navigation": {
+          "level": "source_grounded",
+          "claims": {
+            "strategy": "direct_semantic",
+            "entry_point": "macctl.approval.window"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "root.setAccessibilityIdentifier(\"macctl.approval.window\")",
+              "evidence_tokens": [
+                "root.setAccessibilityLabel(\"Mac Control approval list\")",
+                "makePopover"
+              ]
+            }
+          ]
+        },
+        "verifiable_outcomes": {
+          "level": "source_grounded",
+          "claims": {
+            "readback_provider": "mac_control",
+            "property": "data-task-state",
+            "operator": "equals",
+            "expected": "approval_count_reported"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "let presentation = ControlCenterPresentation.make(snapshot: snapshot)",
+              "evidence_tokens": [
+                "updateStatusItem(presentation)",
+                "makePopover(snapshot: snapshot, approvals: approvals)"
+              ]
+            }
+          ]
+        },
+        "route_flexibility": {
+          "level": "source_grounded",
+          "claims": {
+            "primary_provider": "mac_control",
+            "secondary_provider": "computer_use",
+            "fallback_policy": "fresh_state_handoff"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "root.setAccessibilityIdentifier(\"macctl.approval.window\")",
+              "evidence_tokens": [
+                "root.setAccessibilityLabel(\"Mac Control approval list\")",
+                "makePopover"
+              ]
+            }
+          ]
+        },
+        "stable_change_behavior": {
+          "level": "source_grounded",
+          "claims": {
+            "scenarios": "loading,modal,disabled,permission_unavailable",
+            "failure_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/ApprovalHUD.swift",
+              "anchor": "let health = missing.isEmpty",
+              "evidence_tokens": [
+                "Needs attention",
+                "actionError"
+              ]
+            }
+          ]
+        }
       }
     },
     {
+      "surface_kind": "native_app_ui",
+      "focus_policy": "foreground",
+      "foreground_postcondition": "target_foreground",
+      "fallback_policy": "none",
+      "change_states": [
+        "disabled",
+        "permission_unavailable"
+      ],
+      "change_state_exemptions": {
+        "loading": "The local request returns one response envelope.",
+        "modal": "Native approval authority is external to the command response."
+      },
+      "navigation_strategy": "direct_semantic",
+      "route_candidates": [
+        {
+          "id": "daemon-api",
+          "provider": "native",
+          "method": "native_api",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "typed-caller",
+          "provider": "caller",
+          "method": "adapter",
+          "interaction_mode": "semantic"
+        }
+      ],
+      "shortcut_acceleration": {
+        "disposition": "not_applicable",
+        "reason": "No task-specific direct shortcut or reversible shortcut assignment surface is implemented."
+      },
       "task_id": "approve-exact-plan",
-      "stable_target_id": "macctl.approval.exact-plan",
-      "hierarchy": "macctl > approval > exact-plan",
-      "semantic_action": "approve the exact task plan",
-      "observable_postcondition": "Approval is consumed only for matching plan and receipt is readable",
+      "stable_target_id": "approval.approve",
+      "hierarchy": "Mac Control > Typed daemon API > Approval > Exact task plan",
+      "semantic_action": "invoke",
+      "observable_postcondition": "The response reports approved=true, task ID, exact plan digest, operation ID, and bound approval evidence, or a typed approval failure",
       "observable_states": [
         "enabled",
-        "focused",
-        "selected",
-        "expanded",
-        "visible",
         "loading",
         "completed"
       ],
-      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
-      "eligible_routes": [
-        "native_api",
-        "adapter",
-        "accessibility",
-        "keyboard"
-      ],
-      "selected_route": "adapter",
-      "change_states": [
-        "loading",
-        "modal",
-        "disabled",
-        "permission_unavailable"
-      ],
+      "state_exemptions": {
+        "focused": "The typed command does not move UI focus.",
+        "selected": "Approval is a one-shot human-authorized action.",
+        "expanded": "The command has no disclosure state.",
+        "visible": "The response is machine-readable rather than an on-screen control."
+      },
       "accessibility": {
-        "identifier": "macctl.approval.exact-plan",
-        "label": "Approve exact plan",
-        "role": "AXButton",
-        "required_actions": [
-          "AXPress"
-        ]
+        "identifier": "approval.approve",
+        "label": "Approve exact task plan",
+        "role": "command"
+      },
+      "verification_oracle": {
+        "oracle_id": "approve-exact-plan.task-state",
+        "kind": "task_state",
+        "expected_state": "approved_true",
+        "independent_readback": true
+      },
+      "semantic_evidence": {
+        "stable_identity": {
+          "level": "source_grounded",
+          "claims": {
+            "selector_kind": "command_id",
+            "selector_value": "approval.approve",
+            "scope": "macctl-native-control-plane",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {",
+              "evidence_tokens": [
+                "let token = try requiredString",
+                "if token.hasPrefix(\"mct_\")"
+              ]
+            }
+          ]
+        },
+        "correct_semantics": {
+          "level": "source_grounded",
+          "claims": {
+            "role": "command",
+            "accessible_name": "Approve exact task plan",
+            "action": "invoke"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {",
+              "evidence_tokens": [
+                "let token = try requiredString",
+                "if token.hasPrefix(\"mct_\")"
+              ]
+            }
+          ]
+        },
+        "observable_state": {
+          "level": "source_grounded",
+          "claims": {
+            "property": "data-task-state",
+            "unavailable_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/TaskApprovalStore.swift",
+              "anchor": "public func validateApproved(",
+              "evidence_tokens": [
+                "TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs)",
+                "Task approval token does not match the exact task plan"
+              ]
+            }
+          ]
+        },
+        "useful_hierarchy": {
+          "level": "source_grounded",
+          "claims": {
+            "container": "macctl-native-control-plane",
+            "relationship": "Mac Control > Typed daemon API > Approval > Exact task plan",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {",
+              "evidence_tokens": [
+                "let token = try requiredString",
+                "if token.hasPrefix(\"mct_\")"
+              ]
+            }
+          ]
+        },
+        "efficient_navigation": {
+          "level": "source_grounded",
+          "claims": {
+            "strategy": "direct_semantic",
+            "entry_point": "approval.approve"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {",
+              "evidence_tokens": [
+                "let token = try requiredString",
+                "if token.hasPrefix(\"mct_\")"
+              ]
+            }
+          ]
+        },
+        "verifiable_outcomes": {
+          "level": "source_grounded",
+          "claims": {
+            "readback_provider": "native",
+            "property": "data-task-state",
+            "operator": "equals",
+            "expected": "approved_true"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "message: \"Task approval was bound to the exact serialized plan\"",
+              "evidence_tokens": [
+                "\"approved\": .bool(true)",
+                "\"plan_digest\": .string(prepared.planDigest)"
+              ]
+            }
+          ]
+        },
+        "route_flexibility": {
+          "level": "source_grounded",
+          "claims": {
+            "primary_provider": "native",
+            "secondary_provider": "caller",
+            "fallback_policy": "none"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func approve(_ request: RequestEnvelope) throws -> ResponseEnvelope {",
+              "evidence_tokens": [
+                "let token = try requiredString",
+                "if token.hasPrefix(\"mct_\")"
+              ]
+            }
+          ]
+        },
+        "stable_change_behavior": {
+          "level": "source_grounded",
+          "claims": {
+            "scenarios": "loading,modal,disabled,permission_unavailable",
+            "failure_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/TaskApprovalStore.swift",
+              "anchor": "case .mismatch: return \"Task approval token does not match the exact task plan\"",
+              "evidence_tokens": [
+                "case .expired",
+                "case .alreadyUsed"
+              ]
+            }
+          ]
+        }
       }
     },
     {
+      "surface_kind": "native_app_ui",
+      "focus_policy": "background",
+      "foreground_postcondition": "unrelated_foreground_preserved",
+      "fallback_policy": "none",
+      "change_states": [
+        "loading",
+        "permission_unavailable"
+      ],
+      "change_state_exemptions": {
+        "modal": "The audit is non-modal.",
+        "disabled": "Invalid input returns typed findings instead of a disabled command."
+      },
+      "navigation_strategy": "direct_semantic",
+      "route_candidates": [
+        {
+          "id": "daemon-api",
+          "provider": "native",
+          "method": "native_api",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "cli",
+          "provider": "caller",
+          "method": "adapter",
+          "interaction_mode": "semantic"
+        }
+      ],
+      "shortcut_acceleration": {
+        "disposition": "not_applicable",
+        "reason": "No task-specific direct shortcut or reversible shortcut assignment surface is implemented."
+      },
       "task_id": "audit-ideal-state",
-      "stable_target_id": "macctl.ideal-state.audit",
-      "hierarchy": "macctl > ideal-state > audit",
-      "semantic_action": "run ideal-state audit",
-      "observable_postcondition": "Criteria, task contracts, and explicit pass/fail are readable",
+      "stable_target_id": "ideal-state.audit",
+      "hierarchy": "Mac Control > CLI > Ideal state > Audit",
+      "semantic_action": "invoke",
+      "observable_postcondition": "The response reports manifest_valid, structural_valid, finding_count, and redacted evidence after bounded Accessibility inspection",
       "observable_states": [
         "enabled",
-        "focused",
-        "selected",
-        "expanded",
-        "visible",
         "loading",
         "completed"
       ],
-      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
-      "eligible_routes": [
-        "native_api",
-        "adapter",
-        "accessibility",
-        "keyboard"
-      ],
-      "selected_route": "adapter",
-      "change_states": [
-        "loading",
-        "modal",
-        "disabled",
-        "permission_unavailable"
-      ],
+      "state_exemptions": {
+        "focused": "The audit preserves unrelated foreground state.",
+        "selected": "The audit is a read-only command.",
+        "expanded": "The command has no disclosure state.",
+        "visible": "The result is a JSON response."
+      },
       "accessibility": {
-        "identifier": "macctl.ideal-state.audit",
+        "identifier": "ideal-state.audit",
         "label": "Ideal-state audit",
-        "role": "AXWebArea",
-        "required_actions": [
-          "AXFocus"
-        ]
+        "role": "command"
+      },
+      "verification_oracle": {
+        "oracle_id": "audit-ideal-state.task-state",
+        "kind": "task_state",
+        "expected_state": "structural_valid_true",
+        "independent_readback": true
+      },
+      "semantic_evidence": {
+        "stable_identity": {
+          "level": "source_grounded",
+          "claims": {
+            "selector_kind": "command_id",
+            "selector_value": "ideal-state.audit",
+            "scope": "macctl-native-control-plane",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"ideal-state.audit\"",
+              "evidence_tokens": [
+                "Usage: macctl ideal-state validate|audit",
+                "manifestValue"
+              ]
+            }
+          ]
+        },
+        "correct_semantics": {
+          "level": "source_grounded",
+          "claims": {
+            "role": "command",
+            "accessible_name": "Ideal-state audit",
+            "action": "invoke"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"ideal-state.audit\"",
+              "evidence_tokens": [
+                "Usage: macctl ideal-state validate|audit",
+                "manifestValue"
+              ]
+            }
+          ]
+        },
+        "observable_state": {
+          "level": "source_grounded",
+          "claims": {
+            "property": "data-task-state",
+            "unavailable_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "let validation = MacControlIdealStateManifestValidator.validate(manifest)",
+              "evidence_tokens": [
+                "var structuralValid = validation.valid",
+                "accessibilityTreeInspector.audit"
+              ]
+            }
+          ]
+        },
+        "useful_hierarchy": {
+          "level": "source_grounded",
+          "claims": {
+            "container": "macctl-native-control-plane",
+            "relationship": "Mac Control > CLI > Ideal state > Audit",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"ideal-state.audit\"",
+              "evidence_tokens": [
+                "Usage: macctl ideal-state validate|audit",
+                "manifestValue"
+              ]
+            }
+          ]
+        },
+        "efficient_navigation": {
+          "level": "source_grounded",
+          "claims": {
+            "strategy": "direct_semantic",
+            "entry_point": "ideal-state.audit"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"ideal-state.audit\"",
+              "evidence_tokens": [
+                "Usage: macctl ideal-state validate|audit",
+                "manifestValue"
+              ]
+            }
+          ]
+        },
+        "verifiable_outcomes": {
+          "level": "source_grounded",
+          "claims": {
+            "readback_provider": "native",
+            "property": "data-task-state",
+            "operator": "equals",
+            "expected": "structural_valid_true"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "kind: \"ideal_state_audit\"",
+              "evidence_tokens": [
+                "\"manifest_valid\": .bool(validation.valid)",
+                "\"structural_valid\": .bool(structuralValid)",
+                "\"redacted\": .bool(true)"
+              ]
+            }
+          ]
+        },
+        "route_flexibility": {
+          "level": "source_grounded",
+          "claims": {
+            "primary_provider": "native",
+            "secondary_provider": "caller",
+            "fallback_policy": "none"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"ideal-state.audit\"",
+              "evidence_tokens": [
+                "Usage: macctl ideal-state validate|audit",
+                "manifestValue"
+              ]
+            }
+          ]
+        },
+        "stable_change_behavior": {
+          "level": "source_grounded",
+          "claims": {
+            "scenarios": "loading,modal,disabled,permission_unavailable",
+            "failure_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "code: \"invalid_manifest\"",
+              "evidence_tokens": [
+                "message: error",
+                "finding_count"
+              ]
+            }
+          ]
+        }
       }
     },
     {
+      "surface_kind": "native_app_ui",
+      "focus_policy": "background",
+      "foreground_postcondition": "unrelated_foreground_preserved",
+      "fallback_policy": "none",
+      "change_states": [
+        "loading",
+        "permission_unavailable"
+      ],
+      "change_state_exemptions": {
+        "modal": "Inspection is non-modal.",
+        "disabled": "Unavailable apps or permissions return typed failures."
+      },
+      "navigation_strategy": "direct_semantic",
+      "route_candidates": [
+        {
+          "id": "daemon-api",
+          "provider": "native",
+          "method": "native_api",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "cli",
+          "provider": "caller",
+          "method": "adapter",
+          "interaction_mode": "semantic"
+        }
+      ],
+      "shortcut_acceleration": {
+        "disposition": "not_applicable",
+        "reason": "No task-specific direct shortcut or reversible shortcut assignment surface is implemented."
+      },
       "task_id": "inspect-accessibility-tree",
-      "stable_target_id": "macctl.accessibility.tree",
-      "hierarchy": "macctl > accessibility > tree",
-      "semantic_action": "inspect the accessibility tree",
-      "observable_postcondition": "Target hierarchy and stable identifiers are readable",
+      "stable_target_id": "accessibility.tree",
+      "hierarchy": "Mac Control > CLI > Accessibility > Bounded tree",
+      "semantic_action": "invoke",
+      "observable_postcondition": "The response returns a bounded redacted tree or a typed missing-target or permission failure",
       "observable_states": [
         "enabled",
-        "focused",
-        "selected",
-        "expanded",
-        "visible",
         "loading",
         "completed"
       ],
-      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
-      "eligible_routes": [
-        "native_api",
-        "adapter",
-        "accessibility",
-        "keyboard"
-      ],
-      "selected_route": "adapter",
-      "change_states": [
-        "loading",
-        "modal",
-        "disabled",
-        "permission_unavailable"
-      ],
+      "state_exemptions": {
+        "focused": "Tree inspection is read-only and preserves foreground state.",
+        "selected": "The tree is a diagnostic response.",
+        "expanded": "Depth is a request bound, not UI disclosure.",
+        "visible": "The result is structured JSON."
+      },
       "accessibility": {
-        "identifier": "macctl.accessibility.tree",
+        "identifier": "accessibility.tree",
         "label": "Accessibility tree",
-        "role": "AXWebArea",
-        "required_actions": [
-          "AXFocus"
-        ]
+        "role": "command"
+      },
+      "verification_oracle": {
+        "oracle_id": "inspect-accessibility-tree.task-state",
+        "kind": "task_state",
+        "expected_state": "redacted_tree_returned",
+        "independent_readback": true
+      },
+      "semantic_evidence": {
+        "stable_identity": {
+          "level": "source_grounded",
+          "claims": {
+            "selector_kind": "command_id",
+            "selector_value": "accessibility.tree",
+            "scope": "macctl-native-control-plane",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"accessibility.tree\"",
+              "evidence_tokens": [
+                "Usage: macctl accessibility tree|audit",
+                "max_nodes",
+                "max_depth"
+              ]
+            }
+          ]
+        },
+        "correct_semantics": {
+          "level": "source_grounded",
+          "claims": {
+            "role": "command",
+            "accessible_name": "Accessibility tree",
+            "action": "invoke"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"accessibility.tree\"",
+              "evidence_tokens": [
+                "Usage: macctl accessibility tree|audit",
+                "max_nodes",
+                "max_depth"
+              ]
+            }
+          ]
+        },
+        "observable_state": {
+          "level": "source_grounded",
+          "claims": {
+            "property": "data-task-state",
+            "unavailable_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "case \"accessibility.tree\":",
+              "evidence_tokens": [
+                "return try accessibilityTree(request)",
+                "case \"accessibility.audit\":"
+              ]
+            }
+          ]
+        },
+        "useful_hierarchy": {
+          "level": "source_grounded",
+          "claims": {
+            "container": "macctl-native-control-plane",
+            "relationship": "Mac Control > CLI > Accessibility > Bounded tree",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"accessibility.tree\"",
+              "evidence_tokens": [
+                "Usage: macctl accessibility tree|audit",
+                "max_nodes",
+                "max_depth"
+              ]
+            }
+          ]
+        },
+        "efficient_navigation": {
+          "level": "source_grounded",
+          "claims": {
+            "strategy": "direct_semantic",
+            "entry_point": "accessibility.tree"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"accessibility.tree\"",
+              "evidence_tokens": [
+                "Usage: macctl accessibility tree|audit",
+                "max_nodes",
+                "max_depth"
+              ]
+            }
+          ]
+        },
+        "verifiable_outcomes": {
+          "level": "source_grounded",
+          "claims": {
+            "readback_provider": "native",
+            "property": "data-task-state",
+            "operator": "equals",
+            "expected": "redacted_tree_returned"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func accessibilityTree(",
+              "evidence_tokens": [
+                "redacted",
+                "maxNodes",
+                "maxDepth"
+              ]
+            }
+          ]
+        },
+        "route_flexibility": {
+          "level": "source_grounded",
+          "claims": {
+            "primary_provider": "native",
+            "secondary_provider": "caller",
+            "fallback_policy": "none"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"accessibility.tree\"",
+              "evidence_tokens": [
+                "Usage: macctl accessibility tree|audit",
+                "max_nodes",
+                "max_depth"
+              ]
+            }
+          ]
+        },
+        "stable_change_behavior": {
+          "level": "source_grounded",
+          "claims": {
+            "scenarios": "loading,modal,disabled,permission_unavailable",
+            "failure_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
+              "anchor": "case permissionDenied = \"permission_denied\"",
+              "evidence_tokens": [
+                "targetMissing",
+                "actionUnavailable"
+              ]
+            }
+          ]
+        }
       }
     },
     {
-      "task_id": "prepare-exact-task",
-      "stable_target_id": "macctl.task.prepare",
-      "hierarchy": "macctl > task > prepare",
-      "semantic_action": "prepare an exact task plan",
-      "observable_postcondition": "Plan digest, approval requirement, and expiry are readable",
-      "observable_states": [
-        "enabled",
-        "focused",
-        "selected",
-        "expanded",
-        "visible",
-        "loading",
-        "completed"
-      ],
-      "navigation_strategy": "use the native or adapter target when available, with Accessibility and keyboard as eligible fallbacks",
-      "eligible_routes": [
-        "native_api",
-        "adapter",
-        "accessibility",
-        "keyboard"
-      ],
-      "selected_route": "adapter",
+      "surface_kind": "native_app_ui",
+      "focus_policy": "background",
+      "foreground_postcondition": "unrelated_foreground_preserved",
+      "fallback_policy": "none",
       "change_states": [
         "loading",
-        "modal",
         "disabled",
         "permission_unavailable"
       ],
+      "change_state_exemptions": {
+        "modal": "The approval UI is a later human-controlled surface."
+      },
+      "navigation_strategy": "direct_semantic",
+      "route_candidates": [
+        {
+          "id": "daemon-api",
+          "provider": "native",
+          "method": "native_api",
+          "interaction_mode": "semantic"
+        },
+        {
+          "id": "cli",
+          "provider": "caller",
+          "method": "adapter",
+          "interaction_mode": "semantic"
+        }
+      ],
+      "shortcut_acceleration": {
+        "disposition": "not_applicable",
+        "reason": "No task-specific direct shortcut or reversible shortcut assignment surface is implemented."
+      },
+      "task_id": "prepare-exact-task",
+      "stable_target_id": "task.prepare",
+      "hierarchy": "Mac Control > CLI > Task > Prepare exact plan",
+      "semantic_action": "invoke",
+      "observable_postcondition": "The response reports prepared status, task ID, exact plan digest, expiring operation ID, and approval-required evidence",
+      "observable_states": [
+        "enabled",
+        "loading",
+        "completed"
+      ],
+      "state_exemptions": {
+        "focused": "Preparation does not move foreground focus.",
+        "selected": "Preparation creates bounded authority but does not select UI.",
+        "expanded": "The command has no disclosure state.",
+        "visible": "The response is structured JSON."
+      },
       "accessibility": {
-        "identifier": "macctl.task.prepare",
-        "label": "Prepare task",
-        "role": "AXWebArea",
-        "required_actions": [
-          "AXFocus"
-        ]
+        "identifier": "task.prepare",
+        "label": "Prepare exact task plan",
+        "role": "command"
+      },
+      "verification_oracle": {
+        "oracle_id": "prepare-exact-task.task-state",
+        "kind": "task_state",
+        "expected_state": "prepared",
+        "independent_readback": true
+      },
+      "semantic_evidence": {
+        "stable_identity": {
+          "level": "source_grounded",
+          "claims": {
+            "selector_kind": "command_id",
+            "selector_value": "task.prepare",
+            "scope": "macctl-native-control-plane",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"task.prepare\"",
+              "evidence_tokens": [
+                "Usage: macctl task prepare --plan-stdin",
+                "localFallback: false"
+              ]
+            }
+          ]
+        },
+        "correct_semantics": {
+          "level": "source_grounded",
+          "claims": {
+            "role": "command",
+            "accessible_name": "Prepare exact task plan",
+            "action": "invoke"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"task.prepare\"",
+              "evidence_tokens": [
+                "Usage: macctl task prepare --plan-stdin",
+                "localFallback: false"
+              ]
+            }
+          ]
+        },
+        "observable_state": {
+          "level": "source_grounded",
+          "claims": {
+            "property": "data-task-state",
+            "unavailable_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "private func prepareTask(_ request: RequestEnvelope)",
+              "evidence_tokens": [
+                "try taskRunner.prepare",
+                "status: .prepared"
+              ]
+            }
+          ]
+        },
+        "useful_hierarchy": {
+          "level": "source_grounded",
+          "claims": {
+            "container": "macctl-native-control-plane",
+            "relationship": "Mac Control > CLI > Task > Prepare exact plan",
+            "uniqueness": "exactly_one"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"task.prepare\"",
+              "evidence_tokens": [
+                "Usage: macctl task prepare --plan-stdin",
+                "localFallback: false"
+              ]
+            }
+          ]
+        },
+        "efficient_navigation": {
+          "level": "source_grounded",
+          "claims": {
+            "strategy": "direct_semantic",
+            "entry_point": "task.prepare"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"task.prepare\"",
+              "evidence_tokens": [
+                "Usage: macctl task prepare --plan-stdin",
+                "localFallback: false"
+              ]
+            }
+          ]
+        },
+        "verifiable_outcomes": {
+          "level": "source_grounded",
+          "claims": {
+            "readback_provider": "native",
+            "property": "data-task-state",
+            "operator": "equals",
+            "expected": "prepared"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/MacCtlService.swift",
+              "anchor": "message: \"Exact task plan prepared; approval is required before execution\"",
+              "evidence_tokens": [
+                "status: .prepared",
+                "operationID: prepared.approval.operationID"
+              ]
+            }
+          ]
+        },
+        "route_flexibility": {
+          "level": "source_grounded",
+          "claims": {
+            "primary_provider": "native",
+            "secondary_provider": "caller",
+            "fallback_policy": "none"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCLI/main.swift",
+              "anchor": "method: \"task.prepare\"",
+              "evidence_tokens": [
+                "Usage: macctl task prepare --plan-stdin",
+                "localFallback: false"
+              ]
+            }
+          ]
+        },
+        "stable_change_behavior": {
+          "level": "source_grounded",
+          "claims": {
+            "scenarios": "loading,modal,disabled,permission_unavailable",
+            "failure_behavior": "block_and_explain"
+          },
+          "source_refs": [
+            {
+              "path": "Sources/MacCtlCore/TaskControl.swift",
+              "anchor": "Sensitive step \\(trimmedID) must declare approval_reason",
+              "evidence_tokens": [
+                "timeout must be between",
+                "risk",
+                "validateAction"
+              ]
+            }
+          ]
+        }
       }
     }
   ]
