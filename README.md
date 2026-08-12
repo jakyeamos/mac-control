@@ -151,6 +151,12 @@ peer; it is not a safety verdict or approval. There is deliberately no Allow/Den
 Mac Control. A source can open only through a registered Codex opener; otherwise the reference
 is informational. An unannounced external dialog remains unverified in v1.
 
+The native Control Center publishes stable Accessibility identifiers for semantic inspection:
+`macctl.control-center.status`, `macctl.approval.window`, `macctl.control-center.health`, and
+`macctl.approval.count`. Exact approval buttons append the immutable operation ID to
+`macctl.approval.approve.` or `macctl.approval.deny.`. The operation ID still binds the private
+token lookup; the Accessibility identifier exposes no token.
+
 ## Safety boundary
 
 Workflows use `prepare -> approve -> execute -> verify`. Sensitive actions must

@@ -62,6 +62,7 @@ public final class ApprovalHUD: NSObject {
             item.button?.target = self
             item.button?.action = #selector(self.toggleControlCenter)
             item.button?.sendAction(on: [.leftMouseUp])
+            item.button?.setAccessibilityIdentifier("macctl.control-center.status")
             self.statusItem = item
             self.capsLockMonitor.onDoubleTap = { [weak self] in
                 guard let self, self.hasAttention() else { return }
@@ -251,6 +252,8 @@ public final class ApprovalHUD: NSObject {
         root.spacing = 10
         root.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         root.translatesAutoresizingMaskIntoConstraints = false
+        root.setAccessibilityIdentifier("macctl.approval.window")
+        root.setAccessibilityLabel("Mac Control approval list")
 
         let heading = NSTextField(labelWithString: "Mac Control")
         heading.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -261,6 +264,7 @@ public final class ApprovalHUD: NSObject {
             ? "Daemon ready · permissions available"
             : "Needs attention · " + missing.map(\.name).joined(separator: ", ")
         let healthLabel = secondaryLabel(health)
+        healthLabel.setAccessibilityIdentifier("macctl.control-center.health")
         healthLabel.textColor = missing.isEmpty ? .secondaryLabelColor : .systemRed
         root.addArrangedSubview(healthLabel)
 
@@ -338,7 +342,9 @@ public final class ApprovalHUD: NSObject {
         }
 
         root.addArrangedSubview(separator())
-        root.addArrangedSubview(sectionLabel("APPROVALS · \(approvals.count)"))
+        let approvalHeading = sectionLabel("APPROVALS · \(approvals.count)")
+        approvalHeading.setAccessibilityIdentifier("macctl.approval.count")
+        root.addArrangedSubview(approvalHeading)
         if approvals.isEmpty {
             root.addArrangedSubview(secondaryLabel("No approvals are waiting."))
         } else {
@@ -404,12 +410,14 @@ public final class ApprovalHUD: NSObject {
         let approvalTitle = approval.handoffTarget.map { "Approve & Focus \($0.applicationName)" } ?? "Approve"
         let approve = MouseOnlyButton(title: approvalTitle, target: self, action: #selector(approve(_:)))
         approve.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
+        approve.setAccessibilityIdentifier("macctl.approval.approve.\(approval.operationID)")
         approve.bezelStyle = .rounded
         approve.focusRingType = .none
         approve.keyEquivalent = ""
         approve.setAccessibilityLabel(approvalTitle + ", mouse activation required")
         let deny = NSButton(title: "Deny", target: self, action: #selector(deny(_:)))
         deny.identifier = NSUserInterfaceItemIdentifier(approval.operationID)
+        deny.setAccessibilityIdentifier("macctl.approval.deny.\(approval.operationID)")
         deny.bezelStyle = .inline
         deny.focusRingType = .none
         deny.keyEquivalent = ""

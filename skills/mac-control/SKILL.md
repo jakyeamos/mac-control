@@ -445,6 +445,11 @@ app-scoped action or a declared task plan, not by replaying a split sequence.
   keyboard and trackpad untouched and clears on end, expiry, Stop & Release, or shutdown. A
   session is never inferred from one action, and the action still needs its normal foreground and
   postcondition checks. Physical keyboard `Frozen` remains higher-salience than focus.
+- When inspecting Mac Control's own native Control Center, prefer its published Accessibility
+  identifiers: `macctl.control-center.status`, `macctl.approval.window`,
+  `macctl.control-center.health`, and `macctl.approval.count`. Exact approval and denial controls
+  use `macctl.approval.approve.<operation-id>` and `macctl.approval.deny.<operation-id>`; confirm
+  the operation ID against the prepared task and never treat the identifier as approval authority.
 - Never manufacture a successful receipt or substitute build/test evidence for a live GUI
   result.
 

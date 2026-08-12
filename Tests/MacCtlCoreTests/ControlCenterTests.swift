@@ -32,8 +32,13 @@ final class ControlCenterTests: XCTestCase {
         guard let view = hud.popover.contentViewController?.view else {
             return XCTFail("Control Center popover content was not built")
         }
+        XCTAssertEqual(view.accessibilityIdentifier(), "macctl.approval.window")
         let buttons = allSubviews(of: view).compactMap { $0 as? NSButton }
         XCTAssertFalse(buttons.isEmpty)
+        XCTAssertEqual(
+            buttons.first(where: { $0.title == "Approve" })?.accessibilityIdentifier(),
+            "macctl.approval.approve.approval-1"
+        )
         for button in buttons {
             XCTAssertEqual(button.focusRingType, .none, "Unexpected focus ring on \(button.title)")
         }
