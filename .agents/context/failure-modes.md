@@ -12,6 +12,8 @@ Expected safety outcomes are explicit:
 - foreground/focus mismatch: stop the workflow, record verification failure,
   and investigate the named-app or focus policy rather than retrying global
   input.
+- `target_changed`: treat the captured target as terminal, refresh the target
+  identity, and never replay the stale action.
 - `vscode_diagnostics_blocked`: stop when the disposable VS Code fixture,
   extension snapshot, exact PID/bundle/path, freshness, or redaction proof is
   missing. The native diagnostics route is preferred; do not substitute global

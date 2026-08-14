@@ -357,7 +357,7 @@ on `control.perform` so a provider handoff cannot be hidden inside a batch.
 
 Every control response includes a provider-neutral `outcome` when available. Treat
 `verified_success` as completion only when the verification state is `passed`. Treat
-`target_missing`, `target_ambiguous`, `action_unavailable`, `action_failed`,
+`target_missing`, `target_ambiguous`, `target_changed`, `action_unavailable`, `action_failed`,
 `permission_blocked`, `no_observed_change`, `verification_unavailable`, and
 `foreground_race` as distinct states; do not infer retryability from an error string.
 

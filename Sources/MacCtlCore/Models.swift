@@ -160,6 +160,10 @@ public enum AgentActionOutcomeState: String, Codable, Equatable {
     case verifiedSuccess = "verified_success"
     case targetMissing = "target_missing"
     case targetAmbiguous = "target_ambiguous"
+    /// Retained so receipts written by the earlier target-verification
+    /// contract remain readable after the state was split into finer-grained
+    /// recovery categories.
+    case targetChanged = "target_changed"
     case targetResolutionIncomplete = "target_resolution_incomplete"
     case actionUnavailable = "action_unavailable"
     case actionFailed = "action_failed"
