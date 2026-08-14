@@ -7,6 +7,10 @@ Read this router before repository work.
 - For agent-facing macOS control routing or live `macctl` use, load
   `skills/mac-control/SKILL.md`; a mature direct CLI, API, typed connector, or browser DOM
   route remains preferred when it covers the exact task.
+- Before assessing Mac Control, read `macctl control limitations --json` (the local
+  versioned call/no-call ledger). Treat `do_not_call` and `handoff_only` entries as routing
+  boundaries, and treat `call_with_constraints` entries as requiring their listed exact
+  route and postcondition; the ledger never grants execution authority.
 - Exact process and window identities remain read-only for direct app-level
   commands. For a safe, zero-focus semantic button press, use the separate
   `action.resolve --intent-stdin` then `action.run <resolution-id>` front door.

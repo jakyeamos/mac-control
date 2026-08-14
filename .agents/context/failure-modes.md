@@ -21,6 +21,11 @@ Expected safety outcomes are explicit:
   addressable `AXApplication` root. Keep the result `blocked_unsupported`;
   build and launch a registered `.app` development bundle, then rediscover and
   rebind its PID. Do not classify this as a daemon or permission failure.
+- `control limitations` is the preflight boundary for known routing limits.
+  Respect `do_not_call` and `handoff_only` entries before running a live probe;
+  `call_with_constraints` entries require the listed route, authority, and
+  postcondition. A ledger entry is not live evidence and must not be used to
+  promote a stale or caller-supplied route.
 
 Use `doctor --json`, `status --json`, `receipts status --json`, and
 `release check --json` for diagnosis. Recovery may rebuild/reinstall the

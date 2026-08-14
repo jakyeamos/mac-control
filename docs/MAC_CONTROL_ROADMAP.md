@@ -82,6 +82,9 @@ Goal 1 deliverables:
 - Explicit promotion, demotion, invalidation, and stale-element handling.
 - Provider-aware scroll and action fallback, including Computer Use handoff
   after AX unavailable, ambiguous targeting, or no observed change.
+- A versioned local known-limitations ledger, exposed through
+  `control limitations` and the agent skill, so known call/no-call and handoff
+  boundaries are selected before live capability assessment.
 
 Goal 2 deliverables:
 

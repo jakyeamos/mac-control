@@ -16,4 +16,4 @@ remain the detailed product references.
 - Root `AGENTS.md` — always-loaded operating invariants.
 
 Never dump the repository into context. Follow the narrowest packet route and
-use the commands packet before running a gate. `last_reviewed: 2026-07-25`.
+use the commands packet before running a gate. `last_reviewed: 2026-08-14`.

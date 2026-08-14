@@ -84,6 +84,15 @@ class MacControlSkillTests(unittest.TestCase):
             "`blocked_unsupported`",
             "`app open <absolute-app-path>`",
             "Mac Control does not wrap a bare executable",
+            "Known limitations ledger",
+            "macctl control limitations --json",
+            "mac-control-limitations/v1",
+            "do_not_call",
+            "handoff_only",
+            "call_with_constraints",
+            "direct-interface-first",
+            "rendered-web-content",
+            "no-universal-fallback-ladder",
         ):
             self.assertIn(marker, text)
 
@@ -109,6 +118,11 @@ class MacControlSkillTests(unittest.TestCase):
     def test_reference_has_positive_negative_and_ambiguous_cases(self) -> None:
         text = ROUTING.read_text(encoding="utf-8")
         for marker in (
+            "Known-limitations preflight",
+            "control limitations --json",
+            "do_not_call",
+            "handoff_only",
+            "call_with_constraints",
             "Read `AppleKeyboardUIMode`",
             "claims web content through native Accessibility",
             "score `0/8`",

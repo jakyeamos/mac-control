@@ -126,6 +126,13 @@ menus, controls, dialogs, help, onboarding, and accessibility disclosures, but
 those leads are candidate planning evidence only. They never dispatch input or
 admit a route without independent measured-route evidence.
 
+Before that discovery boundary, `control limitations` exposes the local,
+versioned call/no-call ledger. It records known direct-provider boundaries,
+typed handoff-only cases, and constrained Mac Control routes so an agent does
+not spend live-probe time rediscovering a known dead end. The ledger is static
+routing guidance, not a capability profile, permission result, route authority,
+or substitute for current task-specific verification.
+
 Do not make AIOS, Career Ops, a remote API, or a TCP listener a runtime
 dependency. Callers may invoke this local control plane; ownership of their
 workflow and credentials remains outside this repository.
