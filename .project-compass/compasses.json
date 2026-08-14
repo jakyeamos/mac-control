@@ -8,8 +8,61 @@
       "path": "contract.json",
       "parent_id": null,
       "status": "active"
+    },
+    {
+      "id": "guarded-invocation",
+      "kind": "subsystem",
+      "path": "guarded-invocation.json",
+      "parent_id": "project",
+      "status": "draft"
+    },
+    {
+      "id": "focus-display-sessions",
+      "kind": "subsystem",
+      "path": "focus-display-sessions.json",
+      "parent_id": "project",
+      "status": "draft"
+    },
+    {
+      "id": "capability-evidence",
+      "kind": "subsystem",
+      "path": "capability-evidence.json",
+      "parent_id": "project",
+      "status": "draft"
+    },
+    {
+      "id": "distribution-agent-contract",
+      "kind": "subsystem",
+      "path": "distribution-agent-contract.json",
+      "parent_id": "project",
+      "status": "draft"
     }
   ],
-  "links": [],
-  "updated_at": "2026-08-14T23:11:30.026Z"
+  "links": [
+    {
+      "id": "guarded-invocation-to-focus-display-sessions",
+      "from": "guarded-invocation",
+      "to": "focus-display-sessions",
+      "kind": "shared-invariant",
+      "summary": "Focus and display work must inherit guarded invocation authority; exact invariant remains open.",
+      "status": "unknown"
+    },
+    {
+      "id": "guarded-invocation-to-capability-evidence",
+      "from": "guarded-invocation",
+      "to": "capability-evidence",
+      "kind": "depends-on",
+      "summary": "Invocation decisions depend on capability evidence; provider authority remains open.",
+      "status": "unknown"
+    },
+    {
+      "id": "capability-evidence-to-distribution-agent-contract",
+      "from": "capability-evidence",
+      "to": "distribution-agent-contract",
+      "kind": "handoff",
+      "summary": "Evidence informs the installed agent contract; publication and projection proof remain open.",
+      "status": "unknown"
+    }
+  ],
+  "updated_at": "2026-08-14T23:31:00Z"
 }

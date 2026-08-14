@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "project": {
+    "name": "Mac Control capability evidence",
+    "identity": "The Mac Control diagnostics and evidence flywheel.",
+    "audience": "Operators, agents, and quality consumers that need honest capability and verification evidence.",
+    "core_loop": "Audit a capability, record provider and source evidence, execute bounded verification when authorized, and preserve the result.",
+    "north_star": "Capability claims remain grounded in observable evidence and explicit provider limits.",
+    "not_this": [
+      "Claiming parity from an unsupported provider",
+      "Converting source identity into behavior proof",
+      "Mutating the machine while auditing capability"
+    ]
+  },
+  "scope": {
+    "id": "capability-evidence",
+    "kind": "subsystem",
+    "parent_id": "project",
+    "purpose": "Diagnose capabilities, capture provider-bound evidence, and preserve receipts that distinguish support from unsupported or unverified behavior.",
+    "boundary": "Owns accessibility diagnostics, capability audits, ideal-state semantics, operation receipts, and release evidence; control execution and agent skill distribution remain outside this child.",
+    "non_goals": [
+      "Claiming parity from an unsupported provider",
+      "Converting source identity into behavior proof",
+      "Mutating the machine while auditing capability"
+    ],
+    "parent_outcomes": [
+      "permission-aware-result",
+      "capability-evidence-flywheel"
+    ],
+    "paths": [
+      "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
+      "Sources/MacCtlCore/CapabilityAuditBatch.swift",
+      "Sources/MacCtlCore/IdealState.swift",
+      "Sources/MacCtlCore/OperationReceiptStore.swift",
+      "Sources/MacCtlCore/ReleaseEvidenceArchive.swift"
+    ]
+  },
+  "targets": {
+    "mvp": {
+      "definition": "The scoped boundary is explicitly ratified, its parent outcome is clear, and its smallest local proof is repeatable."
+    },
+    "complete_product": {
+      "definition": "The scoped boundary remains aligned through changes, interfaces, and user-visible or consumer-facing verification."
+    }
+  },
+  "pillars": [
+    {
+      "id": "capability-evidence-purpose",
+      "name": "Draft scoped purpose",
+      "outcomes": [
+        {
+          "id": "capability-evidence-aligned-boundary",
+          "name": "The Mac Control capability evidence boundary advances its parent outcome without silently taking on sibling responsibilities.",
+          "targets": [
+            "mvp",
+            "complete_product"
+          ],
+          "maturity": 25,
+          "confidence": "low",
+          "layers": {
+            "intended": "Drafted from explicit repository documentation; pending owner quiz and ratification.",
+            "planned": "Local proof and sibling contracts are pending the boundary decision.",
+            "implemented": "Observed implementation paths: Sources/MacCtlCore/AccessibilityDiagnostics.swift, Sources/MacCtlCore/CapabilityAuditBatch.swift, Sources/MacCtlCore/IdealState.swift, Sources/MacCtlCore/OperationReceiptStore.swift, Sources/MacCtlCore/ReleaseEvidenceArchive.swift.",
+            "verified": "No independently scoped end-to-end proof has been accepted yet."
+          },
+          "evidence": [
+            {
+              "ref": "README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "AGENTS.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": ".agents/context/README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "docs/MAC_CONTROL_ROADMAP.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            }
+          ],
+          "blockers": [
+            {
+              "kind": "product-decision",
+              "summary": "Owner must ratify, split, merge, or retire this draft child Compass through the realignment quiz before it becomes active truth."
+            },
+            {
+              "kind": "verification",
+              "summary": "An independently scoped local proof and its neighboring handoffs are not yet established."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_layers": {
+    "intended": [
+      {
+        "ref": "README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "AGENTS.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": ".agents/context/README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "docs/MAC_CONTROL_ROADMAP.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "planned": [],
+    "implemented": [
+      {
+        "ref": "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/CapabilityAuditBatch.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/IdealState.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/OperationReceiptStore.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/ReleaseEvidenceArchive.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "verified": []
+  },
+  "drift": [
+    {
+      "kind": "verification-gap",
+      "summary": "This child boundary is a draft derived from repository documentation and has not yet been ratified or independently verified.",
+      "status": "open",
+      "observed_at": "2026-08-14T23:31:00Z",
+      "evidence": [
+        {
+          "ref": "README.md",
+          "note": "Draft boundary needs explicit owner confirmation and local proof.",
+          "observed_at": "2026-08-14T23:31:00Z"
+        }
+      ]
+    }
+  ],
+  "updated_at": "2026-08-14T23:31:00Z"
+}
