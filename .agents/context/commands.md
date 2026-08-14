@@ -48,7 +48,11 @@ candidate through the local append-only lane:
 `macctl control limitations propose --stdin --json`. List candidates with
 `macctl control limitations proposals --json`. The store is owner-only, forces every candidate
 to `unproven`, and never changes the ledger or grants execution authority; promotion requires a
-reviewed source-controlled change.
+reviewed source-controlled change. Changes to this trigger or workflow are not complete until
+the source skill has been projected into `~/.agents/skills/mac-control/SKILL.md` with
+`python3 scripts/install_mac_control_skill.py install` and the installed `macctl` command
+surface has been checked. Run `python3 scripts/check_global_mac_control_projection.py` as the
+projection gate; a repository-only skill update is a deployment gap.
 
 For read-only runtime diagnostics, use the built CLI only after the package
 build: `swift run macctl doctor --json`, `capabilities --json`, `status

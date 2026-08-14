@@ -16,6 +16,11 @@ Read this router before repository work.
   `macctl control limitations proposals --json`. Proposals are owner-only, append-only,
   forced to `unproven`, and never change routing or execution authority until a reviewed
   source/docs/test change promotes them into the canonical ledger.
+- Agent-facing Mac Control skill, workflow, or trigger changes are incomplete until the
+  source skill is projected through `scripts/install_mac_control_skill.py` into
+  `~/.agents/skills/mac-control/SKILL.md`, `scripts/check_global_mac_control_projection.py`
+  passes, and the installed `macctl` command surface is checked; repository-local
+  instructions alone are not a completed trigger.
 - Exact process and window identities remain read-only for direct app-level
   commands. For a safe, zero-focus semantic button press, use the separate
   `action.resolve --intent-stdin` then `action.run <resolution-id>` front door.

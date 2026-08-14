@@ -31,6 +31,11 @@ Expected safety outcomes are explicit:
   canonical ledger from a live run. If the store accepts it, still read the
   canonical ledger for current routing; a candidate remains `unproven` until a
   reviewed source/docs/tests change.
+- A repository-only proposal-lane or trigger update is deployment drift. Project
+  the source skill into `~/.agents/skills/mac-control/SKILL.md` with the documented
+  installer, run `scripts/check_global_mac_control_projection.py`, and check the
+  installed `macctl` command surface before claiming the workflow is available to
+  agents.
 
 Use `doctor --json`, `status --json`, `receipts status --json`, and
 `release check --json` for diagnosis. Recovery may rebuild/reinstall the
