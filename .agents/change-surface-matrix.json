@@ -2,7 +2,7 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "mac-control"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-13",
+  "last_reviewed": "2026-08-14",
   "surfaces": [
     {
       "id": "matrix-maintenance",
@@ -20,6 +20,7 @@
     {"id": "swift-control-plane", "scope": "local", "path": "Sources/, Tests/, and scripts/", "owner": "repository-owner", "condition": "CLI, daemon, authority, action, or verification behavior changes", "operations": ["add", "change", "remove"], "validation": ["swift build", "swift test", "python3 scripts/check_environment_contract.py"], "status": "applicable"},
     {"id": "transient-safety-status-item", "scope": "local", "path": "Sources/MacCtlCore/ApprovalHUD.swift, Sources/MacCtlCore/ControlCenter.swift, Sources/MacCtlDaemon/main.swift, Tests/MacCtlCoreTests/ControlCenterTests.swift, README.md, AGENTS.md, .agents/context/, and skills/mac-control/SKILL.md", "owner": "repository-owner", "condition": "Menu-bar visibility, active-authority safety controls, health/lifecycle presentation, attention ownership, or Accessibility identifiers change", "operations": ["change", "remove"], "validation": ["swift test --filter ControlCenterTests", "swift test", "direct installed GUI verification of hidden idle, visible active authority, Stop & Release, lifecycle drain, and degraded health"], "status": "applicable"},
     {"id": "installed-control-surface", "scope": "external", "path": "installed macctl, daemon, and projected mac-control skill", "owner": "installation-owner", "condition": "public command, protocol, install, lifecycle, or skill contract changes", "operations": ["add", "change", "remove"], "validation": ["python3 -m unittest discover -s Tests/SkillTests", "macctl release check --json"], "status": "applicable"},
+    {"id": "installed-runtime-parity", "scope": "external", "path": ".pronto/installed-runtime-parity.json, owner-only install/process manifests, release check, Pronto repository projections", "owner": "Mac Control and Pronto integration owners", "condition": "build, install, process identity, PID validation, freshness, or parity state changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter InstalledRuntimeParityTests", "swift test --filter testReleaseGateRequiresEveryTierOneEvidenceDimension", "installed macctl release check --json", "Pronto repo projection readback"], "status": "applicable"},
     {"id": "ideal-state-consumers", "scope": "external", "path": ".mac-control/ideal-state.json, Quality Runner semantic source grounding, Pronto maturity display, and skills/mac-control/", "owner": "Mac Control, Quality Runner, and Pronto integration owners", "condition": "Ideal-state manifest schema, semantic claim, provider boundary, source-reference, score, or user-facing disposition changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter IdealStateTests", "uv run pytest -q tests/test_mac_control.py in Quality Runner", "Pronto mac_control_maturity tests and readback"], "status": "applicable"}
   ],
   "unresolved_surfaces": [],

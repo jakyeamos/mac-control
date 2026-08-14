@@ -25,6 +25,16 @@ selector must remain unchanged unless an intentional TCC migration is planned.
 Installation, daemon restart, and live GUI/device checks require user control;
 they are never run by the repository audit as side effects.
 
+Installation publishes `~/.local/share/macctl/runtime-parity-install.json`
+after codesigning and replacing the daemon bundle. Daemon startup publishes
+`~/Library/Application Support/macctl/runtime-parity-process.json`; shutdown
+removes only the manifest owned by that PID. Both are atomic owner-only files.
+The repository's `.pronto/installed-runtime-parity.json` binds these manifests
+to the installed executable. A changed install with an older active process is
+`restart_required`; missing source provenance is `unverifiable`. When installing
+outside the Git checkout, provide the exact revision through
+`MACCTL_SOURCE_REVISION`.
+
 Rollback is a forward, reviewable reinstall of the last verified package and
 its known-good commit. Stop the user daemon, install the prior packaged build,
 restart the LaunchAgent, and rerun `doctor --json`, receipt diagnostics, and

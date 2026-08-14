@@ -61,6 +61,7 @@ public struct ReleaseGateSnapshot {
     public let socketOwnerOnly: Bool
     public let networkListenerConfigured: Bool
     public let daemonError: String?
+    public let installedRuntimeParity: InstalledRuntimeParityStatus?
 
     public init(
         launchAgent: LaunchAgentStatus,
@@ -75,7 +76,8 @@ public struct ReleaseGateSnapshot {
         daemonError: String?,
         keyboardAccessStatus: KeyboardAccessStatus? = nil,
         taskCapabilities: TaskCapabilityReport? = nil,
-        checkpointStoreStatus: TaskCheckpointStoreStatus? = nil
+        checkpointStoreStatus: TaskCheckpointStoreStatus? = nil,
+        installedRuntimeParity: InstalledRuntimeParityStatus? = nil
     ) {
         self.launchAgent = launchAgent
         self.daemonStatus = daemonStatus
@@ -90,6 +92,7 @@ public struct ReleaseGateSnapshot {
         self.socketOwnerOnly = socketOwnerOnly
         self.networkListenerConfigured = networkListenerConfigured
         self.daemonError = daemonError
+        self.installedRuntimeParity = installedRuntimeParity
     }
 }
 
@@ -113,6 +116,7 @@ public final class ReleaseGate {
 
     public func evaluate(snapshot: ReleaseGateSnapshot) -> ReleaseGateReport {
         let checks = [
+            installedRuntimeParityCheck(snapshot.installedRuntimeParity),
             launchAgentCheck(snapshot.launchAgent),
             socketCheck(snapshot),
             localTransportCheck(snapshot),
@@ -226,7 +230,24 @@ public final class ReleaseGate {
             daemonError: daemonError,
             keyboardAccessStatus: keyboardAccessStatus,
             taskCapabilities: doctorReport?.taskCapabilities,
-            checkpointStoreStatus: doctorReport?.checkpointStore
+            checkpointStoreStatus: doctorReport?.checkpointStore,
+            installedRuntimeParity: InstalledRuntimeParity.evaluate(expectedProcessID: launchAgent.processID)
+        )
+    }
+
+    private func installedRuntimeParityCheck(_ status: InstalledRuntimeParityStatus?) -> ReleaseGateCheck {
+        guard let status else {
+            return ReleaseGateCheck(id: "installed.runtime_parity", state: .blocked, message: "Installed-runtime parity evidence is unavailable")
+        }
+        return ReleaseGateCheck(
+            id: "installed.runtime_parity",
+            state: status.state == "current" ? .passed : (status.state == "unverifiable" ? .blocked : .failed),
+            message: status.message,
+            details: [
+                "state": .string(status.state),
+                "source_revision": status.sourceRevision.map(JSONValue.string) ?? .null,
+                "process_id": status.processID.map { .number(Double($0)) } ?? .null
+            ]
         )
     }
 

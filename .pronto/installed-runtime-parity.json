@@ -1,0 +1,13 @@
+{
+  "schema_version": "pronto-installed-runtime-parity/v1",
+  "targets": [
+    {
+      "id": "macctld",
+      "label": "Mac Control daemon",
+      "install_manifest": "~/.local/share/macctl/runtime-parity-install.json",
+      "runtime_manifest": "~/Library/Application Support/macctl/runtime-parity-process.json",
+      "runtime_executable": "~/.local/share/macctl/macctld.app/Contents/MacOS/macctld",
+      "max_age_hours": 0
+    }
+  ]
+}

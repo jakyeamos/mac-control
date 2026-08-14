@@ -39,7 +39,11 @@ pre-interlock daemon after owner-visible idle verification.
 For read-only runtime diagnostics, use the built CLI only after the package
 build: `swift run macctl doctor --json`, `capabilities --json`, `status
 --json`, `receipts status --json`, and `release check --json`. Release checks
-must not manufacture live evidence or run workflows as a side effect.
+must not manufacture live evidence or run workflows as a side effect. The
+`installed.runtime_parity` check compares the installer and daemon-start
+manifests with the active LaunchAgent PID and live executable, reporting
+`install_stale`, `restart_required`, `not_running`, or `unverifiable` instead
+of treating a healthy daemon as proof that it is current.
 
 For a sensitive-request explanation, use the daemon-only authorization surface:
 `control authorization prepare`, `bind`, `list`, and `resolve`. Prepare accepts only

@@ -17,6 +17,11 @@ let delegate = MacCtlApplicationDelegate()
 application.delegate = delegate
 let hud = ApprovalHUD()
 let service = MacCtlService()
+do {
+    try InstalledRuntimeParity.publishRunningProcess()
+} catch {
+    fputs("macctld: runtime parity identity unavailable: \(error.localizedDescription)\n", stderr)
+}
 hud.snapshotHandler = {
     service.controlCenterSnapshot()
 }
@@ -26,7 +31,10 @@ hud.stopHandler = {
 service.controlCenterStateChanged = {
     hud.refresh()
 }
-delegate.shutdownHandler = { service.shutdown() }
+delegate.shutdownHandler = {
+    service.shutdown()
+    InstalledRuntimeParity.removeRunningProcess()
+}
 
 let server = UnixSocketServer()
 do {

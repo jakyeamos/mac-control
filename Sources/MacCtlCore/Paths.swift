@@ -95,6 +95,14 @@ public enum MacCtlPaths {
         daemonAppURL.appendingPathComponent("Contents/MacOS/macctld")
     }
 
+    public static var runtimeParityInstallManifestURL: URL {
+        daemonDataDirectory.appendingPathComponent("runtime-parity-install.json")
+    }
+
+    public static var runtimeParityProcessManifestURL: URL {
+        applicationSupportDirectory.appendingPathComponent("runtime-parity-process.json")
+    }
+
     public static var legacyDaemonExecutableURL: URL {
         userLocalBinDirectory.appendingPathComponent("macctld")
     }

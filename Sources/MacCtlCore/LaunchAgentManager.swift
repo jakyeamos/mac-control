@@ -304,11 +304,17 @@ public final class LaunchAgentManager {
         try fileManager.copyItem(at: source, to: commandDestination)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandDestination.path)
 
-        let daemonBundleURL = try installDaemonBundle(from: daemonSource)
+        let daemonInstall = try installDaemonBundle(from: daemonSource)
+        _ = try InstalledRuntimeParity.recordInstallation(
+            sourceRevision: InstalledRuntimeParity.discoverSourceRevision(),
+            builtArtifactSHA256: daemonInstall.builtArtifactSHA256,
+            installedExecutable: MacCtlPaths.daemonAppExecutableURL,
+            fileManager: fileManager
+        )
         if fileManager.fileExists(atPath: MacCtlPaths.legacyDaemonExecutableURL.path) {
             try fileManager.removeItem(at: MacCtlPaths.legacyDaemonExecutableURL)
         }
-        return [commandDestination.path, daemonBundleURL.path, MacCtlPaths.daemonAppExecutableURL.path]
+        return [commandDestination.path, daemonInstall.bundleURL.path, MacCtlPaths.daemonAppExecutableURL.path]
     }
 
     public static func installedDaemonExecutablePath() -> String? {
@@ -324,7 +330,7 @@ public final class LaunchAgentManager {
         return FileManager.default.isExecutableFile(atPath: sibling.path) ? sibling.path : nil
     }
 
-    private func installDaemonBundle(from source: URL) throws -> URL {
+    private func installDaemonBundle(from source: URL) throws -> (bundleURL: URL, builtArtifactSHA256: String) {
         let fileManager = self.fileManager
         let parent = MacCtlPaths.daemonDataDirectory
         try fileManager.createDirectory(
@@ -376,6 +382,13 @@ public final class LaunchAgentManager {
             throw LaunchAgentError.signingFailed(error.localizedDescription)
         }
 
+        let builtArtifactSHA256: String
+        do {
+            builtArtifactSHA256 = try InstalledRuntimeParity.artifactSHA256(at: executableURL)
+        } catch {
+            throw LaunchAgentError.installFailed("could not fingerprint the packaged daemon: \(error.localizedDescription)")
+        }
+
         do {
             let signingResult = try ProcessRunner.run(
                 executable: "/usr/bin/codesign",
@@ -400,7 +413,7 @@ public final class LaunchAgentManager {
             try fileManager.removeItem(at: MacCtlPaths.daemonAppURL)
         }
         try fileManager.moveItem(at: stagingURL, to: MacCtlPaths.daemonAppURL)
-        return MacCtlPaths.daemonAppURL
+        return (MacCtlPaths.daemonAppURL, builtArtifactSHA256)
     }
 
     private func configuredExecutablePath() -> String? {
