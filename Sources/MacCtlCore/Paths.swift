@@ -29,6 +29,12 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("receipts", isDirectory: true)
     }
 
+    /// Short-lived cross-provider handoff state. Raw completion credentials
+    /// are never written here; only their digests and replay guards persist.
+    public static var crossProviderTracesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("cross-provider-traces", isDirectory: true)
+    }
+
     /// Durable task checkpoints are intentionally separate from operation receipts.
     public static var taskCheckpointsDirectory: URL {
         applicationSupportDirectory.appendingPathComponent("task-checkpoints", isDirectory: true)
@@ -100,6 +106,7 @@ public enum MacCtlPaths {
             logDirectory,
             workflowDirectory,
             receiptsDirectory,
+            crossProviderTracesDirectory,
             taskCheckpointsDirectory,
             warmPathsDirectory,
             capabilityProfilesDirectory,

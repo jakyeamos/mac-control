@@ -160,8 +160,10 @@ public final class MacCtlService {
         "control.center.snapshot", "control.hands_off.status", "control.capabilities", "route.list", "route.inspect",
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
+        "app.instances", "window.displays", "window.list", "window.inspect",
+        "action.resolve",
         "workflow.list", "workflow.validate", "approval.list", "receipts.list",
-        "receipts.status", "logs", "shortcut.audit", "shortcut.inspect"
+        "receipts.status", "receipts.trace", "logs", "shortcut.audit", "shortcut.inspect"
     ]
 
     private struct ActiveControlExecution {
@@ -175,10 +177,14 @@ public final class MacCtlService {
         let focusPolicy: FocusPolicy?
         let acquiredAt: Date
         let expiresAt: Date
+        let taskPlan: TaskPlan?
         var stopping: Bool
 
-        var snapshot: ControlCenterExecution {
-            ControlCenterExecution(
+        func snapshot(taskStatus: TaskStatusReport? = nil) -> ControlCenterExecution {
+            let taskProgress = taskPlan.flatMap { plan in
+                taskStatus.map { ControlCenterTaskProgress.make(plan: plan, status: $0, stopping: stopping) }
+            }
+            return ControlCenterExecution(
                 executionID: executionID,
                 taskID: taskID,
                 summary: summary,
@@ -187,7 +193,8 @@ public final class MacCtlService {
                 acquiredAt: acquiredAt,
                 expiresAt: expiresAt,
                 stopping: stopping,
-                focusPolicy: focusPolicy
+                focusPolicy: focusPolicy,
+                taskProgress: taskProgress
             )
         }
     }
@@ -223,28 +230,44 @@ public final class MacCtlService {
     private let warmPathStore: WarmPathStore
     private let capabilityProfileStore: CapabilityProfileStore
     private let capabilityAuditBatchStore: CapabilityAuditBatchStore
+    private let capabilityAuditOpportunityScheduler: (@escaping () -> Void) -> Void
     private let shortcutEngine: ShortcutEngine
     private let controlSession: ControlSession
     private let semanticActionRouter: SemanticActionRouter
+    private let nativeWindowController: NativeWindowControlling
+    private let nativeWindowTargetInspector: NativeWindowTargetInspecting?
+    private let nativeWindowForegroundActivator: NativeWindowForegroundActivating?
+    private let nativeWindowDisplayProvider: NativeWindowDisplayProviding
+    private let nativeWindowRestoreStore: NativeWindowRestoreStore
+    private let actionIntentController: ExactActionIntentControlling
     private let foregroundApplication: () -> AppInfo?
     private let resolveApplication: (String) throws -> AppInfo
+    private let listApplicationInstances: (String) -> [ApplicationInstanceInfo]
+    private let resolveApplicationTarget: (ApplicationTargetSelector) throws -> ApplicationInstanceInfo
     private let activateApplication: (String) throws -> AppInfo
     private let foregroundStabilityVerifier: ControlStateVerifier
     private let hasPostEventAccess: () -> Bool
     private let launchAgentManager: LaunchAgentManager
     private let logger: SafeLog
     private let receiptStore: OperationReceiptStore
+    private let crossProviderTraceStore: CrossProviderTracePendingStore
     private let permissionContext: String
     private let presentApproval: ((ApprovalRecord) -> Void)?
     private let presentAuthorizationNotice: ((AuthorizationNotice) -> Void)?
     private let executionLock = NSLock()
     private let controlCenterLock = NSLock()
     private let lifecycleLock = NSLock()
+    private let capabilityAuditExecutionLock = NSLock()
+    private let capabilityAuditOpportunityLock = NSLock()
     private let lifecycleNow: () -> Date
     private let lifecycleDrainDuration: TimeInterval
     private static let handsOffDefaultDuration: TimeInterval = 60
     private static let handsOffMaximumDuration: TimeInterval = 300
     private static let handsOffProviders: Set<String> = ["mac_control", "computer_use", "hybrid"]
+    private static let defaultCapabilityAuditOpportunityQueue = DispatchQueue(
+        label: "com.jakyeamos.macctl.capability-audit-opportunities",
+        qos: .utility
+    )
     // Access is serialized by executionLock. The cache is deliberately held
     // only by a single keyboard lease and re-runs permission selection on
     // every action, so a warm manifest cannot bypass a changed permission gate.
@@ -252,8 +275,10 @@ public final class MacCtlService {
     private var activeControlExecution: ActiveControlExecution?
     private var focusActivity: ControlCenterFocusActivity?
     private var handsOffSession: ControlCenterHandsOffSession?
+    private var recentTaskOutcome: ControlCenterTaskOutcome?
     private var activeMutationRequests = 0
     private var lifecycleDrain: ControlCenterLifecycleDrain?
+    private var scheduledCapabilityAuditKeys = Set<String>()
 
     public var controlCenterStateChanged: (() -> Void)?
 
@@ -265,7 +290,8 @@ public final class MacCtlService {
         presentApproval: ((ApprovalRecord) -> Void)? = nil,
         presentAuthorizationNotice: ((AuthorizationNotice) -> Void)? = nil,
         logger: SafeLog = SafeLog(),
-        receiptStore: OperationReceiptStore = OperationReceiptStore(),
+        receiptStore: OperationReceiptStore? = nil,
+        crossProviderTraceStore: CrossProviderTracePendingStore? = nil,
         permissionContext: String = "daemon",
         keyboardAccessController: KeyboardAccessController = KeyboardAccessController(),
         keyboardDriveStore: KeyboardDriveStore = KeyboardDriveStore(),
@@ -280,22 +306,30 @@ public final class MacCtlService {
         visualActionController: VisualActionPerforming? = nil,
         controlSession: ControlSession? = nil,
         semanticActionRouter: SemanticActionRouter? = nil,
+        nativeWindowController: NativeWindowControlling? = nil,
+        nativeWindowForegroundActivator: NativeWindowForegroundActivating? = nil,
+        nativeWindowDisplayProvider: NativeWindowDisplayProviding = SystemNativeWindowDisplayProvider(),
+        nativeWindowRestoreStore: NativeWindowRestoreStore = NativeWindowRestoreStore(),
         foregroundApplication: (() -> AppInfo?)? = nil,
         resolveApplication: ((String) throws -> AppInfo)? = nil,
+        listApplicationInstances: ((String) -> [ApplicationInstanceInfo])? = nil,
+        resolveApplicationTarget: ((ApplicationTargetSelector) throws -> ApplicationInstanceInfo)? = nil,
         activateApplication: ((String) throws -> AppInfo)? = nil,
         foregroundStabilityVerifier: ControlStateVerifier? = nil,
         hasPostEventAccess: (() -> Bool)? = nil,
         warmPathStore: WarmPathStore = WarmPathStore(),
-        capabilityProfileStore: CapabilityProfileStore = CapabilityProfileStore(),
+        capabilityProfileStore: CapabilityProfileStore? = nil,
         accessibilityTreeInspector: AccessibilityTreeInspecting? = nil,
         accessibilityScrollPerformer: AccessibilityScrollPerforming? = nil,
         inputScrollPerformer: InputScrollPerforming? = nil,
         capabilityAuditBatchStore: CapabilityAuditBatchStore = CapabilityAuditBatchStore(),
+        capabilityAuditOpportunityScheduler: ((@escaping () -> Void) -> Void)? = nil,
         shortcutBindingStore: ShortcutBindingStore = ShortcutBindingStore(),
         menuCommandController: MenuCommandControlling? = nil,
         shortcutProvisioner: ShortcutProvisioning? = nil,
         shortcutKeyboardDispatcher: ShortcutKeyboardDispatching? = nil,
         shortcutEngine: ShortcutEngine? = nil,
+        actionIntentController: ExactActionIntentControlling? = nil,
         lifecycleNow: @escaping () -> Date = Date.init,
         lifecycleDrainDuration: TimeInterval = 15
     ) {
@@ -306,7 +340,9 @@ public final class MacCtlService {
         self.presentApproval = presentApproval
         self.presentAuthorizationNotice = presentAuthorizationNotice
         self.logger = logger
-        self.receiptStore = receiptStore
+        self.receiptStore = receiptStore ?? Self.defaultReceiptStore(permissionContext: permissionContext)
+        self.crossProviderTraceStore = crossProviderTraceStore
+            ?? Self.defaultCrossProviderTraceStore(permissionContext: permissionContext)
         self.permissionContext = permissionContext
         self.lifecycleNow = lifecycleNow
         self.lifecycleDrainDuration = min(max(lifecycleDrainDuration, 1), 30)
@@ -318,7 +354,19 @@ public final class MacCtlService {
         let defaultAccessibilityController = AccessibilityController()
         self.warmPathStore = warmPathStore
         self.capabilityProfileStore = capabilityProfileStore
+            ?? Self.defaultCapabilityProfileStore(permissionContext: permissionContext)
         self.capabilityAuditBatchStore = capabilityAuditBatchStore
+        if let capabilityAuditOpportunityScheduler {
+            self.capabilityAuditOpportunityScheduler = capabilityAuditOpportunityScheduler
+        } else if permissionContext == "test" {
+            // Existing deterministic service fixtures opt into scheduling explicitly.
+            // This keeps unrelated tests from racing an opportunistic utility task.
+            self.capabilityAuditOpportunityScheduler = { _ in }
+        } else {
+            self.capabilityAuditOpportunityScheduler = { work in
+                MacCtlService.defaultCapabilityAuditOpportunityQueue.async(execute: work)
+            }
+        }
         self.accessibilityTreeInspector = accessibilityTreeInspector ?? defaultAccessibilityController
         self.accessibilityScrollPerformer = accessibilityScrollPerformer ?? defaultAccessibilityController
         let resolvedTargetInspector = targetInspector
@@ -332,6 +380,32 @@ public final class MacCtlService {
         self.foregroundApplication = resolvedForegroundApplication
         let resolvedApplicationResolver = resolveApplication ?? { try appController.resolve($0) }
         self.resolveApplication = resolvedApplicationResolver
+        self.listApplicationInstances = listApplicationInstances
+            ?? { appController.listRunningInstances(matching: $0) }
+        let resolvedApplicationTargetResolver: (ApplicationTargetSelector) throws -> ApplicationInstanceInfo
+        if let resolveApplicationTarget {
+            resolvedApplicationTargetResolver = resolveApplicationTarget
+        } else if resolveApplication != nil {
+            // Existing deterministic service fixtures inject only the legacy
+            // resolver. Preserve those tests while still enforcing every
+            // supplied exact field against its returned process.
+            resolvedApplicationTargetResolver = { selector in
+                let application = try resolvedApplicationResolver(selector.application)
+                guard application.isRunning, let processID = application.processID else {
+                    throw ApplicationTargetResolutionError.targetMissing
+                }
+                if let requestedPID = selector.processID, requestedPID != processID {
+                    throw ApplicationTargetResolutionError.targetMissing
+                }
+                if selector.instanceRef != nil {
+                    throw ApplicationTargetResolutionError.targetChanged
+                }
+                return ApplicationInstanceInfo(application: application, processID: processID)
+            }
+        } else {
+            resolvedApplicationTargetResolver = { try appController.resolveRunningTarget($0) }
+        }
+        self.resolveApplicationTarget = resolvedApplicationTargetResolver
         let resolvedApplicationActivator = activateApplication ?? { try appController.activate($0) }
         self.activateApplication = resolvedApplicationActivator
         self.foregroundStabilityVerifier = foregroundStabilityVerifier ?? ControlStateVerifier()
@@ -360,6 +434,27 @@ public final class MacCtlService {
                 )
         )
         self.semanticActionRouter = resolvedSemanticActionRouter
+        let resolvedNativeWindowController = nativeWindowController ?? AccessibilityNativeWindowController()
+        self.nativeWindowController = resolvedNativeWindowController
+        self.nativeWindowTargetInspector = resolvedNativeWindowController as? NativeWindowTargetInspecting
+        self.nativeWindowForegroundActivator = nativeWindowForegroundActivator
+            ?? resolvedNativeWindowController as? NativeWindowForegroundActivating
+        self.nativeWindowDisplayProvider = nativeWindowDisplayProvider
+        self.nativeWindowRestoreStore = nativeWindowRestoreStore
+        if let actionIntentController {
+            self.actionIntentController = actionIntentController
+        } else {
+            let resolvedNativeWindowTargetInspector = resolvedNativeWindowController as? NativeWindowTargetInspecting
+                ?? AccessibilityNativeWindowController()
+            self.actionIntentController = ExactActionIntentController(
+                graph: EphemeralTargetGraph(observeSystemEvents: permissionContext == "daemon"),
+                resolveApplicationTarget: resolvedApplicationTargetResolver,
+                windowInspector: resolvedNativeWindowTargetInspector,
+                displayProvider: nativeWindowDisplayProvider,
+                accessibility: defaultAccessibilityController,
+                foregroundApplication: resolvedForegroundApplication
+            )
+        }
         let resolvedMenuCommandController = menuCommandController ?? AccessibilityMenuCommandController()
         let resolvedShortcutKeyboardDispatcher = shortcutKeyboardDispatcher
             ?? AppScopedShortcutKeyboardDispatcher(
@@ -417,7 +512,7 @@ public final class MacCtlService {
             checkpointStore: taskCheckpointStore,
             approvalStore: taskApprovalStore,
             actionExecutor: resolvedTaskExecutor,
-            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, adapterRegistry] step in
+            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, resolvedApplicationTargetResolver, resolvedNativeWindowController, nativeWindowDisplayProvider, adapterRegistry] step in
                 let target = step.target
                 var requestedApplication = target?.application ?? target?.bundleID
                 if requestedApplication == nil,
@@ -431,7 +526,34 @@ public final class MacCtlService {
                     requestedApplication = step.action.parameters["app"]?.stringValue ?? manifest.displayName
                 }
                 let application: AppInfo?
-                if let name = requestedApplication {
+                var exactWindow: NativeWindowTargetSnapshot?
+                if let name = requestedApplication,
+                   target?.instanceRef != nil || target?.windowRef != nil {
+                    guard let processID = target?.processID,
+                          let instanceRef = target?.instanceRef,
+                          let windowRef = target?.windowRef else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let resolved = try resolvedApplicationTargetResolver(ApplicationTargetSelector(
+                        application: name,
+                        processID: processID,
+                        instanceRef: instanceRef,
+                        windowRef: windowRef
+                    ))
+                    guard let inspector = resolvedNativeWindowController as? NativeWindowTargetInspecting else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let window = try inspector.inspectWindow(
+                        pid: resolved.processID,
+                        windowRef: windowRef,
+                        displays: nativeWindowDisplayProvider.connectedDisplays()
+                    )
+                    guard window.unique, window.visible, !window.minimized else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    application = resolved.application
+                    exactWindow = window
+                } else if let name = requestedApplication {
                     application = try resolvedApplicationResolver(name)
                 } else {
                     application = resolvedForegroundApplication()
@@ -439,8 +561,13 @@ public final class MacCtlService {
                 guard let application else {
                     throw ControlTargetInspectionError.applicationUnavailable
                 }
+                let adapterOperation = step.action.parameters["operation"]?.stringValue
                 let isAdapterOpen = step.action.kind == .adapter
-                    && step.action.parameters["operation"]?.stringValue == "open"
+                    && [
+                        "open",
+                        FocusSessionExecutionOperation.openBrief.rawValue,
+                        FocusSessionExecutionOperation.openScratchpad.rawValue
+                    ].contains(adapterOperation)
                 if isAdapterOpen {
                     guard target?.processID == nil,
                           target?.windowFingerprint == nil,
@@ -459,6 +586,27 @@ public final class MacCtlService {
                         windowVisible: false,
                         modal: false,
                         focusReadable: false,
+                        hung: false
+                    )
+                    try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
+                    return snapshot
+                }
+                if let exactWindow {
+                    let snapshot = ControlTargetSnapshot(
+                        application: application,
+                        focusedElement: nil,
+                        fingerprint: ControlTargetFingerprints.make(
+                            application: application,
+                            focus: nil,
+                            window: AccessibilityWindowState(
+                                visible: exactWindow.visible,
+                                modal: false,
+                                identityFingerprint: exactWindow.windowRef
+                            )
+                        ),
+                        windowVisible: exactWindow.visible,
+                        modal: false,
+                        focusReadable: exactWindow.focused,
                         hung: false
                     )
                     try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
@@ -514,7 +662,8 @@ public final class MacCtlService {
         // Authorization notices are intentionally short-lived, owner-local
         // state. Do not promote their context into the durable operation
         // receipt stream.
-        if !request.method.hasPrefix("control.authorization.") {
+        if !request.method.hasPrefix("control.authorization."),
+           !request.method.hasPrefix("receipts.trace") {
             recordReceipt(for: request, response: response, startedAt: startedAt)
         }
         controlCenterStateChanged?()
@@ -526,11 +675,13 @@ public final class MacCtlService {
         controlCenterLock.lock()
         activeControlExecution = nil
         handsOffSession = nil
+        recentTaskOutcome = nil
         controlCenterLock.unlock()
         lifecycleLock.lock()
         lifecycleDrain = nil
         lifecycleLock.unlock()
         keyboardDriveStore.shutdown()
+        actionIntentController.shutdown()
         controlCenterStateChanged?()
     }
 
@@ -608,7 +759,7 @@ public final class MacCtlService {
         // snapshot and the transition into drain mode are therefore atomic.
         let approvals = activeApprovalRecords()
         controlCenterLock.lock()
-        let controlExecution = activeControlExecution?.snapshot
+        let controlExecution = activeControlExecution?.snapshot()
         let activeHandsOffSession = currentHandsOffSessionLocked()
         controlCenterLock.unlock()
         let execution = controlExecution ?? keyboardDriveStore.activeLease().map {
@@ -774,6 +925,31 @@ public final class MacCtlService {
                 return try idealStateAudit(request)
             case "app.list":
                 return try success(request, value: appController.listApplications())
+            case "app.instances":
+                let application = try requiredString(request, key: "app")
+                return try success(
+                    request,
+                    value: ApplicationInstanceCatalog(
+                        application: application,
+                        instances: listApplicationInstances(application)
+                    )
+                )
+            case "action.resolve":
+                return try resolveExactAction(request)
+            case "action.run":
+                return try runExactAction(request)
+            case "window.displays":
+                return try success(request, value: NativeWindowDisplayCatalog(
+                    displays: nativeWindowDisplayProvider.connectedDisplays()
+                ))
+            case "window.list":
+                return try listNativeWindows(request)
+            case "window.inspect":
+                return try inspectNativeWindow(request)
+            case "window.place":
+                return try placeNativeWindow(request)
+            case "window.restore":
+                return try restoreNativeWindow(request)
             case "app.open":
                 let name = try requiredString(request, key: "name")
                 let requestedPolicy = try requestedFocusPolicy(from: request) ?? .automatic
@@ -836,6 +1012,12 @@ public final class MacCtlService {
                 return try success(request, value: receiptStore.list())
             case "receipts.status":
                 return try success(request, value: receiptStore.status())
+            case "receipts.trace.begin":
+                return try beginCrossProviderTrace(request)
+            case "receipts.trace.complete":
+                return try completeCrossProviderTrace(request)
+            case "receipts.trace":
+                return try inspectCrossProviderTrace(request)
             case "logs":
                 return try success(request, value: ["lines": logger.tail()])
             default:
@@ -879,13 +1061,15 @@ public final class MacCtlService {
         let approvals = pendingApprovalRecords().map(ControlCenterApproval.init)
         let authorizationNotices = pendingAuthorizationNotices()
         controlCenterLock.lock()
-        let activeExecution = activeControlExecution?.snapshot
+        let activeExecutionState = activeControlExecution
         let focusActivity = currentFocusActivityLocked()
         let handsOffSession = currentHandsOffSessionLocked()
+        let taskOutcome = currentTaskOutcomeLocked()
         controlCenterLock.unlock()
         let execution: ControlCenterExecution?
-        if let activeExecution {
-            execution = activeExecution
+        if let activeExecutionState {
+            let taskStatus = activeExecutionState.taskID.flatMap { try? taskRunner.status(taskID: $0) }
+            execution = activeExecutionState.snapshot(taskStatus: taskStatus)
         } else if let lease = keyboardDriveStore.activeLease() {
             execution = ControlCenterExecution(
                 executionID: "manual-lease",
@@ -911,7 +1095,8 @@ public final class MacCtlService {
             lifecycleDrain: currentLifecycleDrain(),
             focusActivity: focusActivity,
             handsOffSession: handsOffSession,
-            authorizationNotices: authorizationNotices
+            authorizationNotices: authorizationNotices,
+            taskOutcome: taskOutcome
         )
     }
 
@@ -1804,8 +1989,12 @@ public final class MacCtlService {
     }
 
     private func controlCapabilities(_ request: RequestEnvelope) throws -> ResponseEnvelope {
-        let application = try resolveApplication(try requiredString(request, key: "app"))
         let targetSurface = try requestedControlTargetSurface(from: request)
+        let requestedApplication = try requiredString(request, key: "app")
+        let applicationSelector = targetSurface == .webContent
+            ? Self.normalizedWebContentApplicationSelector(requestedApplication)
+            : requestedApplication
+        let application = try resolveApplication(applicationSelector)
         let taskID = request.params["task"]?.stringValue
         let targetFingerprint = request.params["target_fingerprint"]?.stringValue
         if taskID != nil && targetFingerprint == nil {
@@ -1837,6 +2026,12 @@ public final class MacCtlService {
             taskID: taskID,
             targetFingerprintDigest: targetFingerprintDigest
         )) ?? []
+        let auditOpportunity = scheduleCapabilityAuditOpportunity(
+            application: application,
+            targetSurface: targetSurface,
+            cachedProfile: cachedProfile,
+            providerState: providerState
+        )
         let profile = ControlCapabilityProfile(
             application: WarmPathApplicationIdentity(application: application),
             taskID: taskID,
@@ -1846,6 +2041,7 @@ public final class MacCtlService {
             deepAuditAvailable: application.isRunning && application.processID != nil,
             cachedBroadProfile: cachedProfile.summary,
             recentBlockers: recentBlockers,
+            auditOpportunity: auditOpportunity,
             targetSurface: targetSurface
         )
         return try success(
@@ -1863,10 +2059,120 @@ public final class MacCtlService {
                     "probe_mode": .string(profile.probeMode),
                     "broad_profile_cache_hit": .bool(cachedProfile.cacheHit),
                     "deep_audit_recommended": .bool(cachedProfile.summary.deepAuditRecommended),
+                    "audit_opportunity_state": .string(auditOpportunity.state.rawValue),
                     "recent_blocker_count": .number(Double(recentBlockers.count))
                 ]
             )]
         )
+    }
+
+    private func scheduleCapabilityAuditOpportunity(
+        application: AppInfo,
+        targetSurface: ControlTargetSurface,
+        cachedProfile: CapabilityProfileLookup,
+        providerState: CapabilityProviderState
+    ) -> CapabilityAuditOpportunity {
+        guard targetSurface == .macAppUI else {
+            return CapabilityAuditOpportunity(
+                state: .notApplicable,
+                reason: "web_content_belongs_to_browser_provider"
+            )
+        }
+        guard application.isRunning, application.processID != nil else {
+            return CapabilityAuditOpportunity(
+                state: .notObserved,
+                reason: "application_not_running"
+            )
+        }
+        guard cachedProfile.summary.deepAuditRecommended else {
+            return CapabilityAuditOpportunity(
+                state: .satisfied,
+                reason: "current_broad_profile_available"
+            )
+        }
+
+        let identity = WarmPathApplicationIdentity(application: application)
+        let key = CapabilityProfileDigest.make([
+            identity.bundleID ?? "",
+            identity.path,
+            identity.version ?? "",
+            currentOSVersion(),
+            providerState.signature
+        ].joined(separator: "|"))
+        capabilityAuditOpportunityLock.lock()
+        let scheduled = scheduledCapabilityAuditKeys.insert(key).inserted
+        capabilityAuditOpportunityLock.unlock()
+        guard scheduled else {
+            return CapabilityAuditOpportunity(
+                state: .inProgress,
+                reason: "matching_read_only_audit_already_scheduled"
+            )
+        }
+
+        capabilityAuditOpportunityScheduler { [weak self] in
+            guard let self else { return }
+            defer {
+                self.capabilityAuditOpportunityLock.lock()
+                self.scheduledCapabilityAuditKeys.remove(key)
+                self.capabilityAuditOpportunityLock.unlock()
+            }
+            do {
+                _ = try self.auditCapabilityProfile(
+                    application: application,
+                    maxNodes: CapabilityAuditBounds.defaultMaxNodes,
+                    maxDepth: CapabilityAuditBounds.defaultMaxDepth
+                )
+                self.logger.record(event: "capability_audit_opportunity_completed")
+            } catch {
+                // The app may close between the fast probe and the queued read.
+                // A future normal probe can retry; no app is launched.
+                self.logger.record(event: "capability_audit_opportunity_deferred")
+            }
+        }
+        return CapabilityAuditOpportunity(
+            state: .scheduled,
+            reason: "missing_or_invalidated_profile_for_running_application"
+        )
+    }
+
+    private static func normalizedWebContentApplicationSelector(_ selector: String) -> String {
+        switch selector.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "chrome":
+            return "Google Chrome"
+        default:
+            return selector
+        }
+    }
+
+    private static func defaultReceiptStore(permissionContext: String) -> OperationReceiptStore {
+        guard permissionContext == "test" else {
+            return OperationReceiptStore()
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-test-receipts-\(UUID().uuidString)", isDirectory: true)
+        return OperationReceiptStore(directory: directory)
+    }
+
+    private static func defaultCapabilityProfileStore(
+        permissionContext: String
+    ) -> CapabilityProfileStore {
+        guard permissionContext == "test" else {
+            return CapabilityProfileStore()
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-test-capability-profiles-\(UUID().uuidString)", isDirectory: true)
+        return CapabilityProfileStore(directory: directory)
+    }
+
+    private static func defaultCrossProviderTraceStore(
+        permissionContext: String
+    ) -> CrossProviderTracePendingStore {
+        guard permissionContext == "test" else {
+            return CrossProviderTracePendingStore()
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-test-cross-provider-traces-\(UUID().uuidString)", isDirectory: true)
+        return CrossProviderTracePendingStore(directory: directory)
     }
 
     private func controlCapabilityAudit(_ request: RequestEnvelope) throws -> ResponseEnvelope {
@@ -2216,6 +2522,8 @@ public final class MacCtlService {
         maxNodes: Int,
         maxDepth: Int
     ) throws -> CapabilityAuditExecution {
+        capabilityAuditExecutionLock.lock()
+        defer { capabilityAuditExecutionLock.unlock() }
         guard let pid = application.processID else {
             throw AccessibilityControllerError.applicationNotRunning
         }
@@ -3470,20 +3778,45 @@ public final class MacCtlService {
 
     private func accessibilityTree(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let application = try runningAccessibilityApplication(from: request)
-        let report = try accessibilityTreeInspector.tree(
-            pid: application.processID!,
-            application: application,
-            maxNodes: try requestedNonNegativeInt(
-                from: request,
-                key: "max_nodes",
-                defaultValue: CapabilityAuditBounds.defaultMaxNodes
-            ),
-            maxDepth: try requestedNonNegativeInt(
-                from: request,
-                key: "max_depth",
-                defaultValue: CapabilityAuditBounds.defaultMaxDepth
-            )
+        let maxNodes = try requestedNonNegativeInt(
+            from: request,
+            key: "max_nodes",
+            defaultValue: CapabilityAuditBounds.defaultMaxNodes
         )
+        let maxDepth = try requestedNonNegativeInt(
+            from: request,
+            key: "max_depth",
+            defaultValue: CapabilityAuditBounds.defaultMaxDepth
+        )
+        let report: AccessibilityTreeReport
+        if let windowRef = try optionalTargetString(request, key: "window_ref") {
+            guard let targetedInspector = accessibilityTreeInspector as? WindowTargetedAccessibilityTreeInspecting else {
+                throw NativeWindowControlError.targetUnsupported("window_targeted_tree_unavailable")
+            }
+            report = try targetedInspector.tree(
+                pid: application.processID!,
+                application: application,
+                windowRef: windowRef,
+                maxNodes: maxNodes,
+                maxDepth: maxDepth
+            )
+        } else {
+            report = try accessibilityTreeInspector.tree(
+                pid: application.processID!,
+                application: application,
+                maxNodes: maxNodes,
+                maxDepth: maxDepth
+            )
+        }
+        var metadata: [String: JSONValue] = [
+            "redacted": .bool(report.redacted),
+            "bounded": .bool(true),
+            "truncated": .bool(report.truncated),
+            "process_id": .number(Double(application.processID!))
+        ]
+        if request.params["window_ref"] != nil {
+            metadata["window_scoped"] = .bool(true)
+        }
         return try success(
             request,
             value: report,
@@ -3491,11 +3824,7 @@ public final class MacCtlService {
                 kind: "accessibility_tree",
                 message: "A bounded Accessibility tree was inspected with values, private text, screenshots, and OCR excluded",
                 source: "macctld",
-                metadata: [
-                    "redacted": .bool(report.redacted),
-                    "bounded": .bool(true),
-                    "truncated": .bool(report.truncated)
-                ]
+                metadata: metadata
             )]
         )
     }
@@ -3902,12 +4231,306 @@ public final class MacCtlService {
         )
     }
 
-    private func runningAccessibilityApplication(from request: RequestEnvelope) throws -> AppInfo {
-        let application = try resolveApplication(try requiredString(request, key: "app"))
-        guard application.isRunning, application.processID != nil else {
-            throw AccessibilityControllerError.applicationNotRunning
+    private func resolveExactAction(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard let intentValue = request.params["intent"] else {
+            throw ExactActionIntentError.invalid("intent is required")
         }
-        return application
+        let intent: ExactActionIntent
+        do {
+            intent = try JSONCodec.decode(
+                ExactActionIntent.self,
+                from: JSONCodec.encode(intentValue)
+            )
+        } catch {
+            throw ExactActionIntentError.invalid("intent does not match macctl-action-intent/v1")
+        }
+        let report = try actionIntentController.resolve(intent, requestID: request.requestID)
+        return try success(
+            request,
+            value: report,
+            evidence: [Evidence(
+                kind: "action_resolution",
+                message: "A one-shot exact-window background action was resolved from fresh Accessibility state",
+                source: "macctld",
+                metadata: [
+                    "route": .string(report.route),
+                    "focus_policy": .string(report.focusPolicy.rawValue),
+                    "foreground_budget": .number(Double(report.foregroundBudget)),
+                    "graph_generation": .number(Double(report.graphGeneration))
+                ]
+            )]
+        )
+    }
+
+    private func runExactAction(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let resolutionID = try requiredString(request, key: "resolution_id")
+        let report = try actionIntentController.run(resolutionID: resolutionID)
+        var dispatchMetadata: [String: JSONValue] = [
+            "route": .string(report.route),
+            "focus_policy": .string(report.focusPolicy.rawValue),
+            "foreground_budget": .number(Double(report.foregroundBudget)),
+            "dispatch_status": .string(report.dispatchStatus)
+        ]
+        if let nativeDispatchCode = report.nativeDispatchCode {
+            dispatchMetadata["native_dispatch_code"] = .number(Double(nativeDispatchCode))
+        }
+        return try success(
+            request,
+            value: report,
+            evidence: [
+                Evidence(
+                    kind: "background_action",
+                    message: "One exact-window AXPress completed without changing foreground ownership",
+                    source: "macctld",
+                    metadata: dispatchMetadata
+                ),
+                Evidence(
+                    kind: "assertion",
+                    message: "The declared desired state was observed through fresh Accessibility readback",
+                    source: "macctld"
+                )
+            ],
+            outcome: AgentActionOutcome(
+                state: .verifiedSuccess,
+                route: report.route,
+                verification: report.verification
+            )
+        )
+    }
+
+    private func listNativeWindows(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        guard let pid = application.processID else { throw NativeWindowControlError.targetMissing }
+        guard let targetInspector = nativeWindowController as? NativeWindowTargetInspecting else {
+            throw NativeWindowControlError.targetUnsupported("window_target_inventory_unavailable")
+        }
+        let displays = nativeWindowDisplayProvider.connectedDisplays()
+        let catalog = try targetInspector.listWindows(pid: pid, displays: displays)
+        return try success(
+            request,
+            value: catalog,
+            evidence: [Evidence(
+                kind: "native_window_inventory",
+                message: "Native windows for one exact process were listed without retaining titles or document paths",
+                source: "macctld",
+                metadata: [
+                    "process_id": .number(Double(pid)),
+                    "window_count": .number(Double(catalog.windows.count)),
+                    "omitted_window_count": .number(Double(catalog.omittedWindowCount))
+                ]
+            )]
+        )
+    }
+
+    private func inspectNativeWindow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let application = try runningAccessibilityApplication(from: request)
+        guard let pid = application.processID else { throw NativeWindowControlError.targetMissing }
+        let displays = nativeWindowDisplayProvider.connectedDisplays()
+        if let windowRef = try optionalTargetString(request, key: "window_ref") {
+            guard let targetInspector = nativeWindowController as? NativeWindowTargetInspecting else {
+                throw NativeWindowControlError.targetUnsupported("window_target_inspection_unavailable")
+            }
+            let snapshot = try targetInspector.inspectWindow(
+                pid: pid,
+                windowRef: windowRef,
+                displays: displays
+            )
+            return try success(
+                request,
+                value: snapshot,
+                evidence: [Evidence(
+                    kind: "native_window_target_inspection",
+                    message: "One exact native window reference was re-resolved without retaining its title or document path",
+                    source: "macctld",
+                    metadata: ["process_id": .number(Double(pid))]
+                )]
+            )
+        }
+        let snapshot = try nativeWindowController.focusedWindow(pid: pid, displays: displays)
+        return try success(
+            request,
+            value: snapshot,
+            evidence: [Evidence(
+                kind: "native_window_inspection",
+                message: "The focused native window was resolved without retaining its title or document path",
+                source: "macctld"
+            )]
+        )
+    }
+
+    private func placeNativeWindow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw NativeWindowControlError.confirmationRequired
+        }
+        let requestedApplication = try requiredString(request, key: "app")
+        let rawLayout = try requiredString(request, key: "layout")
+        guard let layout = NativeWindowLayoutName(rawValue: rawLayout) else {
+            throw WorkflowExecutionError.unsafeInput("window layout is not allowlisted")
+        }
+        guard let rawDisplayID = request.params["display_id"]?.doubleValue,
+              rawDisplayID.rounded() == rawDisplayID,
+              rawDisplayID >= 0,
+              rawDisplayID <= Double(UInt32.max) else {
+            throw WorkflowExecutionError.unsafeInput("display_id must be an unsigned 32-bit display ID")
+        }
+        let displayID = UInt32(rawDisplayID)
+
+        return try withExecutionLock {
+            let application = try activateForegroundApplicationWithAnnouncement(requestedApplication)
+            guard let pid = application.processID else { throw NativeWindowControlError.targetMissing }
+            let displays = nativeWindowDisplayProvider.connectedDisplays()
+            let displayMatches = displays.filter { $0.id == displayID }
+            guard displayMatches.count == 1, let display = displayMatches.first else {
+                throw NativeWindowControlError.displayUnavailable(displayID)
+            }
+            let before = try nativeWindowController.focusedWindow(pid: pid, displays: displays)
+            guard before.movable else { throw NativeWindowControlError.targetUnsupported("not_movable") }
+            guard before.resizable else { throw NativeWindowControlError.targetUnsupported("not_resizable") }
+            guard !before.minimized else { throw NativeWindowControlError.targetUnsupported("minimized") }
+            guard !before.fullscreen else { throw NativeWindowControlError.targetUnsupported("fullscreen") }
+            guard before.displayID != nil else { throw NativeWindowControlError.verificationUnavailable }
+            guard foregroundApplication()?.processID == pid else {
+                throw AppControllerError.focusChanged(expected: application.name, actual: foregroundApplication()?.name ?? "none")
+            }
+
+            let targetFrame = NativeWindowLayoutResolver.frame(for: layout, in: display.visibleFrame)
+            let observed = try nativeWindowController.setFrame(
+                pid: pid,
+                identityDigest: before.identityDigest,
+                frame: targetFrame,
+                displays: displays
+            )
+            guard observed.displayID == displayID else { throw NativeWindowControlError.verificationUnavailable }
+            let restore = try nativeWindowRestoreStore.issue(application: application.name, snapshot: before)
+            let report = NativeWindowPlacementReport(
+                application: application.name,
+                layout: layout,
+                displayID: displayID,
+                previousFrame: before.frame,
+                observedFrame: observed.frame,
+                restoreToken: restore.token,
+                restoreExpiresAt: restore.expiresAt
+            )
+            if foregroundApplication()?.processID != pid {
+                return ResponseEnvelope(
+                    requestID: request.requestID,
+                    operationID: UUID().uuidString,
+                    status: .blocked,
+                    result: try JSONValue.fromEncodable(report),
+                    evidence: [Evidence(
+                        kind: "native_window_foreground_race",
+                        message: "The window frame was verified, but foreground identity changed after dispatch; do not replay",
+                        source: "macctld"
+                    )],
+                    error: MacCtlError(
+                        code: MacCtlErrorCode.focusChanged.rawValue,
+                        message: "Foreground identity changed after native window placement; use the returned restore token if needed",
+                        details: ["possibly_dispatched": .bool(true), "retryable": .bool(false)]
+                    ),
+                    outcome: AgentActionOutcome(
+                        state: .foregroundRace,
+                        route: "native_accessibility",
+                        verification: "window_frame_passed_foreground_failed",
+                        freshStateRequired: true,
+                        nextAction: "inspect_window_or_restore"
+                    )
+                )
+            }
+            return try success(
+                request,
+                value: report,
+                evidence: [Evidence(
+                    kind: "native_window_frame_readback",
+                    message: "The exact window frame and destination display were read back after one Accessibility dispatch",
+                    source: "macctld",
+                    metadata: [
+                        "display_id": .number(Double(displayID)),
+                        "layout": .string(layout.rawValue),
+                        "foreground_oracle": .string("target_foreground_unchanged")
+                    ]
+                )],
+                outcome: AgentActionOutcome(
+                    state: .verifiedSuccess,
+                    route: "native_accessibility",
+                    verification: "window_frame_and_display_readback"
+                )
+            )
+        }
+    }
+
+    private func restoreNativeWindow(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        guard request.params["confirm"]?.boolValue == true else {
+            throw NativeWindowControlError.confirmationRequired
+        }
+        let token = try requiredString(request, key: "restore_token")
+        return try withExecutionLock {
+            let record = try nativeWindowRestoreStore.record(token: token)
+            let application = try activateForegroundApplicationWithAnnouncement(record.application)
+            guard application.processID == record.processID else {
+                throw NativeWindowControlError.targetMissing
+            }
+            let displays = nativeWindowDisplayProvider.connectedDisplays()
+            guard displays.contains(where: { $0.id == record.displayID }) else {
+                throw NativeWindowControlError.displayUnavailable(record.displayID)
+            }
+            let observed = try nativeWindowController.setFrame(
+                pid: record.processID,
+                identityDigest: record.identityDigest,
+                frame: record.frame,
+                displays: displays
+            )
+            try nativeWindowRestoreStore.consume(token: token)
+            return try success(
+                request,
+                value: NativeWindowRestoreReport(application: application.name, observedFrame: observed.frame),
+                evidence: [Evidence(
+                    kind: "native_window_restore_readback",
+                    message: "The original frame was restored to the exact process and window identity",
+                    source: "macctld"
+                )],
+                outcome: AgentActionOutcome(
+                    state: .verifiedSuccess,
+                    route: "native_accessibility_restore",
+                    verification: "window_frame_readback"
+                )
+            )
+        }
+    }
+
+    private func runningAccessibilityApplication(from request: RequestEnvelope) throws -> AppInfo {
+        try resolveApplicationTarget(targetSelector(from: request)).application
+    }
+
+    private func targetSelector(from request: RequestEnvelope) throws -> ApplicationTargetSelector {
+        let processID: Int32?
+        if let rawProcessID = request.params["process_id"]?.doubleValue {
+            guard rawProcessID.rounded() == rawProcessID,
+                  rawProcessID > 0,
+                  rawProcessID <= Double(Int32.max) else {
+                throw WorkflowExecutionError.unsafeInput("process_id must be a positive 32-bit process ID")
+            }
+            processID = Int32(rawProcessID)
+        } else {
+            processID = nil
+        }
+        return ApplicationTargetSelector(
+            application: try requiredString(request, key: "app"),
+            processID: processID,
+            instanceRef: try optionalTargetString(request, key: "instance_ref"),
+            windowRef: try optionalTargetString(request, key: "window_ref")
+        )
+    }
+
+    private func optionalTargetString(_ request: RequestEnvelope, key: String) throws -> String? {
+        guard let value = request.params[key] else { return nil }
+        guard let string = value.stringValue else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must be a string")
+        }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw WorkflowExecutionError.unsafeInput("\(key) must not be empty")
+        }
+        return trimmed
     }
 
     private func currentOSVersion() -> String {
@@ -4291,7 +4914,8 @@ public final class MacCtlService {
                 applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
                 focusPolicy: reservation.focusResolution.effectivePolicy,
                 lease: $0,
-                leaseOwnedByDaemon: reservation.ownedByDaemon
+                leaseOwnedByDaemon: reservation.ownedByDaemon,
+                taskPlan: plan
             )
         }
         defer {
@@ -4328,12 +4952,15 @@ public final class MacCtlService {
         let plan = try taskPlan(from: request)
         let token = try requiredString(request, key: "approval_token")
         let inputs = try ephemeralInputs(from: request)
+        let checkpoint = try withExecutionLock { try taskRunner.status(taskID: plan.id) }
+        let approvalPlan = plan.remaining(from: checkpoint.stepIndex)
         let reservation = try taskAuthority(
             for: plan,
             request: request,
             approvalToken: token,
             ephemeralInputs: inputs,
-            force: true
+            force: true,
+            approvalPlan: approvalPlan
         )
         guard let authority = reservation.authority else { throw TaskControlError.leaseRequired }
         let executionID = reservation.lease.map {
@@ -4343,7 +4970,8 @@ public final class MacCtlService {
                 applicationName: ApprovalHandoffTargetResolver.resolve(for: plan)?.applicationName,
                 focusPolicy: reservation.focusResolution.effectivePolicy,
                 lease: $0,
-                leaseOwnedByDaemon: reservation.ownedByDaemon
+                leaseOwnedByDaemon: reservation.ownedByDaemon,
+                taskPlan: plan
             )
         }
         defer {
@@ -4427,10 +5055,12 @@ public final class MacCtlService {
         applicationName: String?,
         focusPolicy: FocusPolicy?,
         lease: KeyboardDriveLease,
-        leaseOwnedByDaemon: Bool
+        leaseOwnedByDaemon: Bool,
+        taskPlan: TaskPlan? = nil
     ) -> String {
         let executionID = UUID().uuidString
         controlCenterLock.lock()
+        if taskID != nil { recentTaskOutcome = nil }
         activeControlExecution = ActiveControlExecution(
             executionID: executionID,
             taskID: taskID,
@@ -4442,6 +5072,7 @@ public final class MacCtlService {
             focusPolicy: focusPolicy,
             acquiredAt: lease.acquiredAt,
             expiresAt: lease.expiresAt,
+            taskPlan: taskPlan,
             stopping: false
         )
         controlCenterLock.unlock()
@@ -4512,11 +5143,36 @@ public final class MacCtlService {
 
     private func finishControlCenterExecution(executionID: String) {
         controlCenterLock.lock()
-        if activeControlExecution?.executionID == executionID {
-            activeControlExecution = nil
-        }
+        let finishedExecution = activeControlExecution?.executionID == executionID
+            ? activeControlExecution
+            : nil
+        if finishedExecution != nil { activeControlExecution = nil }
         controlCenterLock.unlock()
+        if let finishedExecution,
+           let taskID = finishedExecution.taskID,
+           let plan = finishedExecution.taskPlan,
+           let status = try? taskRunner.status(taskID: taskID) {
+            let outcome = ControlCenterTaskOutcome(
+                taskID: taskID,
+                summary: finishedExecution.summary,
+                applicationName: finishedExecution.applicationName,
+                progress: ControlCenterTaskProgress.make(plan: plan, status: status),
+                expiresAt: lifecycleNow().addingTimeInterval(60)
+            )
+            controlCenterLock.lock()
+            recentTaskOutcome = outcome
+            controlCenterLock.unlock()
+        }
         controlCenterStateChanged?()
+    }
+
+    private func currentTaskOutcomeLocked() -> ControlCenterTaskOutcome? {
+        guard let recentTaskOutcome else { return nil }
+        guard recentTaskOutcome.expiresAt > lifecycleNow() else {
+            self.recentTaskOutcome = nil
+            return nil
+        }
+        return recentTaskOutcome
     }
 
     private func taskPlan(from request: RequestEnvelope) throws -> TaskPlan {
@@ -4538,13 +5194,24 @@ public final class MacCtlService {
         request: RequestEnvelope,
         approvalToken: String,
         ephemeralInputs: [String: String],
-        force: Bool
+        force: Bool,
+        approvalPlan: TaskPlan? = nil
     ) throws -> TaskAuthorityReservation {
         _ = try taskApprovalStore.validateApproved(
             token: approvalToken,
-            plan: plan,
+            plan: approvalPlan ?? plan,
             ephemeralInputs: ephemeralInputs
         )
+        if plan.focusPolicy == .foreground,
+           plan.steps.contains(where: {
+               $0.target?.instanceRef != nil || $0.target?.windowRef != nil
+           }) {
+            return try exactForegroundTaskAuthority(
+                for: plan,
+                request: request,
+                ephemeralInputs: ephemeralInputs
+            )
+        }
         var focusResolution: FocusPolicyResolution
         switch plan.focusPolicy {
         case .background:
@@ -4669,6 +5336,157 @@ public final class MacCtlService {
         }
     }
 
+    private func exactForegroundTaskAuthority(
+        for plan: TaskPlan,
+        request: RequestEnvelope,
+        ephemeralInputs: [String: String]
+    ) throws -> TaskAuthorityReservation {
+        let inputSteps = plan.steps.filter {
+            [.click, .type, .key, .search, .scroll, .adapter].contains($0.action.kind)
+        }
+        guard inputSteps.allSatisfy({ $0.action.kind == .key }),
+              let firstTarget = inputSteps.first?.target,
+              let targetName = firstTarget.application ?? firstTarget.bundleID,
+              let targetPID = firstTarget.processID,
+              let instanceRef = firstTarget.instanceRef,
+              !instanceRef.isEmpty,
+              let windowRef = firstTarget.windowRef,
+              !windowRef.isEmpty,
+              inputSteps.allSatisfy({ step in
+                  step.target?.processID == targetPID
+                      && step.target?.instanceRef == instanceRef
+                      && step.target?.windowRef == windowRef
+              }) else {
+            throw TaskControlError.blocked("exact_target_binding_incomplete")
+        }
+        guard hasPostEventAccess() else {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+        guard let windowInspector = nativeWindowTargetInspector,
+              let windowActivator = nativeWindowForegroundActivator else {
+            throw TaskControlError.blocked("exact_foreground_activation_unavailable")
+        }
+        let selector = ApplicationTargetSelector(
+            application: targetName,
+            processID: targetPID,
+            instanceRef: instanceRef,
+            windowRef: windowRef
+        )
+
+        let suppliedToken = request.params["lease_token"]?.stringValue
+        let lease: KeyboardDriveLease
+        let ownedByDaemon: Bool
+        if let suppliedToken, !suppliedToken.isEmpty {
+            lease = try keyboardDriveStore.lease(for: suppliedToken)
+            guard lease.scope == .session else { throw TaskControlError.leaseRequired }
+            ownedByDaemon = false
+        } else {
+            lease = try keyboardDriveStore.acquire(
+                scope: .session,
+                application: nil,
+                seconds: min(plan.totalTimeout, KeyboardDriveStore.maximumLifetime),
+                confirm: true,
+                physicalInputMode: plan.keyboardFreezeRequired ? .suppressed : .shared,
+                freezeReason: plan.keyboardFreezeRequired
+                    ? "Exact approved task requires physical keyboard suppression"
+                    : nil
+            )
+            ownedByDaemon = true
+        }
+
+        do {
+            let resolved = try resolveApplicationTarget(selector)
+            guard resolved.processID == targetPID,
+                  resolved.instanceRef == instanceRef,
+                  resolved.application.isRunning else {
+                throw TaskControlError.blocked("exact_target_instance_changed")
+            }
+            let displays = nativeWindowDisplayProvider.connectedDisplays()
+            let before = try windowInspector.inspectWindow(
+                pid: targetPID,
+                windowRef: windowRef,
+                displays: displays
+            )
+            guard before.unique, before.visible, !before.minimized else {
+                throw TaskControlError.blocked("exact_window_binding_unavailable")
+            }
+            let activated = try windowActivator.activateWindow(
+                pid: targetPID,
+                windowRef: windowRef,
+                displays: displays
+            )
+            guard activated.processID == targetPID,
+                  activated.windowRef == windowRef,
+                  activated.unique,
+                  activated.focused,
+                  activated.visible,
+                  !activated.minimized,
+                  foregroundApplication()?.processID == targetPID else {
+                throw TaskControlError.blocked("exact_foreground_oracle_failed")
+            }
+            let controlContext = try controlSession.beginAction(
+                leaseToken: lease.token,
+                requireFullKeyboardAccess: true
+            )
+            guard controlContext.foregroundApplication.processID == targetPID else {
+                throw TaskControlError.blocked("exact_foreground_oracle_failed")
+            }
+            let planDigest = TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs)
+            let channel = TaskInputChannel(
+                taskID: plan.id,
+                planDigest: planDigest,
+                focusPolicy: .foreground,
+                targetApplication: resolved.application,
+                targetInstanceRef: instanceRef,
+                targetWindowRef: windowRef,
+                routes: [.exactForeground],
+                expiresAt: controlContext.lease.expiresAt
+            )
+            let authority = TaskExecutionAuthority(
+                leaseToken: lease.token,
+                leaseExpiresAt: controlContext.lease.expiresAt,
+                fresh: true,
+                inputChannel: channel,
+                revalidate: { [controlSession, resolveApplicationTarget, foregroundApplication, nativeWindowDisplayProvider] in
+                    _ = try controlSession.revalidate(controlContext)
+                    let current = try resolveApplicationTarget(selector)
+                    guard current.processID == targetPID,
+                          current.instanceRef == instanceRef,
+                          current.application.isRunning,
+                          foregroundApplication()?.processID == targetPID else {
+                        throw TaskControlError.blocked("exact_foreground_target_changed")
+                    }
+                    let window = try windowInspector.inspectWindow(
+                        pid: targetPID,
+                        windowRef: windowRef,
+                        displays: nativeWindowDisplayProvider.connectedDisplays()
+                    )
+                    guard window.unique, window.focused, window.visible, !window.minimized else {
+                        throw TaskControlError.blocked("exact_foreground_target_changed")
+                    }
+                    return current.application
+                },
+                fingerprint: {
+                    ControlTargetFingerprints.structuralDigest(
+                        [String(targetPID), instanceRef, windowRef].joined(separator: "|")
+                    )
+                }
+            )
+            return TaskAuthorityReservation(
+                authority: authority,
+                lease: lease,
+                ownedByDaemon: ownedByDaemon,
+                focusResolution: FocusPolicyResolution.resolve(
+                    requestedPolicy: .foreground,
+                    backgroundEligible: false
+                )
+            )
+        } catch {
+            if ownedByDaemon { keyboardDriveStore.invalidate(token: lease.token) }
+            throw error
+        }
+    }
+
     private func automaticBackgroundFallbackReason(for error: Error) -> String? {
         guard let error = error as? TaskControlError else { return nil }
         switch error {
@@ -4701,6 +5519,16 @@ public final class MacCtlService {
         })
         guard targetNames.count == 1, let targetName = targetNames.first else {
             throw TaskControlError.leaseRequired
+        }
+        if inputSteps.contains(where: {
+            $0.target?.instanceRef != nil || $0.target?.windowRef != nil
+        }) {
+            return try exactBackgroundTaskAuthority(
+                for: plan,
+                ephemeralInputs: ephemeralInputs,
+                inputSteps: inputSteps,
+                targetName: targetName
+            )
         }
         let targetApplication = try resolveApplication(targetName)
         guard targetApplication.isRunning, let targetPID = targetApplication.processID else {
@@ -4759,6 +5587,132 @@ public final class MacCtlService {
             },
             fingerprint: {
                 ControlTargetFingerprints.make(application: targetApplication, focus: nil)
+            }
+        )
+    }
+
+    private func exactBackgroundTaskAuthority(
+        for plan: TaskPlan,
+        ephemeralInputs: [String: String],
+        inputSteps: [TaskStep],
+        targetName: String
+    ) throws -> TaskExecutionAuthority {
+        guard inputSteps.allSatisfy({ $0.action.kind == .key }),
+              let firstTarget = inputSteps.first?.target,
+              let targetPID = firstTarget.processID,
+              let instanceRef = firstTarget.instanceRef,
+              !instanceRef.isEmpty,
+              let windowRef = firstTarget.windowRef,
+              !windowRef.isEmpty,
+              inputSteps.allSatisfy({ step in
+                  step.target?.processID == targetPID
+                      && step.target?.instanceRef == instanceRef
+                      && step.target?.windowRef == windowRef
+              }) else {
+            throw TaskControlError.blocked("exact_target_binding_incomplete")
+        }
+        let selector = ApplicationTargetSelector(
+            application: targetName,
+            processID: targetPID,
+            instanceRef: instanceRef,
+            windowRef: windowRef
+        )
+        let targetInstance: ApplicationInstanceInfo
+        do {
+            targetInstance = try resolveApplicationTarget(selector)
+        } catch {
+            throw TaskControlError.blocked("exact_target_instance_changed")
+        }
+        guard targetInstance.processID == targetPID,
+              targetInstance.instanceRef == instanceRef,
+              targetInstance.application.isRunning else {
+            throw TaskControlError.blocked("exact_target_instance_changed")
+        }
+        guard let windowInspector = nativeWindowTargetInspector else {
+            throw TaskControlError.blocked("exact_window_inspection_unavailable")
+        }
+        let displays = nativeWindowDisplayProvider.connectedDisplays()
+        let initialWindow: NativeWindowTargetSnapshot
+        do {
+            initialWindow = try windowInspector.inspectWindow(
+                pid: targetPID,
+                windowRef: windowRef,
+                displays: displays
+            )
+        } catch {
+            throw TaskControlError.blocked("exact_window_binding_unavailable")
+        }
+        guard initialWindow.unique,
+              initialWindow.focused,
+              initialWindow.visible,
+              !initialWindow.minimized else {
+            throw TaskControlError.blocked("exact_window_not_process_focused")
+        }
+        guard let initialForeground = foregroundApplication(),
+              let foregroundPID = initialForeground.processID else {
+            throw TaskControlError.blocked("foreground_unavailable")
+        }
+        guard foregroundPID != targetPID else {
+            throw TaskControlError.blocked("background_target_is_foreground")
+        }
+        guard hasPostEventAccess() else {
+            throw KeyboardControlError.permissionDenied("Post Events")
+        }
+
+        let planDigest = TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs)
+        let channel = TaskInputChannel(
+            taskID: plan.id,
+            planDigest: planDigest,
+            focusPolicy: .background,
+            targetApplication: targetInstance.application,
+            targetInstanceRef: instanceRef,
+            targetWindowRef: windowRef,
+            routes: [.exactProcessDirected],
+            expiresAt: Date().addingTimeInterval(
+                min(plan.totalTimeout, KeyboardDriveStore.maximumLifetime)
+            )
+        )
+        return TaskExecutionAuthority(
+            leaseToken: nil,
+            leaseExpiresAt: channel.expiresAt,
+            fresh: true,
+            inputChannel: channel,
+            revalidate: { [resolveApplicationTarget, foregroundApplication, nativeWindowDisplayProvider] in
+                let current: ApplicationInstanceInfo
+                do {
+                    current = try resolveApplicationTarget(selector)
+                } catch {
+                    throw TaskControlError.blocked("exact_target_instance_changed")
+                }
+                guard current.processID == targetPID,
+                      current.instanceRef == instanceRef,
+                      current.application.isRunning else {
+                    throw TaskControlError.blocked("exact_target_instance_changed")
+                }
+                let window: NativeWindowTargetSnapshot
+                do {
+                    window = try windowInspector.inspectWindow(
+                        pid: targetPID,
+                        windowRef: windowRef,
+                        displays: nativeWindowDisplayProvider.connectedDisplays()
+                    )
+                } catch {
+                    throw TaskControlError.blocked("exact_window_binding_unavailable")
+                }
+                guard window.unique, window.focused, window.visible, !window.minimized else {
+                    throw TaskControlError.blocked("exact_window_not_process_focused")
+                }
+                guard let currentForeground = foregroundApplication(),
+                      currentForeground.processID == foregroundPID,
+                      currentForeground.processID != targetPID else {
+                    throw TaskControlError.blocked("background_foreground_changed")
+                }
+                return current.application
+            },
+            fingerprint: {
+                ControlTargetFingerprints.structuralDigest(
+                    [String(targetPID), instanceRef, windowRef].joined(separator: "|")
+                )
             }
         )
     }
@@ -4853,7 +5807,9 @@ public final class MacCtlService {
                     "name": .string(inputChannel.targetApplication.name),
                     "bundle_id": inputChannel.targetApplication.bundleID.map(JSONValue.string) ?? .null,
                     "process_id": inputChannel.targetApplication.processID
-                        .map { .number(Double($0)) } ?? .null
+                        .map { .number(Double($0)) } ?? .null,
+                    "instance_ref": inputChannel.targetInstanceRef.map(JSONValue.string) ?? .null,
+                    "window_ref": inputChannel.targetWindowRef.map(JSONValue.string) ?? .null
                 ]),
                 "routes": .array(inputChannel.routes.map { .string($0.rawValue) }),
                 "expires_at_unix_seconds": .number(inputChannel.expiresAt.timeIntervalSince1970)
@@ -5335,8 +6291,10 @@ public final class MacCtlService {
                 "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
                 "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
+                "receipts.trace.begin", "receipts.trace.complete", "receipts.trace",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
                 "task.resume", "task.cancel", "adapter.capabilities",
+                "action.resolve", "action.run",
                 "shortcut.audit", "shortcut.propose", "shortcut.inspect", "shortcut.setup", "shortcut.run", "shortcut.remove"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
@@ -5363,6 +6321,9 @@ public final class MacCtlService {
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capabilities is a fast route probe that may read a cached broad profile but never walks the Accessibility tree",
                 "web-content target surfaces fail closed with a machine-readable browser-provider handoff and never activate browser UI",
+                "cross-provider traces join Mac Control handoff evidence with browser observations while preserving provider-specific provenance",
+                "cross-provider completion credentials are short-lived, single-use, stdin-only, stored only as digests, and never authorize provider execution",
+                "browser completion remains orchestrator_declared until a browser-owned attestation channel is available",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
                 "selector addressability identifies a requested route but never invents a universal fallback ladder",
@@ -5630,6 +6591,269 @@ public final class MacCtlService {
         return try operation()
     }
 
+    private func beginCrossProviderTrace(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let allowedKeys: Set<String> = [
+            "source_method", "source_request_id", "source_started_at_ms", "app", "action",
+            "target_surface", "focus_policy", "task", "target_fingerprint", "selector"
+        ]
+        let unexpected = Set(request.params.keys).subtracting(allowedKeys)
+        guard unexpected.isEmpty else {
+            throw CrossProviderTraceError.unexpectedField(unexpected.sorted().first ?? "unknown")
+        }
+        let sourceMethod = try requiredString(request, key: "source_method")
+        guard ["control.perform", "control.batch"].contains(sourceMethod) else {
+            throw CrossProviderTraceError.invalidField("source_method")
+        }
+        let sourceRequestID = try requiredString(request, key: "source_request_id")
+        guard sourceRequestID.utf8.count <= 128 else {
+            throw CrossProviderTraceError.invalidField("source_request_id")
+        }
+        guard request.params["target_surface"]?.stringValue == ControlTargetSurface.webContent.rawValue else {
+            throw CrossProviderTraceError.invalidField("target_surface")
+        }
+        guard let application = request.params["app"]?.stringValue, !application.isEmpty else {
+            throw CrossProviderTraceError.invalidField("app")
+        }
+        if sourceMethod == "control.perform",
+           request.params["action"]?.stringValue?.isEmpty != false {
+            throw CrossProviderTraceError.invalidField("action")
+        }
+
+        let now = lifecycleNow()
+        let startedAt: Date
+        if let milliseconds = request.params["source_started_at_ms"]?.doubleValue,
+           milliseconds.isFinite {
+            let candidate = Date(timeIntervalSince1970: milliseconds / 1_000)
+            guard candidate <= now, candidate >= now.addingTimeInterval(-60) else {
+                throw CrossProviderTraceError.invalidField("source_started_at_ms")
+            }
+            startedAt = candidate
+        } else {
+            startedAt = now
+        }
+        let requestedPolicy = request.params["focus_policy"]?.stringValue
+            .flatMap(FocusPolicy.init(rawValue:)) ?? .automatic
+        let traceID = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let spanID = String(
+            UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
+        )
+        let operationID = UUID().uuidString
+        let context = try crossProviderTraceStore.prepare(
+            traceID: traceID,
+            rootSpanID: spanID,
+            rootOperationID: operationID,
+            now: now
+        )
+
+        var projectedParams = request.params
+        projectedParams.removeValue(forKey: "source_method")
+        projectedParams.removeValue(forKey: "source_request_id")
+        projectedParams.removeValue(forKey: "source_started_at_ms")
+        projectedParams["app"] = .string(Self.normalizedWebContentApplicationSelector(application))
+        let projectedRequest = RequestEnvelope(
+            requestID: sourceRequestID,
+            method: sourceMethod,
+            params: projectedParams
+        )
+        let rootReceipt = OperationReceipt(
+            operationID: operationID,
+            requestID: sourceRequestID,
+            method: sourceMethod,
+            source: "cli",
+            workflowID: nil,
+            targetSurface: nil,
+            providerTargetSurface: .webContent,
+            requestedFocusPolicy: requestedPolicy,
+            focusPolicy: .background,
+            focusSelectionReason: "browser_provider_handoff_no_native_activation",
+            risk: nil,
+            executionResult: MacCtlErrorCode.providerHandoffRequired.rawValue,
+            verificationResult: "handoff_pending",
+            planDigest: nil,
+            taskID: request.params["task"]?.stringValue,
+            route: "browser_dom",
+            lifecycleState: CrossProviderTraceState.open.rawValue,
+            actionOutcome: AgentActionOutcome(
+                state: .actionUnavailable,
+                route: "browser_dom",
+                verification: "browser_provider_readback_required",
+                failureClass: "action_unavailable",
+                fallbackAllowed: true,
+                recommendedProvider: "browser_dom",
+                freshStateRequired: true,
+                nextAction: "submit_browser_target_plan"
+            ),
+            controlTarget: controlReceiptTarget(for: projectedRequest),
+            traceID: traceID,
+            spanID: spanID,
+            provider: "mac_control",
+            providerProvenance: .macControlAttested,
+            foregroundState: .preserved,
+            startedAtMilliseconds: Self.epochMilliseconds(startedAt),
+            completedAtMilliseconds: Self.epochMilliseconds(now),
+            runtimeIdentity: .current(),
+            permissionContext: permissionContext,
+            permissions: permissionContext == "daemon"
+                ? PermissionDiagnostics.report()
+                : PermissionDiagnostics.unknownReport(),
+            status: .blocked,
+            errorCode: MacCtlErrorCode.providerHandoffRequired.rawValue,
+            evidence: [ReceiptEvidence(kind: "provider_handoff", source: "macctld")],
+            startedAt: startedAt,
+            completedAt: now
+        )
+        do {
+            try receiptStore.record(rootReceipt)
+        } catch {
+            try? crossProviderTraceStore.discard(traceID: traceID)
+            throw error
+        }
+
+        return try success(
+            request,
+            operationID: operationID,
+            result: [
+                "trace": try JSONValue.fromEncodable(context),
+                "trace_state": .string(CrossProviderTraceState.open.rawValue),
+                "source_request_id": .string(sourceRequestID)
+            ],
+            evidence: [Evidence(
+                kind: "cross_provider_trace",
+                message: "Mac Control opened a redacted browser-provider trace without activating browser UI",
+                source: "macctld",
+                metadata: [
+                    "trace_id": .string(traceID),
+                    "span_id": .string(spanID),
+                    "provider": .string("browser_dom"),
+                    "provenance": .string(CrossProviderTraceProvenance.macControlAttested.rawValue)
+                ]
+            )]
+        )
+    }
+
+    private func completeCrossProviderTrace(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let completion = try CrossProviderCompletionRequest.from(params: request.params)
+        let rootObservations = try receiptStore.trace(completion.traceID)
+        guard let root = rootObservations.first(where: {
+            $0.parentSpanID == nil && $0.provider == "mac_control"
+        }) else {
+            throw CrossProviderTraceError.notFound
+        }
+        let completedAt = lifecycleNow()
+        let childOperationID = "trace-\(completion.traceID)-\(completion.providerObservationDigest.prefix(12))"
+        let childSpanID = String(completion.providerObservationDigest.prefix(16))
+        let disposition = try crossProviderTraceStore.complete(
+            completion,
+            now: completedAt
+        ) { _ in
+            let outcomeState: AgentActionOutcomeState = switch completion.status {
+            case .verified: .verifiedSuccess
+            case .failed: .actionFailed
+            case .blocked: .verificationUnavailable
+            }
+            let childReceipt = OperationReceipt(
+                operationID: childOperationID,
+                requestID: completion.traceID,
+                method: "provider.\(completion.provider).complete",
+                source: "orchestrator",
+                workflowID: nil,
+                targetSurface: nil,
+                providerTargetSurface: .webContent,
+                requestedFocusPolicy: root.requestedFocusPolicy,
+                focusPolicy: root.focusPolicy,
+                focusSelectionReason: root.focusSelectionReason,
+                backgroundUnavailableReason: root.backgroundUnavailableReason,
+                risk: nil,
+                executionResult: completion.status.operationStatus.rawValue,
+                verificationResult: completion.status.verificationResult,
+                planDigest: nil,
+                taskID: root.taskID,
+                route: completion.provider,
+                lifecycleState: completion.status.traceState.rawValue,
+                actionOutcome: AgentActionOutcome(
+                    state: outcomeState,
+                    provider: completion.provider,
+                    route: completion.provider,
+                    verification: completion.verificationKind,
+                    failureClass: completion.status == .verified ? nil : completion.status.rawValue,
+                    fallbackAllowed: false,
+                    freshStateRequired: false
+                ),
+                controlTarget: root.controlTarget,
+                traceID: completion.traceID,
+                spanID: childSpanID,
+                parentSpanID: root.spanID,
+                providerObservationDigest: completion.providerObservationDigest,
+                provider: completion.provider,
+                providerProvenance: .orchestratorDeclared,
+                providerSessionDigest: completion.providerSessionDigest,
+                providerTurnDigest: completion.providerTurnDigest,
+                providerTabDigest: completion.providerTabDigest,
+                foregroundState: completion.foregroundState,
+                startedAtMilliseconds: root.completedAtMilliseconds
+                    ?? Self.epochMilliseconds(root.completedAt),
+                completedAtMilliseconds: Self.epochMilliseconds(completedAt),
+                runtimeIdentity: .current(),
+                permissionContext: self.permissionContext,
+                permissions: self.permissionContext == "daemon"
+                    ? PermissionDiagnostics.report()
+                    : PermissionDiagnostics.unknownReport(),
+                status: completion.status.operationStatus,
+                errorCode: completion.status == .verified
+                    ? nil
+                    : MacCtlErrorCode.operationFailed.rawValue,
+                evidence: [ReceiptEvidence(kind: "provider_completion", source: "orchestrator")],
+                startedAt: root.completedAt,
+                completedAt: completedAt
+            )
+            try self.receiptStore.record(childReceipt)
+        }
+
+        let view = try traceView(traceID: completion.traceID, now: completedAt)
+        return try success(
+            request,
+            operationID: childOperationID,
+            value: view,
+            evidence: [Evidence(
+                kind: "cross_provider_trace",
+                message: disposition.duplicate
+                    ? "The identical browser-provider observation was already joined"
+                    : "The browser-provider observation was joined with explicit orchestrator provenance",
+                source: "macctld",
+                metadata: [
+                    "trace_id": .string(completion.traceID),
+                    "provider": .string(completion.provider),
+                    "provenance": .string(CrossProviderTraceProvenance.orchestratorDeclared.rawValue),
+                    "duplicate": .bool(disposition.duplicate)
+                ]
+            )]
+        )
+    }
+
+    private func inspectCrossProviderTrace(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let traceID = try requiredString(request, key: "trace_id")
+        return try success(request, value: traceView(traceID: traceID, now: lifecycleNow()))
+    }
+
+    private func traceView(traceID: String, now: Date) throws -> CrossProviderTraceView {
+        guard CrossProviderCompletionRequest.isTraceID(traceID) else {
+            throw CrossProviderTraceError.invalidField("trace_id")
+        }
+        let pending = try crossProviderTraceStore.record(traceID: traceID)
+        let observations = try receiptStore.trace(traceID)
+        guard !observations.isEmpty else { throw CrossProviderTraceError.notFound }
+        return CrossProviderTraceView(
+            traceID: traceID,
+            pending: pending,
+            observations: observations,
+            now: now
+        )
+    }
+
+    private static func epochMilliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
     private func recordReceipt(
         for request: RequestEnvelope,
         response: ResponseEnvelope,
@@ -5729,6 +6953,8 @@ public final class MacCtlService {
             case "task.run", "task.resume": approvalState = response.status == .succeeded ? "approved" : "required"
             default: approvalState = "not_required"
             }
+        } else if ["window.place", "window.restore"].contains(request.method) {
+            approvalState = request.params["confirm"]?.boolValue == true ? "confirmed" : "required"
         } else {
             approvalState = "not_required"
         }
@@ -5767,12 +6993,16 @@ public final class MacCtlService {
             verificationResult: verificationResult,
             planDigest: response.result["plan_digest"]?.stringValue
                 ?? response.result["planDigest"]?.stringValue
+                ?? (request.method.hasPrefix("action.")
+                    ? response.result["resolution_id"]?.stringValue ?? request.params["resolution_id"]?.stringValue
+                    : nil)
                 ?? checkpoint?.planDigest,
             taskID: taskID,
             stepID: taskStepID,
             route: response.result["last_route"]?.stringValue
                 ?? response.result["lastRoute"]?.stringValue
                 ?? response.result["route"]?.stringValue
+                ?? response.outcome?.route
                 ?? checkpoint?.route,
             adapterID: taskStep?.action.parameters["adapter_id"]?.stringValue,
             recoveryClassification: taskStep?.recovery.mode,
@@ -5784,7 +7014,7 @@ public final class MacCtlService {
                 : taskLifecycleState == TaskLifecycleState.completed.rawValue ? "passed" : nil,
             lifecycleState: taskLifecycleState,
             actionOutcome: response.outcome,
-            controlTarget: controlReceiptTarget(for: request),
+            controlTarget: controlReceiptTarget(for: request, response: response),
             runtimeIdentity: .current(),
             permissionContext: permissionContext,
             permissions: permissions,
@@ -5808,11 +7038,26 @@ public final class MacCtlService {
         }
     }
 
-    private func controlReceiptTarget(for request: RequestEnvelope) -> ControlReceiptTarget? {
-        guard request.method.hasPrefix("control.") else { return nil }
+    private func controlReceiptTarget(
+        for request: RequestEnvelope,
+        response: ResponseEnvelope
+    ) -> ControlReceiptTarget? {
+        guard request.method.hasPrefix("control.")
+                || request.method.hasPrefix("window.")
+                || request.method.hasPrefix("action.") else { return nil }
+        let intentTarget = request.params["intent"]?["target"]?.objectValue
+        let responseTarget = response.result["target"]?.objectValue
+        let projectedApplication = intentTarget?["application"]?.stringValue
+            ?? responseTarget?["application"]?.stringValue
+        let projectedProcessID = intentTarget?["process_id"]?.intValue
+            ?? responseTarget?["process_id"]?.intValue
         let application: AppInfo?
         if let requestedApplication = request.params["app"]?.stringValue {
             application = try? resolveApplication(requestedApplication)
+        } else if let projectedApplication, let projectedProcessID {
+            application = listApplicationInstances(projectedApplication)
+                .first(where: { $0.processID == Int32(projectedProcessID) })?
+                .application
         } else {
             application = foregroundApplication()
         }
@@ -5823,7 +7068,9 @@ public final class MacCtlService {
             "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor",
             "windowTitle", "windowIdentifier"
         ]
-        let selectorObject = request.params["selector"]?.objectValue ?? [:]
+        let selectorObject = request.params["selector"]?.objectValue
+            ?? intentTarget?["selector"]?.objectValue
+            ?? [:]
         var selectorValues: [String: JSONValue] = [:]
         for key in selectorKeys {
             if let value = selectorObject[key] ?? request.params[key], value != .null {
@@ -5839,13 +7086,27 @@ public final class MacCtlService {
             }.joined(separator: "|"))
         }
 
+        if let projectedLocatorDigest = responseTarget?["locator_digest"]?.stringValue {
+            locatorDigest = projectedLocatorDigest
+        }
+        let projectedSelectorFields = responseTarget?["selector_fields"]?.arrayValue?
+            .compactMap(\.stringValue)
         return ControlReceiptTarget(
             application: ControlReceiptApplication(application: application),
-            action: request.params["action"]?.stringValue ?? request.method,
+            action: request.params["action"]?.stringValue
+                ?? request.params["intent"]?["action"]?.stringValue
+                ?? request.method,
             targetFingerprintDigest: request.params["target_fingerprint"]?.stringValue
                 .map(CapabilityProfileDigest.make),
             locatorDigest: locatorDigest,
-            selectorFields: selectorFields
+            selectorFields: projectedSelectorFields ?? selectorFields
+        )
+    }
+
+    private func controlReceiptTarget(for request: RequestEnvelope) -> ControlReceiptTarget? {
+        controlReceiptTarget(
+            for: request,
+            response: ResponseEnvelope(requestID: request.requestID, status: .succeeded)
         )
     }
 
@@ -6035,6 +7296,115 @@ public final class MacCtlService {
                 message: error.localizedDescription,
                 source: "macctld"
             )]
+        case let error as ExactActionIntentError:
+            status = .blocked
+            switch error {
+            case .invalid:
+                status = .failed
+                code = .actionIntentInvalid
+            case .resolutionNotFound:
+                code = .actionResolutionNotFound
+            case .resolutionExpired:
+                code = .actionResolutionExpired
+            case .resolutionAlreadyUsed:
+                code = .actionResolutionAlreadyUsed
+            case .verificationUnavailable:
+                code = .controlVerificationUnavailable
+            default:
+                code = .taskBlocked
+            }
+            details = [
+                "failure_class": .string(error.failureClass),
+                "provider": .string("mac_control"),
+                "route": .string(ExactActionIntentController.route),
+                "focus_policy": .string(FocusPolicy.background.rawValue),
+                "foreground_budget": .number(0),
+                "retryable": .bool(false)
+            ]
+            if case .targetAmbiguous(let count) = error, let count {
+                details["candidate_count"] = .number(Double(count))
+            }
+            evidence = [Evidence(
+                kind: "exact_action_guard",
+                message: error.localizedDescription,
+                source: "macctld",
+                metadata: details
+            )]
+        case let error as ApplicationTargetResolutionError:
+            status = .blocked
+            code = .operationFailed
+            switch error {
+            case .targetMissing:
+                details["failure_class"] = .string("target_missing")
+            case .targetAmbiguous(let count):
+                details["failure_class"] = .string("target_ambiguous")
+                details["candidate_count"] = .number(Double(count))
+            case .targetChanged:
+                details["failure_class"] = .string("target_changed")
+            }
+            details["provider"] = .string("mac_control")
+            details["route"] = .string("application_instance_resolution")
+            details["retryable"] = .bool(false)
+            evidence = [Evidence(
+                kind: "application_target_resolution_failure",
+                message: error.localizedDescription,
+                source: "macctld",
+                metadata: details
+            )]
+        case let error as NativeWindowControlError:
+            let outcomeState: AgentActionOutcomeState
+            switch error {
+            case .permissionDenied:
+                status = .blocked
+                code = .permissionDenied
+                outcomeState = .permissionBlocked
+            case .targetMissing, .restoreNotFound, .restoreExpired, .restoreAlreadyUsed:
+                status = .blocked
+                code = .operationFailed
+                outcomeState = .targetMissing
+            case .targetAmbiguous:
+                status = .blocked
+                code = .operationFailed
+                outcomeState = .targetAmbiguous
+            case .displayUnavailable(let displayID):
+                status = .blocked
+                code = .operationFailed
+                outcomeState = .targetResolutionIncomplete
+                details["display_id"] = .number(Double(displayID))
+            case .confirmationRequired:
+                status = .blocked
+                code = .approvalRequired
+                outcomeState = .actionUnavailable
+            case .targetUnsupported:
+                status = .failed
+                code = .operationFailed
+                outcomeState = .actionUnavailable
+            case .verificationUnavailable:
+                status = .failed
+                code = .controlVerificationUnavailable
+                outcomeState = .verificationUnavailable
+            }
+            details["provider"] = .string("mac_control")
+            details["route"] = .string("native_accessibility")
+            details["retryable"] = .bool(false)
+            evidence = [Evidence(
+                kind: "native_window_control_failure",
+                message: error.localizedDescription,
+                source: "macctld"
+            )]
+            return failure(
+                request,
+                status: status,
+                code: code,
+                message: error.localizedDescription,
+                evidence: evidence,
+                details: details,
+                outcome: AgentActionOutcome(
+                    state: outcomeState,
+                    route: "native_accessibility",
+                    verification: outcomeState == .verificationUnavailable ? "unavailable" : "not_run"
+                )
+            )
         case let error as AuthorizationNoticeStoreError:
             switch error {
             case .invalidField, .invalidSourceReference:
@@ -6267,7 +7637,18 @@ public final class MacCtlService {
             case .applicationNotRunning:
                 status = .blocked
                 code = .accessibilityTreeUnavailable
-            case .ambiguousMatch, .windowNotFound, .ambiguousWindowMatch,
+            case .windowNotFound:
+                status = .blocked
+                code = .taskBlocked
+                details["failure_class"] = .string("target_missing")
+                details["retryable"] = .bool(false)
+            case .ambiguousWindowMatch(let count):
+                status = .blocked
+                code = .taskBlocked
+                details["failure_class"] = .string("target_ambiguous")
+                details["candidate_count"] = .number(Double(count))
+                details["retryable"] = .bool(false)
+            case .ambiguousMatch,
                  .unreadableFocus, .elementNotFound, .scrollTargetRequired, .scrollUnavailable,
                  .actionUnavailable:
                 status = .blocked
@@ -6431,6 +7812,22 @@ public final class MacCtlService {
             case .alreadyUsed: code = .approvalAlreadyUsed
             case .mismatch: code = .approvalMismatch
             }
+        case let error as CrossProviderTraceError:
+            status = .blocked
+            switch error {
+            case .invalidRequest, .invalidField, .unexpectedField:
+                code = .crossProviderTraceInvalid
+            case .notFound:
+                code = .crossProviderTraceNotFound
+            case .expired:
+                code = .crossProviderTraceExpired
+            case .alreadyCompleted:
+                code = .crossProviderTraceAlreadyCompleted
+            case .tokenMismatch, .observationMismatch:
+                code = .crossProviderTraceMismatch
+            case .storageUnavailable:
+                code = .crossProviderTraceStorageUnavailable
+            }
         case let error as TaskApprovalStoreError:
             status = .blocked
             switch error {
@@ -6548,6 +7945,7 @@ public final class MacCtlService {
         switch failureClass {
         case "target_missing": state = .targetMissing
         case "target_ambiguous": state = .targetAmbiguous
+        case "target_changed": state = .targetChanged
         case "target_resolution_incomplete": state = .targetResolutionIncomplete
         case "action_unavailable": state = .actionUnavailable
         case "no_observed_change": state = .noObservedChange

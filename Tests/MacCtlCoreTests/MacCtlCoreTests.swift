@@ -7,36 +7,6 @@ import XCTest
 @testable import MacCtlCore
 
 final class MacCtlCoreTests: XCTestCase {
-    func testApprovalHUDDismissesWhenActionConsumesTheApproval() {
-        let response = ResponseEnvelope(
-            requestID: "request-1",
-            status: .blocked,
-            error: MacCtlError(
-                code: MacCtlErrorCode.taskApprovalRequired.rawValue,
-                message: "Task approval token was already used"
-            )
-        )
-
-        XCTAssertTrue(
-            ApprovalHUD.shouldDismissAfterAction(
-                response: response,
-                approvalIsPending: false
-            )
-        )
-        XCTAssertFalse(
-            ApprovalHUD.shouldDismissAfterAction(
-                response: response,
-                approvalIsPending: true
-            )
-        )
-        XCTAssertTrue(
-            ApprovalHUD.shouldDismissAfterAction(
-                response: ResponseEnvelope(requestID: "request-2", status: .succeeded),
-                approvalIsPending: nil
-            )
-        )
-    }
-
     func testRequestAndResponseUseSnakeCaseEnvelopeKeys() throws {
         let request = RequestEnvelope(
             requestID: "request-1",
@@ -1880,7 +1850,7 @@ final class MacCtlCoreTests: XCTestCase {
         let receipt = try XCTUnwrap(
             receiptStore.list(limit: 10).first(where: { $0.method == "control.perform" })
         )
-        XCTAssertEqual(receipt.schemaVersion, 3)
+        XCTAssertEqual(receipt.schemaVersion, 4)
         XCTAssertEqual(receipt.actionOutcome?.state, .targetAmbiguous)
         XCTAssertEqual(receipt.actionOutcome?.failureClass, "target_ambiguous")
         XCTAssertEqual(receipt.controlTarget?.application.bundleID, app.bundleID)
@@ -3078,10 +3048,14 @@ final class MacCtlCoreTests: XCTestCase {
     func testWebContentCapabilitiesAndExecutionReturnBrowserHandoffWithoutActivation() {
         let app = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
         var activationCount = 0
+        var resolvedApplicationSelectors: [String] = []
         let service = MacCtlService(
             permissionContext: "test",
             foregroundApplication: { app },
-            resolveApplication: { _ in app },
+            resolveApplication: {
+                resolvedApplicationSelectors.append($0)
+                return app
+            },
             activateApplication: { _ in
                 activationCount += 1
                 return app
@@ -3105,6 +3079,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(
             capabilities.result["handoffProviders"]?.arrayValue?.contains(.string("browser_dom")) == true
         )
+        XCTAssertEqual(resolvedApplicationSelectors.first, "Google Chrome")
 
         let execution = service.handle(RequestEnvelope(
             method: "control.perform",
@@ -3267,6 +3242,23 @@ final class MacCtlCoreTests: XCTestCase {
         )
         XCTAssertFalse(osMismatch.cacheHit)
         XCTAssertTrue(osMismatch.invalidationReasons.contains(.osChanged))
+
+        let profileV2 = CapabilityProfileBuilder.build(
+            application: appV2,
+            osVersion: "macOS Test",
+            providerState: granted,
+            tree: capabilityTree(for: appV2, identifier: "results-v2", scrollable: true),
+            now: now.addingTimeInterval(2)
+        )
+        _ = try store.save(profileV2)
+        let refreshedVersion = store.lookup(
+            application: appV2,
+            osVersion: "macOS Test",
+            providerState: granted
+        )
+        XCTAssertTrue(refreshedVersion.cacheHit)
+        XCTAssertTrue(refreshedVersion.invalidationReasons.isEmpty)
+        XCTAssertFalse(refreshedVersion.summary.deepAuditRecommended)
     }
 
     func testCapabilityScrollLocatorsUseAncestorDigestsToDisambiguateRepeatedTargets() throws {
@@ -3665,7 +3657,8 @@ final class MacCtlCoreTests: XCTestCase {
             foregroundApplication: { app },
             resolveApplication: { _ in app },
             capabilityProfileStore: profileStore,
-            accessibilityTreeInspector: inspector
+            accessibilityTreeInspector: inspector,
+            capabilityAuditOpportunityScheduler: { _ in }
         )
 
         let fast = service.handle(RequestEnvelope(
@@ -3677,6 +3670,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertNil(inspector.lastMaxNodes)
         XCTAssertEqual(fast.result["cachedBroadProfile"]?.objectValue?["cacheHit"]?.boolValue, false)
         XCTAssertEqual(fast.result["cachedBroadProfile"]?.objectValue?["deepAuditRecommended"]?.boolValue, true)
+        XCTAssertEqual(fast.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "scheduled")
 
         let deep = service.handle(RequestEnvelope(
             method: "control.capability_audit",
@@ -3694,6 +3688,102 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(fastWithCache.status, .succeeded)
         XCTAssertEqual(fastWithCache.result["cachedBroadProfile"]?.objectValue?["cacheHit"]?.boolValue, true)
         XCTAssertEqual(inspector.lastMaxNodes, 500)
+    }
+
+    func testCapabilityProbeUsesNormalRunningAppAsReadOnlyAuditOpportunity() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-capability-opportunity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = testApp(name: "Notes", processID: 42, bundleVersion: "1")
+        let inspector = RecordingAccessibilityTreeInspector(
+            tree: capabilityTree(for: app, identifier: "notes-body", scrollable: true)
+        )
+        let profileStore = CapabilityProfileStore(directory: directory)
+        var scheduledWork: (() -> Void)?
+        var scheduleCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            capabilityProfileStore: profileStore,
+            accessibilityTreeInspector: inspector,
+            capabilityAuditOpportunityScheduler: { work in
+                scheduleCount += 1
+                scheduledWork = work
+            }
+        )
+
+        let first = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: ["app": .string("Notes")]
+        ))
+        XCTAssertEqual(first.status, .succeeded)
+        XCTAssertEqual(first.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "scheduled")
+        XCTAssertEqual(first.result["auditOpportunity"]?.objectValue?["launchesApplications"]?.boolValue, false)
+        XCTAssertEqual(first.result["auditOpportunity"]?.objectValue?["dispatchesActions"]?.boolValue, false)
+        XCTAssertEqual(scheduleCount, 1)
+        XCTAssertNil(inspector.lastMaxNodes)
+
+        let duplicate = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: ["app": .string("Notes")]
+        ))
+        XCTAssertEqual(duplicate.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "in_progress")
+        XCTAssertEqual(scheduleCount, 1)
+
+        try XCTUnwrap(scheduledWork)()
+        XCTAssertEqual(inspector.lastMaxNodes, 500)
+        XCTAssertEqual(profileStore.list().count, 1)
+
+        let satisfied = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: ["app": .string("Notes")]
+        ))
+        XCTAssertEqual(satisfied.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "satisfied")
+        XCTAssertEqual(scheduleCount, 1)
+    }
+
+    func testCapabilityProbeDoesNotAuditWebContentOrLaunchClosedApps() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-capability-opportunity-boundary-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runningBrowser = testApp(name: "Chrome", processID: 42, bundleVersion: "1")
+        let closedApp = AppInfo(
+            name: "Notes",
+            bundleID: "com.apple.Notes",
+            path: "/Applications/Notes.app",
+            isRunning: false,
+            processID: nil,
+            bundleVersion: "1"
+        )
+        let inspector = RecordingAccessibilityTreeInspector(
+            tree: capabilityTree(for: runningBrowser, identifier: "web-area", scrollable: true)
+        )
+        var scheduleCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplication: { selector in selector == "Notes" ? closedApp : runningBrowser },
+            capabilityProfileStore: CapabilityProfileStore(directory: directory),
+            accessibilityTreeInspector: inspector,
+            capabilityAuditOpportunityScheduler: { _ in scheduleCount += 1 }
+        )
+
+        let web = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: [
+                "app": .string("Chrome"),
+                "target_surface": .string("web_content")
+            ]
+        ))
+        XCTAssertEqual(web.status, .succeeded)
+        XCTAssertEqual(web.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "not_applicable")
+
+        let closed = service.handle(RequestEnvelope(
+            method: "control.capabilities",
+            params: ["app": .string("Notes")]
+        ))
+        XCTAssertEqual(closed.status, .succeeded)
+        XCTAssertEqual(closed.result["auditOpportunity"]?.objectValue?["state"]?.stringValue, "not_observed")
+        XCTAssertEqual(scheduleCount, 0)
+        XCTAssertNil(inspector.lastMaxNodes)
     }
 
     func testCapabilityAuditRetriesTruncatedTreesWithinBoundedCeiling() throws {
@@ -4615,7 +4705,7 @@ final class MacCtlCoreTests: XCTestCase {
         ))
 
         XCTAssertTrue(chrome.contractCapabilities.contains("window_scoped_accessibility_selector"))
-        XCTAssertEqual(chrome.schemaVersion, 5)
+        XCTAssertEqual(chrome.schemaVersion, 6)
         XCTAssertTrue(chrome.contractCapabilities.contains("control.capability_leads"))
         XCTAssertTrue(chrome.contractCapabilities.contains("verified_context_menu"))
         XCTAssertTrue(chrome.contractCapabilities.contains("control.blocker_observations"))
@@ -5108,6 +5198,17 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertFalse(nonzeroExit.healthy)
     }
 
+    func testDefaultTestServiceIsolatesReceiptsFromProductionDirectory() throws {
+        let service = MacCtlService(permissionContext: "test")
+
+        let response = service.handle(RequestEnvelope(method: "receipts.status"))
+
+        XCTAssertEqual(response.status, .succeeded)
+        let directory = try XCTUnwrap(response.result["directory"]?.stringValue)
+        XCTAssertTrue(directory.contains("macctl-test-receipts-"))
+        XCTAssertNotEqual(directory, MacCtlPaths.receiptsDirectory.path)
+    }
+
     func testOperationReceiptsAreBoundedOwnerOnlyAndDoNotPersistEvidenceText() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-receipts-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -5527,6 +5628,447 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(report.route, "task_input_process")
     }
 
+    func testExactForegroundKeyRequiresCompleteStrictBindingAndWindowPostcondition() throws {
+        let targetJSON = Data(
+            #"{"application":"Code","process_id":402,"instance_ref":"instance-402","window_ref":"window-402"}"#.utf8
+        )
+        let decoded = try JSONCodec.decode(TaskTargetIdentity.self, from: targetJSON)
+        XCTAssertEqual(decoded.instanceRef, "instance-402")
+        XCTAssertEqual(decoded.windowRef, "window-402")
+
+        let action = ActionSpec(
+            kind: .key,
+            surface: .macApp,
+            parameters: ["key": .string("cmd+shift+m")]
+        )
+        let postcondition = TaskPredicate(
+            kind: .elementExists,
+            selector: Selector(role: "AXStaticText", containsText: "Type mismatch")
+        )
+        let valid = TaskPlan(
+            id: "foreground.exact.key",
+            name: "Exact foreground key",
+            summary: "Open one exact window surface",
+            focusPolicy: .foreground,
+            steps: [TaskStep(
+                id: "open-problems",
+                action: action,
+                target: decoded,
+                postconditions: [postcondition],
+                risk: .sensitive,
+                approvalReason: "Open Problems in the disposable window",
+                recovery: TaskRecoveryPolicy(mode: "strict", maxAttempts: 1)
+            )]
+        )
+        XCTAssertTrue(TaskPlanValidator.validate(valid).valid)
+
+        let partial = TaskPlan(
+            id: "foreground.exact.partial",
+            name: "Partial exact target",
+            summary: "Reject a partial exact binding",
+            focusPolicy: .foreground,
+            steps: [TaskStep(
+                id: "partial",
+                action: action,
+                target: TaskTargetIdentity(
+                    application: "Code",
+                    processID: 402,
+                    instanceRef: "instance-402"
+                ),
+                risk: .sensitive,
+                approvalReason: "Test rejection",
+                recovery: .strict
+            )]
+        )
+        let rejected = TaskPlanValidator.validate(partial)
+        XCTAssertFalse(rejected.valid)
+        XCTAssertTrue(rejected.errors.contains { $0.contains("process_id, instance_ref, and window_ref") })
+    }
+
+    func testExactBackgroundKeyBindsWindowBeforeDispatchAndScopesPostcondition() throws {
+        let target = AppInfo(
+            name: "Visual Studio Code",
+            bundleID: "com.microsoft.VSCode",
+            path: "/Applications/Visual Studio Code.app",
+            isRunning: true,
+            processID: 4402
+        )
+        let foreground = AppInfo(
+            name: "Visual Studio Code",
+            bundleID: "com.microsoft.VSCode",
+            path: "/Applications/Visual Studio Code.app",
+            isRunning: true,
+            processID: 4403
+        )
+        var sent: (String, pid_t)?
+        var inspectedWindow: String?
+        var observedWindow: String?
+        let executor = makeExactKeyExecutor(
+            foreground: foreground,
+            backgroundSendKey: { key, pid in sent = (key, pid) },
+            exactWindowBinding: { pid, windowRef in
+                inspectedWindow = windowRef
+                return self.exactWindowSnapshot(pid: pid, windowRef: windowRef)
+            },
+            exactWindowElementExists: { _, windowRef, _ in
+                observedWindow = windowRef
+                return true
+            }
+        )
+        let channel = TaskInputChannel(
+            channelID: "exact-input-test",
+            taskID: "background.exact",
+            planDigest: "exact-digest",
+            focusPolicy: .background,
+            targetApplication: target,
+            targetInstanceRef: "instance-4402",
+            targetWindowRef: "window-4402",
+            routes: [.exactProcessDirected],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let context = TaskActionContext(
+            taskID: channel.taskID,
+            stepID: "open-problems",
+            target: TaskTargetIdentity(
+                application: "Visual Studio Code",
+                processID: 4402,
+                instanceRef: "instance-4402",
+                windowRef: "window-4402"
+            ),
+            focusPolicy: .background,
+            planDigest: channel.planDigest,
+            ephemeralInputs: [:],
+            deadline: channel.expiresAt,
+            authority: TaskExecutionAuthority(
+                leaseToken: nil,
+                leaseExpiresAt: channel.expiresAt,
+                inputChannel: channel,
+                revalidate: { target }
+            )
+        )
+
+        let report = try executor.execute(
+            action: ActionSpec(
+                kind: .key,
+                surface: .macApp,
+                parameters: ["key": .string("cmd+shift+m")]
+            ),
+            context: context
+        )
+        XCTAssertEqual(report.route, "task_input_exact_process")
+        XCTAssertEqual(inspectedWindow, "window-4402")
+        XCTAssertEqual(sent?.0, "cmd+shift+m")
+        XCTAssertEqual(sent?.1, 4402)
+
+        XCTAssertTrue(try executor.evaluate(
+            predicate: TaskPredicate(
+                kind: .elementExists,
+                selector: Selector(role: "AXStaticText", containsText: "Type mismatch")
+            ),
+            context: context
+        ))
+        XCTAssertEqual(observedWindow, "window-4402")
+    }
+
+    func testExactForegroundPostconditionUsesLeaseBoundPIDAndWindow() throws {
+        let target = AppInfo(
+            name: "Code",
+            bundleID: "com.jakyeamos.macctl.fixture.vscode.qualitylensc1",
+            path: "/private/tmp/MacCtl VS Code Fixture.app",
+            isRunning: true,
+            processID: 4404
+        )
+        var observedPID: pid_t?
+        var observedWindow: String?
+        let executor = makeExactKeyExecutor(
+            foreground: target,
+            backgroundSendKey: { _, _ in XCTFail("Exact foreground verification must not dispatch input") },
+            exactWindowBinding: { pid, windowRef in
+                self.exactWindowSnapshot(pid: pid, windowRef: windowRef)
+            },
+            exactWindowElementExists: { pid, windowRef, _ in
+                observedPID = pid
+                observedWindow = windowRef
+                return true
+            }
+        )
+        let channel = TaskInputChannel(
+            taskID: "foreground.exact.verify",
+            planDigest: "foreground-exact-digest",
+            focusPolicy: .foreground,
+            targetApplication: target,
+            targetInstanceRef: "instance-4404",
+            targetWindowRef: "window-4404",
+            routes: [.exactForeground],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let context = TaskActionContext(
+            taskID: channel.taskID,
+            stepID: "verify-problems",
+            target: TaskTargetIdentity(
+                application: "Code",
+                processID: 4404,
+                instanceRef: "instance-4404",
+                windowRef: "window-4404"
+            ),
+            focusPolicy: .foreground,
+            planDigest: channel.planDigest,
+            ephemeralInputs: [:],
+            deadline: channel.expiresAt,
+            authority: TaskExecutionAuthority(
+                leaseToken: "lease-4404",
+                leaseExpiresAt: channel.expiresAt,
+                inputChannel: channel,
+                revalidate: { target }
+            )
+        )
+
+        XCTAssertTrue(try executor.evaluate(
+            predicate: TaskPredicate(
+                kind: .elementExists,
+                selector: Selector(role: "AXStaticText", containsText: "Type mismatch")
+            ),
+            context: context
+        ))
+        XCTAssertEqual(observedPID, 4404)
+        XCTAssertEqual(observedWindow, "window-4404")
+    }
+
+    func testExactWindowExistenceTreatsDuplicateDescendantsAsAValidProof() throws {
+        XCTAssertTrue(try AccessibilityExistenceResolution.resolve(matchCount: 2, truncated: false))
+        XCTAssertTrue(try AccessibilityExistenceResolution.resolve(matchCount: 1, truncated: true))
+        XCTAssertFalse(try AccessibilityExistenceResolution.resolve(matchCount: 0, truncated: false))
+        XCTAssertThrowsError(
+            try AccessibilityExistenceResolution.resolve(matchCount: 0, truncated: true)
+        ) { error in
+            guard case AccessibilityControllerError.resolutionIncomplete(0) = error else {
+                return XCTFail("Expected a bounded-search failure with no matches, got \(error)")
+            }
+        }
+    }
+
+    func testExactBackgroundKeyMarksPostDispatchTargetRaceUncertain() throws {
+        let target = AppInfo(
+            name: "Visual Studio Code",
+            bundleID: "com.microsoft.VSCode",
+            path: "/Applications/Visual Studio Code.app",
+            isRunning: true,
+            processID: 4502
+        )
+        var validationCount = 0
+        var dispatched = false
+        let executor = makeExactKeyExecutor(
+            foreground: AppInfo(
+                name: "Finder",
+                bundleID: "com.apple.finder",
+                path: "/System/Library/CoreServices/Finder.app",
+                isRunning: true,
+                processID: 4503
+            ),
+            backgroundSendKey: { _, _ in dispatched = true },
+            exactWindowBinding: { pid, windowRef in
+                self.exactWindowSnapshot(pid: pid, windowRef: windowRef)
+            },
+            exactWindowElementExists: { _, _, _ in true }
+        )
+        let channel = TaskInputChannel(
+            taskID: "background.exact.race",
+            planDigest: "race-digest",
+            focusPolicy: .background,
+            targetApplication: target,
+            targetInstanceRef: "instance-4502",
+            targetWindowRef: "window-4502",
+            routes: [.exactProcessDirected],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let context = TaskActionContext(
+            taskID: channel.taskID,
+            stepID: "key",
+            target: TaskTargetIdentity(
+                application: target.name,
+                processID: 4502,
+                instanceRef: "instance-4502",
+                windowRef: "window-4502"
+            ),
+            focusPolicy: .background,
+            planDigest: channel.planDigest,
+            ephemeralInputs: [:],
+            deadline: channel.expiresAt,
+            authority: TaskExecutionAuthority(
+                leaseToken: nil,
+                leaseExpiresAt: channel.expiresAt,
+                inputChannel: channel,
+                revalidate: {
+                    validationCount += 1
+                    if validationCount >= 4 { throw TaskControlError.blocked("target_changed") }
+                    return target
+                }
+            )
+        )
+
+        XCTAssertThrowsError(try executor.execute(
+            action: ActionSpec(
+                kind: .key,
+                surface: .macApp,
+                parameters: ["key": .string("cmd+shift+m")]
+            ),
+            context: context
+        )) { error in
+            XCTAssertEqual(
+                error as? TaskActionExecutionError,
+                .uncertain("exact_process_delivery_target_changed")
+            )
+        }
+        XCTAssertTrue(dispatched)
+    }
+
+    func testExactBackgroundKeyStopsBeforeDispatchWhenWindowLosesProcessFocus() throws {
+        let target = AppInfo(
+            name: "Visual Studio Code",
+            bundleID: "com.microsoft.VSCode",
+            path: "/Applications/Visual Studio Code.app",
+            isRunning: true,
+            processID: 4602
+        )
+        var dispatched = false
+        let executor = makeExactKeyExecutor(
+            foreground: AppInfo(
+                name: "Finder",
+                bundleID: "com.apple.finder",
+                path: "/System/Library/CoreServices/Finder.app",
+                isRunning: true,
+                processID: 4603
+            ),
+            backgroundSendKey: { _, _ in dispatched = true },
+            exactWindowBinding: { pid, windowRef in
+                let focused = self.exactWindowSnapshot(pid: pid, windowRef: windowRef)
+                return NativeWindowTargetSnapshot(
+                    snapshot: NativeWindowSnapshot(
+                        processID: focused.processID,
+                        identityDigest: focused.windowRef,
+                        frame: focused.frame,
+                        displayID: focused.displayID,
+                        movable: focused.movable,
+                        resizable: focused.resizable,
+                        minimized: focused.minimized,
+                        fullscreen: focused.fullscreen
+                    ),
+                    unique: true,
+                    focused: false,
+                    visible: true
+                )
+            },
+            exactWindowElementExists: { _, _, _ in true }
+        )
+        let channel = TaskInputChannel(
+            taskID: "background.exact.unfocused",
+            planDigest: "unfocused-digest",
+            focusPolicy: .background,
+            targetApplication: target,
+            targetInstanceRef: "instance-4602",
+            targetWindowRef: "window-4602",
+            routes: [.exactProcessDirected],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let context = TaskActionContext(
+            taskID: channel.taskID,
+            stepID: "key",
+            target: TaskTargetIdentity(
+                application: target.name,
+                processID: 4602,
+                instanceRef: "instance-4602",
+                windowRef: "window-4602"
+            ),
+            focusPolicy: .background,
+            planDigest: channel.planDigest,
+            ephemeralInputs: [:],
+            deadline: channel.expiresAt,
+            authority: TaskExecutionAuthority(
+                leaseToken: nil,
+                leaseExpiresAt: channel.expiresAt,
+                inputChannel: channel,
+                revalidate: { target }
+            )
+        )
+
+        XCTAssertThrowsError(try executor.execute(
+            action: ActionSpec(
+                kind: .key,
+                surface: .macApp,
+                parameters: ["key": .string("cmd+shift+m")]
+            ),
+            context: context
+        )) { error in
+            XCTAssertEqual(
+                error as? TaskActionExecutionError,
+                .blocked("exact_window_not_process_focused")
+            )
+        }
+        XCTAssertFalse(dispatched)
+    }
+
+    private func makeExactKeyExecutor(
+        foreground: AppInfo,
+        backgroundSendKey: @escaping (String, pid_t) throws -> Void,
+        exactWindowBinding: @escaping (pid_t, String) throws -> NativeWindowTargetSnapshot,
+        exactWindowElementExists: @escaping (pid_t, String, MacCtlCore.Selector) throws -> Bool
+    ) -> MacTaskActionExecutor {
+        let keyboard = KeyboardAccessController(
+            eventSender: RecordingKeyboardEventSender(),
+            preferenceStore: TestKeyboardPreferenceStore(enabled: true)
+        )
+        let focus = FocusedElementSnapshot(
+            targetApplication: foreground,
+            role: "AXButton",
+            subrole: nil,
+            identifier: "front",
+            title: "Front"
+        )
+        let session = ControlSession(
+            keyboardDriveStore: KeyboardDriveStore(),
+            focusedElementInspector: TestFocusedElementInspector(snapshot: focus),
+            foregroundApplication: { foreground },
+            hasPostEventAccess: { true },
+            fullKeyboardAccessEnabled: { true },
+            postActionTimeout: 0
+        )
+        return MacTaskActionExecutor(
+            appController: AppController(),
+            accessibilityController: AccessibilityController(),
+            inputController: InputController(),
+            keyboardAccessController: keyboard,
+            semanticActionRouter: SemanticActionRouter(
+                session: session,
+                keyboardAccessController: keyboard,
+                accessibilityActionController: TestAccessibilityActionPerformer(),
+                visualActionController: TestVisualActionPerformer()
+            ),
+            adapterRegistry: AppAdapterRegistry(),
+            foregroundApplication: { foreground },
+            backgroundSendKey: backgroundSendKey,
+            exactWindowBinding: exactWindowBinding,
+            exactWindowElementExists: exactWindowElementExists
+        )
+    }
+
+    private func exactWindowSnapshot(pid: pid_t, windowRef: String) -> NativeWindowTargetSnapshot {
+        NativeWindowTargetSnapshot(
+            snapshot: NativeWindowSnapshot(
+                processID: pid,
+                identityDigest: windowRef,
+                frame: NativeWindowFrame(x: 0, y: 0, width: 800, height: 600),
+                displayID: 1,
+                movable: true,
+                resizable: true,
+                minimized: false,
+                fullscreen: false
+            ),
+            unique: true,
+            focused: true,
+            visible: true
+        )
+    }
+
     func testTaskPlanValidatorRejectsRawScriptsPrivateAdapterInputsAndUnknownOperations() {
         let registry = AppAdapterRegistry(permissionChecker: { _ in true })
         let rawScript = TaskStep(
@@ -5929,6 +6471,50 @@ final class MacCtlCoreTests: XCTestCase {
         )
     }
 
+    func testExpiredTaskIdentityCannotBePreparedOrResumed() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-expired-identity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let approvals = TaskApprovalStore()
+        let store = TaskCheckpointStore(directory: directory)
+        let runner = TaskRunner(
+            checkpointStore: store,
+            approvalStore: approvals,
+            actionExecutor: TestTaskActionExecutor(),
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "expired.identity",
+            name: "Expired identity",
+            summary: "Require a new identity after the plan-wide deadline",
+            steps: [TaskStep(id: "step", action: ActionSpec(kind: .assert, surface: .macApp))]
+        )
+        try store.save(TaskCheckpoint(
+            taskID: plan.id,
+            planDigest: TaskPlan.digest(plan),
+            currentStepID: "step",
+            stepIndex: 0,
+            state: .expired
+        ))
+
+        XCTAssertThrowsError(try runner.prepare(plan: plan)) { error in
+            XCTAssertEqual(error as? TaskControlError, .invalidState(.expired))
+        }
+        let approval = approvals.prepare(plan: plan)
+        _ = try approvals.approve(token: approval.record.token)
+        let authority = TaskExecutionAuthority(
+            leaseToken: "fresh-lease",
+            fresh: true,
+            revalidate: { nil }
+        )
+        XCTAssertThrowsError(try runner.resume(
+            plan: plan,
+            approvalToken: approval.record.token,
+            authority: authority
+        )) { error in
+            XCTAssertEqual(error as? TaskControlError, .invalidState(.expired))
+        }
+    }
+
     func testSensitiveTaskNeverRetriesUncertainActionAndCancellationInvalidatesState() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-sensitive-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -5991,6 +6577,84 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertThrowsError(try cancellationRunner.cancel(taskID: completedPlan.id)) { error in
             XCTAssertEqual(error as? TaskControlError, .invalidState(.completed))
         }
+    }
+
+    func testSensitiveTaskPollsPostconditionWithoutReplayingAction() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-postcondition-poll-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var now = Date(timeIntervalSince1970: 100)
+        let approvals = TaskApprovalStore(now: { now })
+        let executor = TestTaskActionExecutor(evaluationResults: [false, false, true])
+        let runner = TaskRunner(
+            checkpointStore: TaskCheckpointStore(directory: directory),
+            approvalStore: approvals,
+            actionExecutor: executor,
+            now: { now },
+            sleep: { interval in now = now.addingTimeInterval(interval) },
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "sensitive.postcondition.poll",
+            name: "Sensitive postcondition polling",
+            summary: "Wait for asynchronously published GUI state",
+            steps: [TaskStep(
+                id: "send",
+                action: ActionSpec(kind: .assert, surface: .macApp, risk: .sensitive),
+                postconditions: [TaskPredicate(kind: .applicationRunning, application: "Fixture")],
+                risk: .sensitive,
+                approvalReason: "Test one sensitive action",
+                timeout: 1,
+                recovery: .strict
+            )]
+        )
+
+        let prepared = try runner.prepare(plan: plan)
+        _ = try approvals.approve(token: prepared.approval.token)
+        let report = try runner.run(plan: plan, approvalToken: prepared.approval.token)
+
+        XCTAssertEqual(report.state, .completed)
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.evaluationCount, 3)
+        XCTAssertEqual(now.timeIntervalSince1970, 100.2, accuracy: 0.000_001)
+    }
+
+    func testSensitiveTaskPostconditionTimeoutDoesNotReplayAction() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-postcondition-timeout-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var now = Date(timeIntervalSince1970: 100)
+        let approvals = TaskApprovalStore(now: { now })
+        let executor = TestTaskActionExecutor(evaluationResult: false)
+        let runner = TaskRunner(
+            checkpointStore: TaskCheckpointStore(directory: directory),
+            approvalStore: approvals,
+            actionExecutor: executor,
+            now: { now },
+            sleep: { interval in now = now.addingTimeInterval(interval) },
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "sensitive.postcondition.timeout",
+            name: "Sensitive postcondition timeout",
+            summary: "Fail closed without replay",
+            steps: [TaskStep(
+                id: "send",
+                action: ActionSpec(kind: .assert, surface: .macApp, risk: .sensitive),
+                postconditions: [TaskPredicate(kind: .applicationRunning, application: "Fixture")],
+                risk: .sensitive,
+                approvalReason: "Test one sensitive action",
+                timeout: 0.25,
+                recovery: .strict
+            )]
+        )
+
+        let prepared = try runner.prepare(plan: plan)
+        _ = try approvals.approve(token: prepared.approval.token)
+        XCTAssertThrowsError(try runner.run(plan: plan, approvalToken: prepared.approval.token)) { error in
+            XCTAssertEqual(error as? TaskControlError, .indeterminate("send"))
+        }
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertGreaterThanOrEqual(executor.evaluationCount, 2)
+        XCTAssertEqual(try runner.status(taskID: plan.id).state, .indeterminate)
     }
 
     func testAdapterRegistryReportsCapabilitiesAndKeepsAppleScriptAllowlisted() throws {
@@ -6075,6 +6739,80 @@ final class MacCtlCoreTests: XCTestCase {
                 && $0.stepID == "step"
                 && $0.evidence.contains { $0.kind == "task_checkpoint" }
         })
+    }
+
+    func testTaskServiceResumeValidatesApprovalAgainstOnlyTheRemainingPlan() throws {
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-resume-service-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
+        let approvals = TaskApprovalStore()
+        let checkpoints = TaskCheckpointStore(directory: checkpointDirectory)
+        let executor = FailSecondTaskActionExecutor()
+        let runner = TaskRunner(
+            checkpointStore: checkpoints,
+            approvalStore: approvals,
+            actionExecutor: executor,
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "service.resume.remaining",
+            name: "Resume remaining steps",
+            summary: "Bind resumed approval only to work that remains",
+            steps: [
+                TaskStep(
+                    id: "first",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    recovery: .strict
+                ),
+                TaskStep(
+                    id: "second",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    recovery: .strict
+                )
+            ]
+        )
+        let firstApproval = try runner.prepare(plan: plan)
+        _ = try approvals.approve(token: firstApproval.approval.token)
+        XCTAssertThrowsError(try runner.run(plan: plan, approvalToken: firstApproval.approval.token))
+        XCTAssertEqual(try runner.status(taskID: plan.id).stepIndex, 1)
+
+        executor.shouldFailSecond = false
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardDriveStore: KeyboardDriveStore(),
+            taskApprovalStore: approvals,
+            taskCheckpointStore: checkpoints,
+            taskRunner: runner,
+            hasPostEventAccess: { true }
+        )
+        let planValue = try JSONValue.fromEncodable(plan)
+        let prepared = service.handle(RequestEnvelope(
+            method: "task.prepare",
+            params: ["plan": planValue]
+        ))
+        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
+        XCTAssertEqual(
+            prepared.result["planDigest"]?.stringValue,
+            TaskPlan.digest(plan.remaining(from: 1))
+        )
+        XCTAssertEqual(
+            service.handle(RequestEnvelope(
+                method: "approval.approve",
+                params: ["token": .string(token)]
+            )).status,
+            .succeeded
+        )
+
+        let resumed = service.handle(RequestEnvelope(
+            method: "task.resume",
+            params: [
+                "plan": planValue,
+                "approval_token": .string(token)
+            ]
+        ))
+
+        XCTAssertEqual(resumed.status, .succeeded)
+        XCTAssertEqual(resumed.result["lifecycle_state"]?.stringValue, "completed")
+        XCTAssertEqual(executor.executeCount, 5)
     }
 
     func testTaskServiceCreatesBackgroundInputChannelWithoutKeyboardLease() throws {
@@ -6334,7 +7072,7 @@ final class MacCtlCoreTests: XCTestCase {
         let completedAt = Date(timeIntervalSince1970: 9_999)
         let taskCapabilities = TaskCapabilityReport()
         let capabilityReport = CapabilityReport(
-            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "shortcut.audit", "shortcut.run"],
+            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "receipts.trace.begin", "receipts.trace.complete", "receipts.trace", "shortcut.audit", "shortcut.run"],
             optionalBackends: [],
             permissionGates: [],
             safety: [
@@ -6343,6 +7081,9 @@ final class MacCtlCoreTests: XCTestCase {
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+                "cross-provider traces join Mac Control handoff evidence with browser observations while preserving provider-specific provenance",
+                "cross-provider completion credentials are short-lived, single-use, stdin-only, stored only as digests, and never authorize provider execution",
+                "browser completion remains orchestrator_declared until a browser-owned attestation channel is available",
                 "authorization notices are short-lived, owner-local, redacted, and explanatory only; Mac Control never approves or denies the native macOS prompt",
                 "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
                 "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference",
@@ -7053,17 +7794,20 @@ private final class TestTaskActionExecutor: TaskActionExecuting {
     private var failuresBeforeSuccess: Int
     private let sideEffectUncertain: Bool
     var evaluationResult: Bool
+    private var evaluationResults: [Bool]
     let route: String
 
     init(
         failuresBeforeSuccess: Int = 0,
         sideEffectUncertain: Bool = false,
         evaluationResult: Bool = true,
+        evaluationResults: [Bool] = [],
         route: String = "test"
     ) {
         self.failuresBeforeSuccess = failuresBeforeSuccess
         self.sideEffectUncertain = sideEffectUncertain
         self.evaluationResult = evaluationResult
+        self.evaluationResults = evaluationResults
         self.route = route
     }
 
@@ -7088,6 +7832,26 @@ private final class TestTaskActionExecutor: TaskActionExecuting {
         context: TaskActionContext
     ) throws -> Bool {
         evaluationCount += 1
+        if !evaluationResults.isEmpty {
+            return evaluationResults.removeFirst()
+        }
         return evaluationResult
+    }
+}
+
+private final class FailSecondTaskActionExecutor: TaskActionExecuting {
+    private(set) var executeCount = 0
+    var shouldFailSecond = true
+
+    func execute(action: ActionSpec, context: TaskActionContext) throws -> TaskActionExecutionReport {
+        executeCount += 1
+        if shouldFailSecond && executeCount >= 2 {
+            throw TaskActionExecutionError.blocked("second_step")
+        }
+        return TaskActionExecutionReport(route: "test")
+    }
+
+    func evaluate(predicate: TaskPredicate, context: TaskActionContext) throws -> Bool {
+        true
     }
 }

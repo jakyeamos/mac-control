@@ -38,7 +38,7 @@ final class AdvertisedCapabilityTests: XCTestCase {
         let identity = discordIdentity()
         let profile = ControlCapabilityProfile(application: identity)
 
-        XCTAssertEqual(profile.schemaVersion, 5)
+        XCTAssertEqual(profile.schemaVersion, 6)
         XCTAssertEqual(profile.archetype, .electronChromium)
         XCTAssertTrue(profile.profileLayers.contains("app:discord"))
         XCTAssertEqual(

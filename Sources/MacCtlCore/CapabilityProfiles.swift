@@ -1306,7 +1306,11 @@ public final class CapabilityProfileStore {
                 && $0.identity.providerStateSignature == providerState.signature
                 && $0.state != .invalidated
         }.sorted { $0.updatedAt > $1.updatedAt }
-        let reasons = all.flatMap { profile -> [CapabilityProfileInvalidationReason] in
+        // Historical profiles explain a cache miss, but they must not make a
+        // newly refreshed exact profile look stale forever. Otherwise every
+        // fast capability probe schedules another deep audit after an app,
+        // OS, or provider transition even though current evidence exists.
+        let reasons = exact.isEmpty ? all.flatMap { profile -> [CapabilityProfileInvalidationReason] in
             let sameBundleID = profile.identity.application.bundleID != nil
                 && profile.identity.application.bundleID == identity.bundleID
             let samePath = profile.identity.application.path == identity.path
@@ -1325,7 +1329,7 @@ public final class CapabilityProfileStore {
                 result.append(.providerStateChanged)
             }
             return result
-        }
+        } : []
         return CapabilityProfileLookup(
             profile: exact.first,
             cacheHit: exact.first != nil,

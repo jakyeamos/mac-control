@@ -148,7 +148,7 @@ final class AuthorizationNoticeTests: XCTestCase {
         }
     }
 
-    func testAuthorizationPresentationHasPriorityAndWarnsOnUnverifiedSource() {
+    func testActiveSafetyPresentationOutranksAuthorizationAndDoesNotExposeItsContext() {
         let now = Date(timeIntervalSince1970: 10_000)
         let notice = AuthorizationNotice(
             requestID: "notice",
@@ -187,10 +187,24 @@ final class AuthorizationNoticeTests: XCTestCase {
             ),
             now: now
         )
-        XCTAssertEqual(presentation.state, .authorization)
+        XCTAssertEqual(presentation.state, .leased)
         XCTAssertEqual(presentation.authorizationCount, 1)
-        XCTAssertTrue(presentation.tooltip.contains("unverified source"))
+        XCTAssertTrue(presentation.showsStatusItem)
+        XCTAssertFalse(presentation.tooltip.contains("unverified source"))
+        XCTAssertFalse(presentation.tooltip.contains("credential"))
         XCTAssertFalse(presentation.tooltip.contains("Allow"))
         XCTAssertFalse(presentation.tooltip.contains("Deny"))
+
+        let noticeOnly = ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [],
+                execution: nil,
+                permissions: [],
+                authorizationNotices: [notice]
+            ),
+            now: now
+        )
+        XCTAssertEqual(noticeOnly.state, .authorization)
+        XCTAssertFalse(noticeOnly.showsStatusItem)
     }
 }

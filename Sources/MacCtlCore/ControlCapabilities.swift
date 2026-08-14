@@ -19,6 +19,28 @@ public enum MacAppArchetypeClassifier {
     }
 }
 
+public enum CapabilityAuditOpportunityState: String, Codable, Equatable {
+    case notApplicable = "not_applicable"
+    case notObserved = "not_observed"
+    case satisfied
+    case scheduled
+    case inProgress = "in_progress"
+}
+
+public struct CapabilityAuditOpportunity: Codable, Equatable {
+    public let state: CapabilityAuditOpportunityState
+    public let reason: String
+    public let launchesApplications: Bool
+    public let dispatchesActions: Bool
+
+    public init(state: CapabilityAuditOpportunityState, reason: String) {
+        self.state = state
+        self.reason = reason
+        self.launchesApplications = false
+        self.dispatchesActions = false
+    }
+}
+
 /// The caller's intended control boundary. Browser chrome remains macOS app
 /// UI; rendered webpage content belongs to the tab-addressed browser provider.
 public enum ControlTargetSurface: String, Codable, Equatable, CaseIterable {
@@ -84,6 +106,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     public let deepAuditAvailable: Bool
     public let cachedBroadProfile: CapabilityProfileCacheSummary?
     public let recentBlockers: [ControlBlockerObservation]
+    public let auditOpportunity: CapabilityAuditOpportunity?
 
     public init(
         application: WarmPathApplicationIdentity,
@@ -95,10 +118,11 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         deepAuditAvailable: Bool = false,
         cachedBroadProfile: CapabilityProfileCacheSummary? = nil,
         recentBlockers: [ControlBlockerObservation] = [],
+        auditOpportunity: CapabilityAuditOpportunity? = nil,
         targetSurface: ControlTargetSurface = .macAppUI,
         profileRegistry: AppControlProfileRegistry = .standard
     ) {
-        self.schemaVersion = 5
+        self.schemaVersion = 6
         self.probeMode = "fast_route_probe"
         self.application = application
         let effectiveProfile = profileRegistry.profile(for: application)
@@ -164,6 +188,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         self.deepAuditAvailable = deepAuditAvailable
         self.cachedBroadProfile = cachedBroadProfile
         self.recentBlockers = recentBlockers
+        self.auditOpportunity = auditOpportunity
     }
 }
 

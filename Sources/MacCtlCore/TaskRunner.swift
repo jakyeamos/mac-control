@@ -39,13 +39,21 @@ public struct TaskExecutionAuthority {
     public func validateBinding(
         taskID: String,
         planDigest: String,
-        focusPolicy: FocusPolicy
+        focusPolicy: FocusPolicy,
+        target: TaskTargetIdentity?
     ) throws {
         guard let inputChannel else { return }
         guard inputChannel.taskID == taskID,
               inputChannel.planDigest == planDigest,
               inputChannel.focusPolicy == focusPolicy else {
             throw TaskControlError.leaseRequired
+        }
+        if inputChannel.permits(.exactProcessDirected) || inputChannel.permits(.exactForeground) {
+            guard inputChannel.targetApplication.processID == target?.processID,
+                  inputChannel.targetInstanceRef == target?.instanceRef,
+                  inputChannel.targetWindowRef == target?.windowRef else {
+                throw TaskControlError.leaseRequired
+            }
         }
     }
 }
@@ -115,7 +123,12 @@ public struct TaskActionContext {
         guard !isCancelled() else { throw TaskControlError.cancelled }
         guard now() < deadline else { throw TaskControlError.timedOut }
         guard authority.fresh else { throw TaskControlError.leaseRequired }
-        try authority.validateBinding(taskID: taskID, planDigest: planDigest, focusPolicy: focusPolicy)
+        try authority.validateBinding(
+            taskID: taskID,
+            planDigest: planDigest,
+            focusPolicy: focusPolicy,
+            target: target
+        )
         if let expiresAt = authority.leaseExpiresAt, now() >= expiresAt {
             throw TaskControlError.leaseExpired
         }
@@ -128,7 +141,12 @@ public struct TaskActionContext {
         guard now() < deadline else { throw TaskControlError.timedOut }
         if let authority {
             guard authority.fresh else { throw TaskControlError.leaseRequired }
-            try authority.validateBinding(taskID: taskID, planDigest: planDigest, focusPolicy: focusPolicy)
+            try authority.validateBinding(
+                taskID: taskID,
+                planDigest: planDigest,
+                focusPolicy: focusPolicy,
+                target: target
+            )
             if let expiresAt = authority.leaseExpiresAt, now() >= expiresAt {
                 throw TaskControlError.leaseExpired
             }
@@ -210,6 +228,7 @@ public final class TaskRunner {
     private let approvalStore: TaskApprovalStore
     private let actionExecutor: TaskActionExecuting
     private let now: () -> Date
+    private let sleep: (TimeInterval) -> Void
     private let targetRevalidator: (TaskStep) throws -> ControlTargetSnapshot?
     private let adapterRegistry: AppAdapterRegistry?
     private let lock = NSLock()
@@ -220,6 +239,7 @@ public final class TaskRunner {
         approvalStore: TaskApprovalStore = TaskApprovalStore(),
         actionExecutor: TaskActionExecuting = BlockingTaskActionExecutor(),
         now: @escaping () -> Date = Date.init,
+        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:),
         targetRevalidator: @escaping (TaskStep) throws -> ControlTargetSnapshot? = { _ in nil },
         adapterRegistry: AppAdapterRegistry? = nil
     ) {
@@ -227,6 +247,7 @@ public final class TaskRunner {
         self.approvalStore = approvalStore
         self.actionExecutor = actionExecutor
         self.now = now
+        self.sleep = sleep
         self.targetRevalidator = targetRevalidator
         self.adapterRegistry = adapterRegistry
     }
@@ -255,8 +276,11 @@ public final class TaskRunner {
             try saveCheckpoint(interrupted)
             existing = interrupted
         }
+        if existing?.state == .expired {
+            throw TaskControlError.invalidState(.expired)
+        }
         let approvalPlan: TaskPlan
-        if let existing, [.paused, .blocked, .indeterminate, .expired].contains(existing.state) {
+        if let existing, [.paused, .blocked, .indeterminate].contains(existing.state) {
             approvalPlan = plan.remaining(from: existing.stepIndex)
         } else {
             approvalPlan = plan
@@ -266,7 +290,7 @@ public final class TaskRunner {
             ephemeralInputs: ephemeralInputs,
             operationID: operationID
         )
-        if existing == nil || ![.paused, .blocked, .indeterminate, .expired].contains(existing!.state) {
+        if existing == nil || ![.paused, .blocked, .indeterminate].contains(existing!.state) {
             let timestamp = now()
             let checkpoint = TaskCheckpoint(
                 taskID: plan.id,
@@ -283,7 +307,7 @@ public final class TaskRunner {
         return TaskPreparedReport(
             taskID: plan.id,
             planDigest: approval.planDigest,
-            state: existing.map { [.paused, .blocked, .indeterminate, .expired].contains($0.state) ? $0.state : .prepared } ?? .prepared,
+            state: existing.map { [.paused, .blocked, .indeterminate].contains($0.state) ? $0.state : .prepared } ?? .prepared,
             approval: approval.record
         )
     }
@@ -380,7 +404,7 @@ public final class TaskRunner {
             throw TaskControlError.approvalMismatch
         }
         if resuming {
-            guard [.paused, .blocked, .indeterminate, .expired].contains(checkpoint.state) else {
+            guard [.paused, .blocked, .indeterminate].contains(checkpoint.state) else {
                 throw TaskControlError.invalidState(checkpoint.state)
             }
             guard authority?.fresh == true else { throw TaskControlError.leaseRequired }
@@ -611,7 +635,7 @@ public final class TaskRunner {
                 if report.sideEffectUncertain {
                     throw TaskControlError.indeterminate(step.id)
                 }
-                if try evaluateAll(step.postconditions, context: attemptContext) {
+                if try waitForPostconditions(step.postconditions, context: attemptContext) {
                     return StepResult(
                         route: report.route,
                         attempts: attempts,
@@ -711,6 +735,31 @@ public final class TaskRunner {
             }
         }
         return true
+    }
+
+    /// Polls only the read-only postcondition oracle after a dispatched action.
+    /// GUI applications often publish Accessibility state asynchronously; a
+    /// bounded observation wait must not be confused with replaying the action.
+    private func waitForPostconditions(
+        _ predicates: [TaskPredicate],
+        context: TaskActionContext,
+        pollInterval: TimeInterval = 0.1,
+        observationTimeout: TimeInterval = 1
+    ) throws -> Bool {
+        guard !predicates.isEmpty else { return true }
+        let observationDeadline = minDate(
+            context.deadline,
+            now().addingTimeInterval(observationTimeout)
+        )
+        while true {
+            if try evaluateAll(predicates, context: context) {
+                return true
+            }
+            let remaining = observationDeadline.timeIntervalSince(now())
+            guard remaining > 0 else { return false }
+            sleep(min(pollInterval, remaining))
+            guard now() < context.deadline else { return false }
+        }
     }
 
     private func requiresTargetRevalidation(for action: ActionSpec) -> Bool {
@@ -954,6 +1003,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let semanticActionRouter: SemanticActionRouter
     private let adapterRegistry: AppAdapterRegistry
     private let typedAppleScriptExecutor: TypedAppleScriptExecuting
+    private let focusSessionExecutor: FocusSessionActionExecuting
     private let foregroundApplication: () -> AppInfo?
     private let searchFieldResolver: SearchFieldResolving
     private let focusedElementInspector: FocusedElementInspecting
@@ -961,6 +1011,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let backgroundPress: (pid_t, Selector) throws -> Void
     private let backgroundSetValue: (pid_t, Selector, String) throws -> Void
     private let backgroundSendKey: (String, pid_t) throws -> Void
+    private let exactWindowBinding: (pid_t, String) throws -> NativeWindowTargetSnapshot
+    private let exactWindowElementExists: (pid_t, String, Selector) throws -> Bool
     private let backgroundScroll: (
         pid_t,
         AppInfo,
@@ -980,12 +1032,15 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         adapterRegistry: AppAdapterRegistry,
         foregroundApplication: @escaping () -> AppInfo?,
         typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor(),
+        focusSessionExecutor: FocusSessionActionExecuting? = nil,
         searchFieldResolver: SearchFieldResolving? = nil,
         focusedElementInspector: FocusedElementInspecting? = nil,
         searchTextTyper: SearchTextTyping? = nil,
         backgroundPress: ((pid_t, Selector) throws -> Void)? = nil,
         backgroundSetValue: ((pid_t, Selector, String) throws -> Void)? = nil,
         backgroundSendKey: ((String, pid_t) throws -> Void)? = nil,
+        exactWindowBinding: ((pid_t, String) throws -> NativeWindowTargetSnapshot)? = nil,
+        exactWindowElementExists: ((pid_t, String, Selector) throws -> Bool)? = nil,
         backgroundScroll: ((
             pid_t,
             AppInfo,
@@ -1003,6 +1058,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.semanticActionRouter = semanticActionRouter
         self.adapterRegistry = adapterRegistry
         self.typedAppleScriptExecutor = typedAppleScriptExecutor
+        self.focusSessionExecutor = focusSessionExecutor
+            ?? SystemFocusSessionActionExecutor(accessibilityController: accessibilityController)
         self.foregroundApplication = foregroundApplication
         self.searchFieldResolver = searchFieldResolver ?? accessibilityController
         self.focusedElementInspector = focusedElementInspector ?? accessibilityController
@@ -1015,6 +1072,16 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         }
         self.backgroundSendKey = backgroundSendKey ?? { specification, pid in
             try inputController.key(specification, toProcess: pid)
+        }
+        self.exactWindowBinding = exactWindowBinding ?? { pid, windowRef in
+            try AccessibilityNativeWindowController().inspectWindow(
+                pid: pid,
+                windowRef: windowRef,
+                displays: SystemNativeWindowDisplayProvider().connectedDisplays()
+            )
+        }
+        self.exactWindowElementExists = exactWindowElementExists ?? { pid, windowRef, selector in
+            try accessibilityController.elementExists(pid: pid, windowRef: windowRef, selector: selector)
         }
         self.backgroundScroll = backgroundScroll ?? { pid, application, selector, direction, amount in
             try accessibilityController.scroll(
@@ -1200,7 +1267,99 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         case .key:
             try requireRecoveryRoute(context, allowed: ["keyboard"])
             let key = try requiredParameter(action, key: "key")
+            if context.authority?.inputChannel?.permits(.exactForeground) == true {
+                guard context.focusPolicy == .foreground,
+                      context.authority?.leaseToken != nil,
+                      let application = try context.requireAuthority(),
+                      let pid = application.processID,
+                      let instanceRef = context.target?.instanceRef,
+                      let windowRef = context.target?.windowRef,
+                      context.target?.processID == pid,
+                      context.authority?.inputChannel?.targetInstanceRef == instanceRef,
+                      context.authority?.inputChannel?.targetWindowRef == windowRef else {
+                    throw TaskControlError.leaseRequired
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                let binding: NativeWindowTargetSnapshot
+                do {
+                    binding = try exactWindowBinding(pid, windowRef)
+                } catch NativeWindowControlError.permissionDenied {
+                    throw TaskActionExecutionError.permissionMissing("Accessibility")
+                } catch NativeWindowControlError.targetAmbiguous {
+                    throw TaskActionExecutionError.blocked("exact_window_ambiguous")
+                } catch NativeWindowControlError.targetMissing {
+                    throw TaskActionExecutionError.blocked("exact_window_disappeared")
+                } catch {
+                    throw TaskActionExecutionError.blocked("exact_window_binding_unavailable")
+                }
+                guard binding.processID == pid,
+                      binding.windowRef == windowRef,
+                      binding.unique,
+                      binding.focused,
+                      binding.visible,
+                      !binding.minimized else {
+                    throw TaskActionExecutionError.blocked("exact_window_not_focused")
+                }
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                try inputController.key(key)
+                do {
+                    _ = try context.revalidateBeforeAction(includeTarget: true)
+                } catch {
+                    throw TaskActionExecutionError.uncertain("exact_foreground_target_changed")
+                }
+                return TaskActionExecutionReport(
+                    route: "task_input_exact_foreground",
+                    targetFingerprint: ControlTargetFingerprints.structuralDigest(
+                        [String(pid), instanceRef, windowRef].joined(separator: "|")
+                    )
+                )
+            }
             if context.focusPolicy == .background {
+                if context.authority?.inputChannel?.permits(.exactProcessDirected) == true {
+                    guard let application = try context.requireAuthority(),
+                          let pid = application.processID,
+                          let instanceRef = context.target?.instanceRef,
+                          let windowRef = context.target?.windowRef,
+                          context.target?.processID == pid,
+                          context.authority?.inputChannel?.targetInstanceRef == instanceRef,
+                          context.authority?.inputChannel?.targetWindowRef == windowRef else {
+                        throw TaskControlError.leaseRequired
+                    }
+                    _ = try context.revalidateBeforeAction(includeTarget: true)
+                    let binding: NativeWindowTargetSnapshot
+                    do {
+                        binding = try exactWindowBinding(pid, windowRef)
+                    } catch NativeWindowControlError.permissionDenied {
+                        throw TaskActionExecutionError.permissionMissing("Accessibility")
+                    } catch NativeWindowControlError.targetAmbiguous {
+                        throw TaskActionExecutionError.blocked("exact_window_ambiguous")
+                    } catch NativeWindowControlError.targetMissing {
+                        throw TaskActionExecutionError.blocked("exact_window_disappeared")
+                    } catch {
+                        throw TaskActionExecutionError.blocked("exact_window_binding_unavailable")
+                    }
+                    guard binding.processID == pid,
+                          binding.windowRef == windowRef,
+                          binding.unique,
+                          binding.focused,
+                          binding.visible,
+                          !binding.minimized else {
+                        throw TaskActionExecutionError.blocked("exact_window_not_process_focused")
+                    }
+                    _ = try context.revalidateBeforeAction(includeTarget: true)
+                    try backgroundSendKey(key, pid)
+                    do {
+                        _ = try context.revalidateBeforeAction(includeTarget: true)
+                    } catch {
+                        throw TaskActionExecutionError.uncertain("exact_process_delivery_target_changed")
+                    }
+                    return TaskActionExecutionReport(
+                        route: "task_input_exact_process",
+                        targetFingerprint: ControlTargetFingerprints.structuralDigest(
+                            [String(pid), instanceRef, windowRef].joined(separator: "|")
+                        )
+                    )
+                }
                 guard context.authority?.inputChannel?.permits(.processDirected) == true else {
                     throw TaskActionExecutionError.unsupported("background_key_requires_task_process_channel")
                 }
@@ -1493,12 +1652,21 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                   let pid = application.processID else { return false }
             _ = try context.revalidateBeforeAction(includeTarget: true)
             do {
+                if context.authority?.inputChannel?.permits(.exactProcessDirected) == true
+                    || context.authority?.inputChannel?.permits(.exactForeground) == true,
+                   let windowRef = context.target?.windowRef {
+                    return try exactWindowElementExists(pid, windowRef, selector)
+                }
                 _ = try accessibilityController.findElement(pid: pid, selector: selector)
                 return true
             } catch AccessibilityControllerError.elementNotFound {
                 return false
+            } catch AccessibilityControllerError.windowNotFound {
+                throw TaskActionExecutionError.blocked("exact_window_disappeared")
             } catch AccessibilityControllerError.ambiguousMatch {
                 throw TaskActionExecutionError.blocked("ambiguous_target")
+            } catch AccessibilityControllerError.ambiguousWindowMatch {
+                throw TaskActionExecutionError.blocked("exact_window_ambiguous")
             } catch let error as AccessibilityControllerError {
                 throw mappedAccessibilityObservationError(error)
             }
@@ -1535,6 +1703,16 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                   let expected = predicate.parameters["state"]?.stringValue else { return false }
             guard adapterRegistry.manifest(adapterID: adapterID) != nil else {
                 throw AppAdapterError.unsupportedAdapter(adapterID)
+            }
+            if expected == "focus_session_verified",
+               let rawOperation = predicate.parameters["focus_session_effect"]?.stringValue,
+               let operation = FocusSessionExecutionOperation(rawValue: rawOperation) {
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                let request = try FocusSessionExecutionRequest(
+                    operation: operation,
+                    parameters: predicate.parameters
+                )
+                return try focusSessionExecutor.verify(request)
             }
             if expected == "supported" { return true }
             guard let application = foregroundApplication() else { return false }
@@ -1578,6 +1756,38 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             _ = try context.requireAuthority()
         }
         switch operationName {
+        case FocusSessionExecutionOperation.openBrief.rawValue,
+             FocusSessionExecutionOperation.openScratchpad.rawValue,
+             FocusSessionExecutionOperation.arrangeWorkspace.rawValue:
+            guard let focusOperation = FocusSessionExecutionOperation(rawValue: operationName) else {
+                throw AppAdapterError.unsupportedOperation(adapterID: adapterID, operation: operationName)
+            }
+            guard requestedRoute == nil || requestedRoute == focusOperation.expectedRoute else {
+                throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")
+            }
+            _ = try context.revalidateBeforeAction(includeTarget: true)
+            let request = try FocusSessionExecutionRequest(
+                operation: focusOperation,
+                parameters: action.parameters
+            )
+            let result = try focusSessionExecutor.execute(request)
+            return AppAdapterActionResult(
+                adapterID: adapterID,
+                operation: operationName,
+                route: result.route,
+                mutating: operation.mutating,
+                targetFingerprint: ControlTargetFingerprints.make(application: application, focus: nil),
+                observation: AppAdapterObservation(
+                    adapterID: adapterID,
+                    operation: operationName,
+                    application: application.name,
+                    state: "applied",
+                    fields: [
+                        "opened": .bool(focusOperation != .arrangeWorkspace),
+                        "layout_applied": .bool(focusOperation == .arrangeWorkspace)
+                    ]
+                )
+            ).asTaskReport()
         case "open":
             guard requestedRoute == nil || requestedRoute == .native else {
                 throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")
@@ -1818,6 +2028,10 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         predicate: TaskPredicate,
         context: TaskActionContext
     ) throws -> AppInfo? {
+        if context.authority?.inputChannel?.permits(.exactProcessDirected) == true
+            || context.authority?.inputChannel?.permits(.exactForeground) == true {
+            return try context.requireAuthority()
+        }
         let name = predicate.application
             ?? predicate.expected
             ?? context.target?.application

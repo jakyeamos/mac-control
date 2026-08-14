@@ -117,6 +117,7 @@ public struct OperationReceipt: Codable, Equatable {
     public let source: String?
     public let workflowID: String?
     public let targetSurface: SurfaceKind?
+    public let providerTargetSurface: ControlTargetSurface?
     public let requestedFocusPolicy: FocusPolicy?
     public let focusPolicy: FocusPolicy?
     public let focusSelectionReason: String?
@@ -136,6 +137,18 @@ public struct OperationReceipt: Codable, Equatable {
     public let lifecycleState: String?
     public let actionOutcome: AgentActionOutcome?
     public let controlTarget: ControlReceiptTarget?
+    public let traceID: String?
+    public let spanID: String?
+    public let parentSpanID: String?
+    public let providerObservationDigest: String?
+    public let provider: String?
+    public let providerProvenance: CrossProviderTraceProvenance?
+    public let providerSessionDigest: String?
+    public let providerTurnDigest: String?
+    public let providerTabDigest: String?
+    public let foregroundState: CrossProviderForegroundState?
+    public let startedAtMilliseconds: Int64?
+    public let completedAtMilliseconds: Int64?
     public let runtimeIdentity: RuntimeIdentity
     public let permissionContext: String
     public let permissions: [PermissionStatus]
@@ -153,6 +166,7 @@ public struct OperationReceipt: Codable, Equatable {
         case source
         case workflowID
         case targetSurface
+        case providerTargetSurface
         case requestedFocusPolicy
         case focusPolicy
         case focusSelectionReason
@@ -172,6 +186,18 @@ public struct OperationReceipt: Codable, Equatable {
         case lifecycleState
         case actionOutcome
         case controlTarget
+        case traceID
+        case spanID
+        case parentSpanID
+        case providerObservationDigest
+        case provider
+        case providerProvenance
+        case providerSessionDigest
+        case providerTurnDigest
+        case providerTabDigest
+        case foregroundState
+        case startedAtMilliseconds
+        case completedAtMilliseconds
         case runtimeIdentity
         case permissionContext
         case permissions
@@ -189,6 +215,7 @@ public struct OperationReceipt: Codable, Equatable {
         source: String? = nil,
         workflowID: String?,
         targetSurface: SurfaceKind?,
+        providerTargetSurface: ControlTargetSurface? = nil,
         requestedFocusPolicy: FocusPolicy? = nil,
         focusPolicy: FocusPolicy? = nil,
         focusSelectionReason: String? = nil,
@@ -208,6 +235,18 @@ public struct OperationReceipt: Codable, Equatable {
         lifecycleState: String? = nil,
         actionOutcome: AgentActionOutcome? = nil,
         controlTarget: ControlReceiptTarget? = nil,
+        traceID: String? = nil,
+        spanID: String? = nil,
+        parentSpanID: String? = nil,
+        providerObservationDigest: String? = nil,
+        provider: String? = nil,
+        providerProvenance: CrossProviderTraceProvenance? = nil,
+        providerSessionDigest: String? = nil,
+        providerTurnDigest: String? = nil,
+        providerTabDigest: String? = nil,
+        foregroundState: CrossProviderForegroundState? = nil,
+        startedAtMilliseconds: Int64? = nil,
+        completedAtMilliseconds: Int64? = nil,
         runtimeIdentity: RuntimeIdentity,
         permissionContext: String,
         permissions: [PermissionStatus],
@@ -216,7 +255,7 @@ public struct OperationReceipt: Codable, Equatable {
         evidence: [ReceiptEvidence],
         startedAt: Date,
         completedAt: Date,
-        schemaVersion: Int = 3
+        schemaVersion: Int = 4
     ) {
         self.schemaVersion = schemaVersion
         self.operationID = operationID
@@ -225,6 +264,7 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = source
         self.workflowID = workflowID
         self.targetSurface = targetSurface
+        self.providerTargetSurface = providerTargetSurface
         self.requestedFocusPolicy = requestedFocusPolicy
         self.focusPolicy = focusPolicy
         self.focusSelectionReason = focusSelectionReason
@@ -244,6 +284,18 @@ public struct OperationReceipt: Codable, Equatable {
         self.lifecycleState = lifecycleState
         self.actionOutcome = actionOutcome
         self.controlTarget = controlTarget
+        self.traceID = traceID
+        self.spanID = spanID
+        self.parentSpanID = parentSpanID
+        self.providerObservationDigest = providerObservationDigest
+        self.provider = provider
+        self.providerProvenance = providerProvenance
+        self.providerSessionDigest = providerSessionDigest
+        self.providerTurnDigest = providerTurnDigest
+        self.providerTabDigest = providerTabDigest
+        self.foregroundState = foregroundState
+        self.startedAtMilliseconds = startedAtMilliseconds
+        self.completedAtMilliseconds = completedAtMilliseconds
         self.runtimeIdentity = runtimeIdentity
         self.permissionContext = permissionContext
         self.permissions = permissions
@@ -263,6 +315,10 @@ public struct OperationReceipt: Codable, Equatable {
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.workflowID = try container.decodeIfPresent(String.self, forKey: .workflowID)
         self.targetSurface = try container.decodeIfPresent(SurfaceKind.self, forKey: .targetSurface)
+        self.providerTargetSurface = try container.decodeIfPresent(
+            ControlTargetSurface.self,
+            forKey: .providerTargetSurface
+        )
         self.requestedFocusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .requestedFocusPolicy)
         self.focusPolicy = try container.decodeIfPresent(FocusPolicy.self, forKey: .focusPolicy)
         self.focusSelectionReason = try container.decodeIfPresent(String.self, forKey: .focusSelectionReason)
@@ -285,6 +341,21 @@ public struct OperationReceipt: Codable, Equatable {
         self.lifecycleState = try container.decodeIfPresent(String.self, forKey: .lifecycleState)
         self.actionOutcome = try container.decodeIfPresent(AgentActionOutcome.self, forKey: .actionOutcome)
         self.controlTarget = try container.decodeIfPresent(ControlReceiptTarget.self, forKey: .controlTarget)
+        self.traceID = try container.decodeIfPresent(String.self, forKey: .traceID)
+        self.spanID = try container.decodeIfPresent(String.self, forKey: .spanID)
+        self.parentSpanID = try container.decodeIfPresent(String.self, forKey: .parentSpanID)
+        self.providerObservationDigest = try container.decodeIfPresent(String.self, forKey: .providerObservationDigest)
+        self.provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        self.providerProvenance = try container.decodeIfPresent(
+            CrossProviderTraceProvenance.self,
+            forKey: .providerProvenance
+        )
+        self.providerSessionDigest = try container.decodeIfPresent(String.self, forKey: .providerSessionDigest)
+        self.providerTurnDigest = try container.decodeIfPresent(String.self, forKey: .providerTurnDigest)
+        self.providerTabDigest = try container.decodeIfPresent(String.self, forKey: .providerTabDigest)
+        self.foregroundState = try container.decodeIfPresent(CrossProviderForegroundState.self, forKey: .foregroundState)
+        self.startedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .startedAtMilliseconds)
+        self.completedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .completedAtMilliseconds)
         self.runtimeIdentity = try container.decode(RuntimeIdentity.self, forKey: .runtimeIdentity)
         self.permissionContext = try container.decodeIfPresent(String.self, forKey: .permissionContext) ?? "unknown"
         self.permissions = try container.decodeIfPresent([PermissionStatus].self, forKey: .permissions) ?? []
@@ -387,16 +458,23 @@ public final class OperationReceiptStore {
     private let directory: URL
     private let maximumRecords: Int
     private let fileManager: FileManager
+    private let releaseEvidenceArchive: ReleaseEvidenceArchive
     private let lock = NSLock()
 
     public init(
         directory: URL = MacCtlPaths.receiptsDirectory,
         maximumRecords: Int = OperationReceiptStore.defaultMaximumRecords,
+        releaseEvidenceDirectory: URL? = nil,
         fileManager: FileManager = .default
     ) {
         self.directory = directory
         self.maximumRecords = max(1, maximumRecords)
         self.fileManager = fileManager
+        self.releaseEvidenceArchive = ReleaseEvidenceArchive(
+            directory: releaseEvidenceDirectory
+                ?? directory.appendingPathComponent(".release-evidence", isDirectory: true),
+            fileManager: fileManager
+        )
     }
 
     public func record(_ receipt: OperationReceipt) throws {
@@ -411,9 +489,11 @@ public final class OperationReceiptStore {
         )
         do {
             let data = try JSONCodec.encode(receipt)
-            try data.write(to: path, options: .atomic)
-            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
-            _ = try pruneLocked()
+            try OwnerOnlyFileStore.withExclusiveDirectoryLock(directory, fileManager: fileManager) {
+                try OwnerOnlyFileStore.write(data, to: path, fileManager: fileManager)
+                try releaseEvidenceArchive.record(receipt)
+                _ = try pruneLocked()
+            }
         } catch let error as ReceiptStoreError {
             throw error
         } catch {
@@ -435,6 +515,27 @@ public final class OperationReceiptStore {
         .sorted { $0.completedAt > $1.completedAt }
         .prefix(max(0, limit))
         .map { $0 }
+    }
+
+    /// Release checks consume the rolling operation history plus the bounded
+    /// newest-per-requirement archive. This keeps 24-hour proof independent of
+    /// unrelated high-volume receipts without changing ordinary list callers.
+    public func listForReleaseGate(limit: Int = OperationReceiptStore.defaultMaximumRecords) throws -> [OperationReceipt] {
+        let rolling = try list(limit: limit)
+        var seen = Set(rolling.map { "\($0.operationID)|\($0.requestID)|\($0.method)" })
+        let archived = releaseEvidenceArchive.list().filter { receipt in
+            seen.insert("\(receipt.operationID)|\(receipt.requestID)|\(receipt.method)").inserted
+        }
+        return (rolling + archived).sorted { $0.completedAt > $1.completedAt }
+    }
+
+    public func trace(_ traceID: String) throws -> [OperationReceipt] {
+        guard CrossProviderCompletionRequest.isTraceID(traceID) else {
+            throw ReceiptStoreError.readFailed("trace_id must be 32 lowercase hexadecimal characters")
+        }
+        return try list(limit: maximumRecords)
+            .filter { $0.traceID == traceID }
+            .sorted { $0.startedAt < $1.startedAt }
     }
 
     /// Returns bounded, deduplicated blocker evidence for one installed app.
@@ -530,7 +631,9 @@ public final class OperationReceiptStore {
         lock.lock()
         defer { lock.unlock() }
         try ensureDirectory()
-        let result = try pruneLocked()
+        let result = try OwnerOnlyFileStore.withExclusiveDirectoryLock(directory, fileManager: fileManager) {
+            try pruneLocked()
+        }
         let remaining = try receiptEntries().count
         return ReceiptPruneResult(
             prunedCount: result,
@@ -557,28 +660,31 @@ public final class OperationReceiptStore {
             )
         }
         let dates = entries.compactMap(\.modificationDate).sorted()
-        let invalidCount = entries.reduce(into: 0) { count, entry in
+        let archiveStatus = releaseEvidenceArchive.status()
+        let invalidCount = entries.reduce(into: archiveStatus.invalidReceiptCount) { count, entry in
             guard let data = try? Data(contentsOf: entry.url),
                   (try? JSONCodec.decode(OperationReceipt.self, from: data)) != nil else {
                 count += 1
                 return
             }
         }
-        let directoryOwnerOnly = (try? fileManager.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)
-            .map { ($0.intValue & 0o777) == 0o700 } ?? false
+        let directoryOwnerOnly = ((try? fileManager.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)
+            .map { ($0.intValue & 0o777) == 0o700 } ?? false)
+            && archiveStatus.directoryOwnerOnly
         let filesOwnerOnly = entries.allSatisfy { entry in
             guard let permissions = try? fileManager.attributesOfItem(atPath: entry.url.path)[.posixPermissions] as? NSNumber else {
                 return false
             }
             return (permissions.intValue & 0o777) == 0o600
-        }
+        } && archiveStatus.filesOwnerOnly
         return ReceiptStoreStatus(
             directory: directory.path,
             fileCount: entries.count,
             maximumRecords: maximumRecords,
-            pendingPrune: max(0, entries.count - maximumRecords),
+            pendingPrune: max(0, entries.count - maximumRecords)
+                + max(0, archiveStatus.fileCount - ReleaseEvidenceArchive.maximumRecords),
             invalidReceiptCount: invalidCount,
-            writable: fileManager.isWritableFile(atPath: directory.path),
+            writable: fileManager.isWritableFile(atPath: directory.path) && archiveStatus.writable,
             directoryOwnerOnly: directoryOwnerOnly,
             filesOwnerOnly: filesOwnerOnly,
             oldestReceipt: dates.first,

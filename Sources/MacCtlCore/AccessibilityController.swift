@@ -1,6 +1,7 @@
 import ApplicationServices
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 
 /// Resolution may inspect a larger bounded surface than the default fast
@@ -177,6 +178,99 @@ public final class AccessibilityController: FocusedElementInspecting {
         return element
     }
 
+    /// Resolves a selector only inside the unique AX window represented by
+    /// `windowRef`. Exact-window callers never widen to the process-level
+    /// focused element or application children.
+    public func findElement(
+        pid: pid_t,
+        windowRef: String,
+        selector: Selector,
+        maxNodes: Int = 8_000
+    ) throws -> AXUIElement {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        let windows = (attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let matches = windows.filter { (try? AccessibilityWindowIdentity.digest(for: $0)) == windowRef }
+        guard matches.count == 1, let window = matches.first else {
+            throw matches.isEmpty
+                ? AccessibilityControllerError.windowNotFound
+                : AccessibilityControllerError.ambiguousWindowMatch(matches.count)
+        }
+        let nodeLimit = min(max(1, maxNodes), AccessibilityResolutionBounds.maximumNodes)
+        var found: [AXUIElement] = []
+        var identities = Set<UInt64>()
+        var visitedElements = Set<UInt64>()
+        var visited = 0
+        var truncated = false
+        search(
+            window,
+            selector: selector,
+            ancestorIdentityDigests: [],
+            maxNodes: nodeLimit,
+            found: &found,
+            identities: &identities,
+            visitedElements: &visitedElements,
+            visited: &visited,
+            truncated: &truncated
+        )
+        guard !truncated else {
+            throw AccessibilityControllerError.resolutionIncomplete(found.count)
+        }
+        guard let element = found.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        guard found.count == 1 else {
+            throw AccessibilityControllerError.ambiguousMatch(found.count)
+        }
+        return element
+    }
+
+    /// Evaluates an existential selector only inside one exact AX window.
+    /// Multiple matching descendants are a successful existence proof, not
+    /// an ambiguous mutation target. The window identity itself must still be
+    /// unique, and an exhausted search with no match remains indeterminate.
+    public func elementExists(
+        pid: pid_t,
+        windowRef: String,
+        selector: Selector,
+        maxNodes: Int = 8_000
+    ) throws -> Bool {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        let windows = (attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let matches = windows.filter { (try? AccessibilityWindowIdentity.digest(for: $0)) == windowRef }
+        guard matches.count == 1, let window = matches.first else {
+            throw matches.isEmpty
+                ? AccessibilityControllerError.windowNotFound
+                : AccessibilityControllerError.ambiguousWindowMatch(matches.count)
+        }
+        let nodeLimit = min(max(1, maxNodes), AccessibilityResolutionBounds.maximumNodes)
+        var found: [AXUIElement] = []
+        var identities = Set<UInt64>()
+        var visitedElements = Set<UInt64>()
+        var visited = 0
+        var truncated = false
+        search(
+            window,
+            selector: selector,
+            ancestorIdentityDigests: [],
+            maxNodes: nodeLimit,
+            found: &found,
+            identities: &identities,
+            visitedElements: &visitedElements,
+            visited: &visited,
+            truncated: &truncated
+        )
+        return try AccessibilityExistenceResolution.resolve(
+            matchCount: found.count,
+            truncated: truncated
+        )
+    }
+
     /// Resolves all matches so callers can fail closed on ambiguous targets.
     /// The returned AX objects are short-lived runtime handles and must not be
     /// serialized or retained in checkpoints.
@@ -281,6 +375,42 @@ public final class AccessibilityController: FocusedElementInspecting {
             return try bounds(of: element)
         }
         throw AccessibilityControllerError.actionFailed(kAXPressAction as String)
+    }
+
+    /// Proves that a stable selector resolves to one AXPress-capable element
+    /// inside one opaque, PID-bound window. No AX handle leaves this call.
+    public func inspectPressTarget(
+        pid: pid_t,
+        windowRef: String,
+        selector: Selector
+    ) throws -> ExactAccessibilityPressTarget {
+        let element = try findElement(pid: pid, windowRef: windowRef, selector: selector)
+        let actions = actionNames(of: element)
+        guard actions.contains(kAXPressAction as String) else {
+            throw AccessibilityControllerError.actionUnavailable(kAXPressAction as String)
+        }
+        return ExactAccessibilityPressTarget(
+            role: attribute(element, kAXRoleAttribute) as? String,
+            subrole: attribute(element, kAXSubroleAttribute) as? String,
+            action: kAXPressAction as String,
+            locatorDigest: liveLocatorDigest(for: element)
+        )
+    }
+
+    /// Performs exactly one AXPress after freshly re-resolving the stable
+    /// selector within the opaque window. It never widens to the process tree.
+    public func press(
+        pid: pid_t,
+        windowRef: String,
+        selector: Selector
+    ) throws -> ExactAccessibilityDispatchResult {
+        let element = try findElement(pid: pid, windowRef: windowRef, selector: selector)
+        let actions = actionNames(of: element)
+        guard actions.contains(kAXPressAction as String) else {
+            throw AccessibilityControllerError.actionUnavailable(kAXPressAction as String)
+        }
+        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        return result == .success ? .accepted : .indeterminate(result.rawValue)
     }
 
     /// Activates a uniquely resolved target using the action that the target
@@ -423,6 +553,155 @@ public final class AccessibilityController: FocusedElementInspecting {
             ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first
         guard let window else { return nil }
         return try? bounds(of: window)
+    }
+
+    /// Resolves one visible product-owned fixture window across the app's
+    /// complete window list. Raw document URLs and titles remain in memory.
+    public func fixtureWindowBounds(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String
+    ) throws -> CGRect? {
+        try fixtureWindow(
+            pid: pid,
+            expectedURL: expectedURL,
+            expectedTitleDigest: expectedTitleDigest
+        ).map { try bounds(of: $0) }
+    }
+
+    public func setFixtureWindowFrame(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String,
+        frame: CGRect,
+        tolerance: CGFloat = 2
+    ) throws {
+        guard let window = try fixtureWindow(
+            pid: pid,
+            expectedURL: expectedURL,
+            expectedTitleDigest: expectedTitleDigest
+        ) else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        try setWindowFrame(window, frame: frame, tolerance: tolerance)
+    }
+
+    private func fixtureWindow(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String
+    ) throws -> AXUIElement? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        let windows = (attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let focusedWindow = elementAttribute(application, kAXFocusedWindowAttribute)
+        var documentMatches: [AXUIElement] = []
+        var titleMatches: [AXUIElement] = []
+        let canonicalExpectedURL = expectedURL.standardizedFileURL.resolvingSymlinksInPath()
+        for window in windows {
+            let hidden = (attribute(window, kAXHiddenAttribute) as? Bool) ?? false
+            guard !hidden else { continue }
+            if let document = attribute(window, kAXDocumentAttribute) as? String,
+               !document.isEmpty {
+                let observedURL = URL(string: document)?.isFileURL == true
+                    ? URL(string: document)
+                    : URL(fileURLWithPath: document)
+                if observedURL?.standardizedFileURL.resolvingSymlinksInPath() == canonicalExpectedURL {
+                    documentMatches.append(window)
+                    continue
+                }
+            }
+            guard let title = attribute(window, kAXTitleAttribute) as? String,
+                  !title.isEmpty else { continue }
+            let digest = SHA256.hash(data: Data(title.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            if digest == expectedTitleDigest {
+                titleMatches.append(window)
+            }
+        }
+        if !documentMatches.isEmpty {
+            if let focusedWindow,
+               let focusedMatch = documentMatches.first(where: { CFEqual($0, focusedWindow) }) {
+                return focusedMatch
+            }
+            return documentMatches.first
+        }
+        guard titleMatches.count <= 1 else {
+            throw AccessibilityControllerError.ambiguousWindowMatch(titleMatches.count)
+        }
+        return titleMatches.first
+    }
+
+    /// Moves and resizes only the currently focused window, then reads the
+    /// frame back before returning. Callers must resolve and bind the process.
+    public func setFocusedWindowFrame(pid: pid_t, frame: CGRect, tolerance: CGFloat = 2) throws {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        try setWindowFrame(window, frame: frame, tolerance: tolerance)
+    }
+
+    private func setWindowFrame(_ window: AXUIElement, frame: CGRect, tolerance: CGFloat) throws {
+        var position = frame.origin
+        var size = frame.size
+        guard let positionValue = AXValueCreate(.cgPoint, &position),
+              let sizeValue = AXValueCreate(.cgSize, &size),
+              AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue) == .success,
+              AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue) == .success else {
+            throw AccessibilityControllerError.actionFailed("window_frame")
+        }
+        let observed = try bounds(of: window)
+        guard abs(observed.minX - frame.minX) <= tolerance,
+              abs(observed.minY - frame.minY) <= tolerance,
+              abs(observed.width - frame.width) <= tolerance,
+              abs(observed.height - frame.height) <= tolerance else {
+            throw AccessibilityControllerError.actionFailed("window_frame_verification")
+        }
+    }
+
+    /// Returns the focused window's document URL for an in-memory equality
+    /// check. Callers must not retain or project the raw path.
+    public func focusedWindowDocumentURL(pid: pid_t) throws -> URL? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        guard let document = attribute(window, kAXDocumentAttribute) as? String,
+              !document.isEmpty else {
+            return nil
+        }
+        return URL(string: document)?.isFileURL == true
+            ? URL(string: document)
+            : URL(fileURLWithPath: document)
+    }
+
+    /// Returns the focused window title for an immediate, in-memory identity
+    /// comparison. Callers must not retain or project the raw title.
+    public func focusedWindowTitle(pid: pid_t) throws -> String? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        guard let title = attribute(window, kAXTitleAttribute) as? String,
+              !title.isEmpty else {
+            return nil
+        }
+        return title
     }
 
     /// Returns only structural window state.  No AX value, document text, or
@@ -892,5 +1171,15 @@ public final class AccessibilityController: FocusedElementInspecting {
     func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
         guard let value = attribute(element, name) else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
+    }
+}
+
+enum AccessibilityExistenceResolution {
+    static func resolve(matchCount: Int, truncated: Bool) throws -> Bool {
+        if matchCount > 0 { return true }
+        if truncated {
+            throw AccessibilityControllerError.resolutionIncomplete(matchCount)
+        }
+        return false
     }
 }

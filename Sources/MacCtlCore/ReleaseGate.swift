@@ -94,13 +94,7 @@ public struct ReleaseGateSnapshot {
 }
 
 public final class ReleaseGate {
-    public static let requiredMacWorkflows = [
-        "finder.open",
-        "textedit.open",
-        "system-settings.open",
-        "chrome.open",
-        "notes.open"
-    ]
+    public static let requiredMacWorkflows = ReleaseEvidenceCatalog.requiredMacWorkflows
 
     private let maximumEvidenceAge: TimeInterval
     private let now: () -> Date
@@ -218,7 +212,7 @@ public final class ReleaseGate {
 
         let receiptStore = OperationReceiptStore()
         let receiptStoreStatus = receiptStore.status()
-        let receipts = (try? receiptStore.list(limit: OperationReceiptStore.defaultMaximumRecords)) ?? []
+        let receipts = (try? receiptStore.listForReleaseGate()) ?? []
         return ReleaseGateSnapshot(
             launchAgent: launchAgent,
             daemonStatus: daemonStatus,
@@ -639,6 +633,9 @@ public final class ReleaseGate {
             "control.capability_audit",
             "control.capability_audit_batch",
             "route.benchmark",
+            "receipts.trace.begin",
+            "receipts.trace.complete",
+            "receipts.trace",
             "shortcut.audit",
             "shortcut.run"
         ]
@@ -648,6 +645,9 @@ public final class ReleaseGate {
             "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
             "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
             "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+            "cross-provider traces join Mac Control handoff evidence with browser observations while preserving provider-specific provenance",
+            "cross-provider completion credentials are short-lived, single-use, stdin-only, stored only as digests, and never authorize provider execution",
+            "browser completion remains orchestrator_declared until a browser-owned attestation channel is available",
             "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
             "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
         ]

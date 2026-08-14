@@ -16,32 +16,9 @@ let application = NSApplication.shared
 let delegate = MacCtlApplicationDelegate()
 application.delegate = delegate
 let hud = ApprovalHUD()
-var service: MacCtlService!
-service = MacCtlService(presentApproval: { approval in
-    hud.present(approval)
-}, presentAuthorizationNotice: { notice in
-    hud.present(notice)
-})
-hud.approvalPendingHandler = { token in
-    service.isApprovalPending(token: token)
-}
-hud.pendingApprovalsHandler = {
-    service.pendingApprovalRecords()
-}
+let service = MacCtlService()
 hud.snapshotHandler = {
     service.controlCenterSnapshot()
-}
-hud.approveHandler = { token in
-    service.handle(RequestEnvelope(
-        method: "approval.approve",
-        params: ["token": .string(token), "source": .string("control_center")]
-    ))
-}
-hud.denyHandler = { token in
-    service.handle(RequestEnvelope(
-        method: "approval.deny",
-        params: ["token": .string(token), "source": .string("control_center")]
-    ))
 }
 hud.stopHandler = {
     service.handle(RequestEnvelope(method: "control.stop_active"))

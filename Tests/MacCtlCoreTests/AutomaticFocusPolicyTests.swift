@@ -127,7 +127,7 @@ final class AutomaticFocusPolicyTests: XCTestCase {
             from: JSONCodec.encode(receipt)
         )
 
-        XCTAssertEqual(decoded.schemaVersion, 3)
+        XCTAssertEqual(decoded.schemaVersion, 4)
         XCTAssertEqual(decoded.requestedFocusPolicy, .automatic)
         XCTAssertEqual(decoded.focusPolicy, .foreground)
         XCTAssertEqual(decoded.focusSelectionReason, "foreground_fallback")

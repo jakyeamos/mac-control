@@ -24,8 +24,66 @@ public enum AppControllerError: Error, LocalizedError {
 public final class AppController {
     private let workspace = NSWorkspace.shared
     private let fileManager = FileManager.default
+    private let runningApplicationProvider: () -> [RunningApplicationDescriptor]
+    private let foregroundApplicationProvider: () -> RunningApplicationDescriptor?
 
-    public init() {}
+    public init(
+        runningApplicationProvider: (() -> [RunningApplicationDescriptor])? = nil,
+    ) {
+        self.runningApplicationProvider = runningApplicationProvider ?? Self.systemRunningApplications
+        self.foregroundApplicationProvider = Self.systemForegroundApplication
+    }
+
+    public init(
+        runningApplicationProvider: @escaping () -> [RunningApplicationDescriptor],
+        foregroundApplicationProvider: @escaping () -> RunningApplicationDescriptor?
+    ) {
+        self.runningApplicationProvider = runningApplicationProvider
+        self.foregroundApplicationProvider = foregroundApplicationProvider
+    }
+
+    /// Lists every matching regular GUI process instead of collapsing bundle
+    /// identity to the first NSWorkspace result.
+    public func listRunningInstances(matching nameOrBundleID: String) -> [ApplicationInstanceInfo] {
+        runningApplicationProvider()
+            .filter { Self.matches($0, nameOrBundleID: nameOrBundleID) }
+            .map(ApplicationInstanceInfo.init(descriptor:))
+            .sorted { $0.processID < $1.processID }
+    }
+
+    /// Resolves an exact live process. Every supplied identity field must
+    /// agree; stale instance references fail closed and never fall back.
+    public func resolveRunningTarget(_ selector: ApplicationTargetSelector) throws -> ApplicationInstanceInfo {
+        let applicationMatches = listRunningInstances(matching: selector.application)
+        guard !applicationMatches.isEmpty else {
+            throw ApplicationTargetResolutionError.targetMissing
+        }
+
+        let processMatches: [ApplicationInstanceInfo]
+        if let processID = selector.processID {
+            processMatches = applicationMatches.filter { $0.processID == processID }
+            guard !processMatches.isEmpty else {
+                throw ApplicationTargetResolutionError.targetMissing
+            }
+        } else {
+            processMatches = applicationMatches
+        }
+
+        let instanceMatches: [ApplicationInstanceInfo]
+        if let instanceRef = selector.instanceRef {
+            instanceMatches = processMatches.filter { $0.instanceRef == instanceRef }
+            guard !instanceMatches.isEmpty else {
+                throw ApplicationTargetResolutionError.targetChanged
+            }
+        } else {
+            instanceMatches = processMatches
+        }
+
+        guard instanceMatches.count == 1, let instance = instanceMatches.first else {
+            throw ApplicationTargetResolutionError.targetAmbiguous(instanceMatches.count)
+        }
+        return instance
+    }
 
     public func listApplications() -> [AppInfo] {
         var applications: [String: AppInfo] = [:]
@@ -113,11 +171,7 @@ public final class AppController {
     }
 
     public func foregroundApplication() -> AppInfo? {
-        guard let running = workspace.frontmostApplication,
-              let url = running.bundleURL else {
-            return nil
-        }
-        return appInfo(for: url)
+        foregroundApplicationProvider().map(ApplicationInstanceInfo.init(descriptor:))?.application
     }
 
     private func openInBackground(_ app: AppInfo) throws -> AppInfo {
@@ -225,6 +279,51 @@ public final class AppController {
             processID: running?.processIdentifier,
             bundleVersion: (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
                 ?? (bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
+        )
+    }
+
+    private static func matches(
+        _ application: RunningApplicationDescriptor,
+        nameOrBundleID: String
+    ) -> Bool {
+        application.bundleID == nameOrBundleID
+            || application.name.caseInsensitiveCompare(nameOrBundleID) == .orderedSame
+            || URL(fileURLWithPath: application.path)
+                .deletingPathExtension().lastPathComponent
+                .caseInsensitiveCompare(nameOrBundleID) == .orderedSame
+    }
+
+    private static func systemRunningApplications() -> [RunningApplicationDescriptor] {
+        NSWorkspace.shared.runningApplications.compactMap(systemDescriptor(for:))
+    }
+
+    /// Preserves the PID reported by the system foreground oracle. Re-resolving
+    /// through bundle or path identity would collapse same-bundle processes to
+    /// whichever instance NSWorkspace happens to enumerate first.
+    private static func systemForegroundApplication() -> RunningApplicationDescriptor? {
+        guard let running = NSWorkspace.shared.frontmostApplication else { return nil }
+        return systemDescriptor(for: running)
+    }
+
+    private static func systemDescriptor(for running: NSRunningApplication) -> RunningApplicationDescriptor? {
+        guard running.activationPolicy == .regular,
+              running.processIdentifier > 0,
+              let url = running.bundleURL else {
+            return nil
+        }
+        let bundle = Bundle(url: url)
+        let name = running.localizedName
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        return RunningApplicationDescriptor(
+            name: name,
+            bundleID: running.bundleIdentifier,
+            path: url.path,
+            processID: running.processIdentifier,
+            launchDate: running.launchDate,
+            bundleVersion: (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
         )
     }
 }

@@ -20,12 +20,18 @@ struct CLI {
         let commandArguments = Array(filtered.dropFirst())
         do {
             switch command {
+            case "version", "--version", "-V":
+                return renderVersion()
             case "doctor", "status":
                 return render(sendOrLocal(method: command, params: [:], localFallback: false))
             case "capabilities":
                 return render(sendOrLocal(method: command, params: [:], localFallback: true))
             case "app":
                 return try runApp(commandArguments)
+            case "action":
+                return try runAction(commandArguments)
+            case "window":
+                return try runWindow(commandArguments)
             case "workflow":
                 return try runWorkflow(commandArguments)
             case "approval":
@@ -85,17 +91,59 @@ struct CLI {
     }
 
     private func runApp(_ args: [String]) throws -> Int32 {
-        guard let subcommand = args.first else { throw CLIError.usage("Usage: macctl app list|open <name-or-bundle-id>") }
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl app list|instances --app <app>|open <name-or-bundle-id>")
+        }
         switch subcommand {
         case "list":
             return render(sendOrLocal(method: "app.list", params: [:], localFallback: true))
+        case "instances":
+            return render(sendOrLocal(
+                method: "app.instances",
+                params: ["app": .string(try requiredOption("--app", from: args))],
+                localFallback: false
+            ))
         case "open":
             guard let name = args.dropFirst().first else { throw CLIError.usage("Usage: macctl app open <name-or-bundle-id>") }
             var params: [String: JSONValue] = ["name": .string(name)]
             try addFocusPolicy(from: args, to: &params)
             return render(sendOrLocal(method: "app.open", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl app list|open <name-or-bundle-id>")
+            throw CLIError.usage("Usage: macctl app list|instances --app <app>|open <name-or-bundle-id>")
+        }
+    }
+
+    private func runAction(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl action resolve --intent-stdin | run <resolution-id>")
+        }
+        switch subcommand {
+        case "resolve":
+            guard args.contains("--intent-stdin") else {
+                throw CLIError.usage("Usage: macctl action resolve --intent-stdin")
+            }
+            let data = FileHandle.standardInput.readDataToEndOfFile()
+            guard !data.isEmpty,
+                  let intent = try? JSONCodec.decode(JSONValue.self, from: data),
+                  intent.objectValue != nil else {
+                throw CLIError.usage("--intent-stdin expects one macctl-action-intent/v1 JSON object")
+            }
+            return render(sendOrLocal(
+                method: "action.resolve",
+                params: ["intent": intent],
+                localFallback: false
+            ))
+        case "run":
+            guard let resolutionID = args.dropFirst().first, !resolutionID.hasPrefix("--") else {
+                throw CLIError.usage("Usage: macctl action run <resolution-id>")
+            }
+            return render(sendOrLocal(
+                method: "action.run",
+                params: ["resolution_id": .string(resolutionID)],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl action resolve --intent-stdin | run <resolution-id>")
         }
     }
 
@@ -214,15 +262,40 @@ struct CLI {
 
     private func runReceipts(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl receipts list|status")
+            throw CLIError.usage("Usage: macctl receipts list|status|trace <trace-id>|trace-complete --stdin")
         }
         switch subcommand {
         case "list":
             return render(sendOrLocal(method: "receipts.list", params: [:], localFallback: true))
         case "status":
             return render(sendOrLocal(method: "receipts.status", params: [:], localFallback: true))
+        case "trace":
+            guard args.count == 2, let traceID = args.dropFirst().first else {
+                throw CLIError.usage("Usage: macctl receipts trace <trace-id>")
+            }
+            return render(sendOrLocal(
+                method: "receipts.trace",
+                params: ["trace_id": .string(traceID)],
+                localFallback: false
+            ))
+        case "trace-complete":
+            guard args.count == 2, args[1] == "--stdin" else {
+                throw CLIError.usage("Usage: macctl receipts trace-complete --stdin")
+            }
+            let maximumCompletionBytes = 8_192
+            let data = try FileHandle.standardInput.read(upToCount: maximumCompletionBytes + 1) ?? Data()
+            guard !data.isEmpty, data.count <= maximumCompletionBytes,
+                  let value = try? JSONCodec.decode(JSONValue.self, from: data),
+                  let params = value.objectValue else {
+                throw CLIError.usage("receipts trace-complete --stdin expects one bounded JSON object")
+            }
+            return render(sendOrLocal(
+                method: "receipts.trace.complete",
+                params: params,
+                localFallback: false
+            ))
         default:
-            throw CLIError.usage("Usage: macctl receipts list|status")
+            throw CLIError.usage("Usage: macctl receipts list|status|trace <trace-id>|trace-complete --stdin")
         }
     }
 
@@ -423,6 +496,7 @@ struct CLI {
             var params: [String: JSONValue] = [
                 "app": .string(try requiredOption("--app", from: args))
             ]
+            try addReadOnlyTargetOptions(from: args, to: &params)
             if let maxNodes = try optionalOption("--max-nodes", from: args) {
                 guard let value = Int(maxNodes), value > 0 else {
                     throw CLIError.usage("--max-nodes must be a positive integer")
@@ -785,6 +859,98 @@ struct CLI {
         }
     }
 
+    private func runWindow(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl window displays|list|inspect|place|restore")
+        }
+        switch subcommand {
+        case "displays":
+            return renderValue(NativeWindowDisplayCatalog(
+                displays: SystemNativeWindowDisplayProvider().connectedDisplays()
+            ))
+        case "list":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args))
+            ]
+            try addReadOnlyTargetOptions(from: args, to: &params)
+            return render(sendOrLocal(method: "window.list", params: params, localFallback: false))
+        case "inspect":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args))
+            ]
+            try addReadOnlyTargetOptions(from: args, to: &params)
+            return render(sendOrLocal(
+                method: "window.inspect",
+                params: params,
+                localFallback: false
+            ))
+        case "place":
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("window place requires --confirm")
+            }
+            if let target = try optionalOption("--window", from: args), target != "focused" {
+                throw CLIError.usage("--window currently supports only focused")
+            }
+            let rawDisplayID = try requiredOption("--display-id", from: args)
+            guard let displayID = UInt32(rawDisplayID) else {
+                throw CLIError.usage("--display-id must be an unsigned 32-bit ID from `macctl window displays`")
+            }
+            let rawLayout = try requiredOption("--layout", from: args)
+            guard NativeWindowLayoutName(rawValue: rawLayout) != nil else {
+                throw CLIError.usage("--layout must be one of: \(NativeWindowLayoutName.allCases.map(\.rawValue).joined(separator: ", "))")
+            }
+            return render(sendOrLocal(
+                method: "window.place",
+                params: [
+                    "app": .string(try requiredOption("--app", from: args)),
+                    "window": .string("focused"),
+                    "display_id": .number(Double(displayID)),
+                    "layout": .string(rawLayout),
+                    "confirm": .bool(true)
+                ],
+                localFallback: false
+            ))
+        case "restore":
+            guard args.contains("--confirm") else {
+                throw CLIError.usage("window restore requires --confirm")
+            }
+            return render(sendOrLocal(
+                method: "window.restore",
+                params: [
+                    "restore_token": .string(try requiredOption("--restore-token", from: args)),
+                    "confirm": .bool(true)
+                ],
+                localFallback: false
+            ))
+        default:
+            throw CLIError.usage("Usage: macctl window displays|list|inspect|place|restore")
+        }
+    }
+
+    private func addReadOnlyTargetOptions(
+        from args: [String],
+        to params: inout [String: JSONValue]
+    ) throws {
+        if let rawProcessID = try optionalOption("--process-id", from: args) {
+            guard let processID = Int32(rawProcessID), processID > 0 else {
+                throw CLIError.usage("--process-id must be a positive 32-bit process ID")
+            }
+            params["process_id"] = .number(Double(processID))
+        }
+        if let instanceRef = try optionalOption("--instance-ref", from: args) {
+            guard !instanceRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CLIError.usage("--instance-ref must not be empty")
+            }
+            params["instance_ref"] = .string(instanceRef)
+        }
+        if let windowRef = try optionalOption("--window-ref", from: args) {
+            guard !windowRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CLIError.usage("--window-ref must not be empty")
+            }
+            params["window_ref"] = .string(windowRef)
+        }
+    }
+
     private func runAuthorization(_ args: [String]) throws -> Int32 {
         guard let action = args.first else {
             throw CLIError.usage("Usage: macctl control authorization prepare|bind|list|resolve")
@@ -956,9 +1122,43 @@ struct CLI {
 
     private func runTask(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl task prepare|run|status|resume|cancel")
+            throw CLIError.usage("Usage: macctl task displays|compose|prepare|run|status|resume|cancel")
         }
         switch subcommand {
+        case "displays":
+            return renderValue(FocusSessionDisplayCatalogSnapshot(
+                displays: SystemFocusSessionDisplayProvider().connectedDisplays()
+            ))
+        case "compose":
+            guard args.dropFirst().first == "focus-session" else {
+                throw CLIError.usage("Usage: macctl task compose focus-session --display-id <id> --layout balanced|brief-primary [--request <text>] [--plan] [--json]")
+            }
+            let request = try optionalOption("--request", from: args)
+                ?? FocusSessionPlanComposer.canonicalRequest
+            let rawDisplayID = try requiredOption("--display-id", from: args)
+            guard let displayID = UInt32(rawDisplayID) else {
+                throw CLIError.usage("--display-id must be an unsigned 32-bit display ID from `macctl task displays`")
+            }
+            let rawLayout = try requiredOption("--layout", from: args)
+            guard let layout = FocusSessionLayoutName(rawValue: rawLayout) else {
+                throw CLIError.usage("--layout must be one of: \(FocusSessionLayoutName.allCases.map(\.rawValue).joined(separator: ", "))")
+            }
+            let display = try FocusSessionDisplayResolver.resolve(
+                id: displayID,
+                from: SystemFocusSessionDisplayProvider().connectedDisplays()
+            )
+            if args.contains("--plan") {
+                return renderValue(try FocusSessionPlanComposer.taskPlan(
+                    request: request,
+                    display: display,
+                    layout: layout
+                ))
+            }
+            return renderValue(try FocusSessionPlanComposer.compose(
+                request: request,
+                display: display,
+                layout: layout
+            ))
         case "prepare":
             let params = try taskPlanParameters(from: args)
             if params["plan"] == nil {
@@ -985,7 +1185,7 @@ struct CLI {
                 localFallback: false
             ))
         default:
-            throw CLIError.usage("Usage: macctl task prepare|run|status|resume|cancel")
+            throw CLIError.usage("Usage: macctl task displays|compose|prepare|run|status|resume|cancel")
         }
     }
 
@@ -1306,9 +1506,76 @@ struct CLI {
         params: [String: JSONValue]
     ) -> ResponseEnvelope {
         if params["target_surface"]?.stringValue == ControlTargetSurface.webContent.rawValue {
-            return localService.localReadOnlyHandle(RequestEnvelope(method: method, params: params))
+            let startedAt = Date()
+            let localRequest = RequestEnvelope(method: method, params: params)
+            let localResponse = localService.localReadOnlyHandle(localRequest)
+            guard method != "control.capabilities",
+                  localResponse.error?.code == MacCtlErrorCode.providerHandoffRequired.rawValue else {
+                return localResponse
+            }
+
+            var traceParams: [String: JSONValue] = [
+                "source_method": .string(method),
+                "source_request_id": .string(localRequest.requestID),
+                "source_started_at_ms": .number(startedAt.timeIntervalSince1970 * 1_000),
+                "target_surface": .string(ControlTargetSurface.webContent.rawValue),
+                "focus_policy": params["focus_policy"] ?? .string(FocusPolicy.automatic.rawValue)
+            ]
+            for key in ["app", "action", "task", "target_fingerprint", "selector"] {
+                if let value = params[key] { traceParams[key] = value }
+            }
+            if method == "control.batch" { traceParams["action"] = .string("batch") }
+
+            let traceResponse: ResponseEnvelope
+            do {
+                traceResponse = try UnixSocketClient().send(RequestEnvelope(
+                    method: "receipts.trace.begin",
+                    params: traceParams
+                ))
+            } catch {
+                return attachTraceUnavailable(to: localResponse)
+            }
+            guard traceResponse.status == .succeeded,
+                  let trace = traceResponse.result["trace"] else {
+                return attachTraceUnavailable(to: localResponse)
+            }
+
+            var result = localResponse.result.objectValue ?? [:]
+            result["trace"] = trace
+            result["trace_state"] = .string(CrossProviderTraceState.open.rawValue)
+            var details = localResponse.error?.details ?? [:]
+            details["trace"] = trace
+            details["trace_state"] = .string(CrossProviderTraceState.open.rawValue)
+            let error = localResponse.error.map {
+                MacCtlError(code: $0.code, message: $0.message, details: details)
+            }
+            return ResponseEnvelope(
+                requestID: localRequest.requestID,
+                operationID: traceResponse.operationID,
+                status: localResponse.status,
+                result: .object(result),
+                evidence: localResponse.evidence + traceResponse.evidence,
+                error: error,
+                outcome: localResponse.outcome
+            )
         }
         return sendOrLocal(method: method, params: params, localFallback: false)
+    }
+
+    private func attachTraceUnavailable(to response: ResponseEnvelope) -> ResponseEnvelope {
+        var result = response.result.objectValue ?? [:]
+        result["trace_state"] = .string("unavailable")
+        var details = response.error?.details ?? [:]
+        details["trace_state"] = .string("unavailable")
+        return ResponseEnvelope(
+            requestID: response.requestID,
+            operationID: response.operationID,
+            status: response.status,
+            result: .object(result),
+            evidence: response.evidence,
+            error: response.error.map { MacCtlError(code: $0.code, message: $0.message, details: details) },
+            outcome: response.outcome
+        )
     }
 
     private func render(_ response: ResponseEnvelope) -> Int32 {
@@ -1339,18 +1606,36 @@ struct CLI {
         return 0
     }
 
+    private func renderVersion() -> Int32 {
+        if jsonOutput {
+            return renderValue(MacCtlVersionOutput(version: MacCtlVersion.current))
+        }
+        print("macctl \(MacCtlVersion.current)")
+        return 0
+    }
+
     private func printHelp() {
         print("""
         macctl — command-first macOS control plane
 
+        macctl version [--json]
+        macctl --version
         macctl doctor --json
         macctl capabilities --json
         macctl status --json
         macctl app list [--json]
+        macctl app instances --app <app> [--json]
         macctl app open <name-or-bundle-id> [--focus-policy automatic|foreground|background] [--background]
+        macctl action resolve --intent-stdin [--json]
+        macctl action run <resolution-id> [--json]
+        macctl window displays [--json]
+        macctl window list --app <app> [--process-id <pid>] [--instance-ref <ref>] [--json]
+        macctl window inspect --app <app> [--process-id <pid>] [--instance-ref <ref>] [--window-ref <ref>] [--json]
+        macctl window place --app <app> [--window focused] --display-id <id> --layout <name> --confirm [--json]
+        macctl window restore --restore-token <token> --confirm [--json]
         macctl workflow list|validate|prepare|run <workflow> [--focus-policy automatic|foreground|background] [--background] [--ephemeral-stdin]
         macctl approval list|approve|deny <token>
-        macctl receipts list|status
+        macctl receipts list|status|trace <trace-id>|trace-complete --stdin
         macctl release check [--json]
         macctl keyboard status|setup|enable --confirm|inspect
         macctl keyboard lease acquire --scope app --app "<name>" [--seconds N] --confirm
@@ -1387,10 +1672,12 @@ struct CLI {
         macctl route benchmark --app <app> --task <task> --action <action> --route <route> --confirm
         macctl route benchmark ... --action scroll --route scroll --direction up|down|left|right --amount N [--reset-direction <opposite> --reset-amount N]
         macctl route register --app <app> --task <task> --latency-ms <ms> --p95-ms <ms> --verification-rate <0...1> --confirm
-        macctl accessibility tree --app <app>
+        macctl accessibility tree --app <app> [--process-id <pid>] [--instance-ref <ref>] [--window-ref <ref>]
         macctl accessibility audit --app <app> --manifest <path>
         macctl ideal-state validate --manifest <path> [--json]
         macctl ideal-state audit --app <app> --manifest <path> [--json]
+        macctl task displays [--json]
+        macctl task compose focus-session --display-id <id> --layout balanced|brief-primary [--request <text>] [--plan] [--json]
         macctl task prepare|run|status|resume|cancel
         macctl task prepare --plan-stdin [--json]
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
@@ -1401,6 +1688,12 @@ struct CLI {
         macctl install [--allow-legacy-idle-snapshot]
         """)
     }
+}
+
+private struct MacCtlVersionOutput: Encodable {
+    let schemaVersion = "macctl-version/v1"
+    let name = "macctl"
+    let version: String
 }
 
 enum CLIError: Error, LocalizedError {

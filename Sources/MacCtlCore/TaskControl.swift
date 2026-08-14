@@ -45,6 +45,8 @@ public struct TaskTargetIdentity: Codable, Equatable {
     public let application: String?
     public let bundleID: String?
     public let processID: Int32?
+    public let instanceRef: String?
+    public let windowRef: String?
     public let windowFingerprint: String?
     public let focusedElementFingerprint: String?
     public let selector: Selector?
@@ -53,6 +55,8 @@ public struct TaskTargetIdentity: Codable, Equatable {
         application: String? = nil,
         bundleID: String? = nil,
         processID: Int32? = nil,
+        instanceRef: String? = nil,
+        windowRef: String? = nil,
         windowFingerprint: String? = nil,
         focusedElementFingerprint: String? = nil,
         selector: Selector? = nil
@@ -60,13 +64,16 @@ public struct TaskTargetIdentity: Codable, Equatable {
         self.application = application
         self.bundleID = bundleID
         self.processID = processID
+        self.instanceRef = instanceRef
+        self.windowRef = windowRef
         self.windowFingerprint = windowFingerprint
         self.focusedElementFingerprint = focusedElementFingerprint
         self.selector = selector
     }
 
     private enum CodingKeys: String, CodingKey {
-        case application, bundleID, processID, windowFingerprint, focusedElementFingerprint, selector
+        case application, bundleID, processID, instanceRef, windowRef
+        case windowFingerprint, focusedElementFingerprint, selector
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +83,10 @@ public struct TaskTargetIdentity: Codable, Equatable {
             ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "bundle_id")!))
         processID = try (container.decodeIfPresent(Int32.self, forKey: TaskCodingKey(stringValue: "processID")!)
             ?? container.decodeIfPresent(Int32.self, forKey: TaskCodingKey(stringValue: "process_id")!))
+        instanceRef = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "instanceRef")!)
+            ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "instance_ref")!))
+        windowRef = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "windowRef")!)
+            ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "window_ref")!))
         windowFingerprint = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "windowFingerprint")!)
             ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "window_fingerprint")!))
         focusedElementFingerprint = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "focusedElementFingerprint")!)
@@ -355,6 +366,8 @@ public struct TaskPlan: Codable, Equatable {
 public enum TaskInputChannelRoute: String, Codable, Equatable, CaseIterable {
     case accessibility
     case processDirected = "process_directed"
+    case exactProcessDirected = "exact_process_directed"
+    case exactForeground = "exact_foreground"
 }
 
 /// An in-memory input authority bound to one approved background task and one
@@ -366,6 +379,8 @@ public struct TaskInputChannel: Codable, Equatable {
     public let planDigest: String
     public let focusPolicy: FocusPolicy
     public let targetApplication: AppInfo
+    public let targetInstanceRef: String?
+    public let targetWindowRef: String?
     public let routes: [TaskInputChannelRoute]
     public let expiresAt: Date
 
@@ -375,6 +390,8 @@ public struct TaskInputChannel: Codable, Equatable {
         planDigest: String,
         focusPolicy: FocusPolicy,
         targetApplication: AppInfo,
+        targetInstanceRef: String? = nil,
+        targetWindowRef: String? = nil,
         routes: [TaskInputChannelRoute],
         expiresAt: Date
     ) {
@@ -383,6 +400,8 @@ public struct TaskInputChannel: Codable, Equatable {
         self.planDigest = planDigest
         self.focusPolicy = focusPolicy
         self.targetApplication = targetApplication
+        self.targetInstanceRef = targetInstanceRef
+        self.targetWindowRef = targetWindowRef
         self.routes = routes
         self.expiresAt = expiresAt
     }
@@ -461,6 +480,10 @@ public enum TaskPlanValidator {
                !plan.keyboardFreezeRequired {
                 errors.append("Suppressed physical keyboard input step \(trimmedID) requires keyboard_freeze_required=true")
             }
+            if plan.focusPolicy == .automatic,
+               (step.target?.instanceRef != nil || step.target?.windowRef != nil) {
+                errors.append("Exact process/window targets require an explicit foreground or background policy")
+            }
             if step.recovery.maxAttempts != nil, step.recovery.maxAttempts! < 1 {
                 errors.append("Step \(trimmedID) recovery max_attempts must be positive")
             }
@@ -494,9 +517,55 @@ public enum TaskPlanValidator {
         }
         if plan.focusPolicy == .background {
             validateBackgroundInputChannel(plan, adapterRegistry: adapterRegistry, errors: &errors)
+        } else if plan.focusPolicy == .foreground {
+            validateExactForegroundInput(plan, errors: &errors)
         }
         let risk = plan.steps.map(\.risk).max(by: { rank($0) < rank($1) }) ?? .safe
         return TaskPlanValidation(taskID: plan.id, valid: errors.isEmpty, risk: risk, errors: errors)
+    }
+
+    private static func validateExactForegroundInput(
+        _ plan: TaskPlan,
+        errors: inout [String]
+    ) {
+        let exactSteps = plan.steps.filter {
+            $0.target?.instanceRef?.isEmpty == false || $0.target?.windowRef?.isEmpty == false
+        }
+        guard !exactSteps.isEmpty else { return }
+        let inputSteps = plan.steps.filter {
+            [.click, .type, .key, .search, .scroll, .adapter].contains($0.action.kind)
+        }
+        guard exactSteps.count == inputSteps.count else {
+            errors.append("A foreground exact-target task cannot mix exact and application-level input")
+            return
+        }
+        var bindings = Set<String>()
+        for step in exactSteps {
+            guard let processID = step.target?.processID,
+                  let instanceRef = step.target?.instanceRef,
+                  !instanceRef.isEmpty,
+                  let windowRef = step.target?.windowRef,
+                  !windowRef.isEmpty else {
+                errors.append("Foreground exact-target step \(step.id) requires process_id, instance_ref, and window_ref")
+                continue
+            }
+            bindings.insert([String(processID), instanceRef, windowRef].joined(separator: "|"))
+            if step.action.kind != .key {
+                errors.append("Foreground exact-target step \(step.id) currently supports only key actions")
+            }
+            if step.risk != .sensitive {
+                errors.append("Foreground exact-target step \(step.id) must be sensitive")
+            }
+            if step.recovery.mode != "strict" || (step.recovery.maxAttempts ?? 1) != 1 {
+                errors.append("Foreground exact-target step \(step.id) requires strict single-attempt recovery")
+            }
+            if !step.postconditions.contains(where: { $0.kind == .elementExists && $0.selector?.hasTarget == true }) {
+                errors.append("Foreground exact-target step \(step.id) requires an element_exists postcondition")
+            }
+        }
+        if bindings.count != 1 {
+            errors.append("A foreground exact-target task must bind every input step to one process and window")
+        }
     }
 
     private static func validateBackgroundInputChannel(
@@ -505,7 +574,43 @@ public enum TaskPlanValidator {
         errors: inout [String]
     ) {
         var inputTargets = Set<String>()
+        var exactBindings = Set<String>()
+        var hasExactInput = false
+        var hasLegacyInput = false
         for step in plan.steps {
+            let exactFields = [
+                step.target?.processID != nil,
+                step.target?.instanceRef?.isEmpty == false,
+                step.target?.windowRef?.isEmpty == false
+            ]
+            let usesExactTarget = step.target?.instanceRef?.isEmpty == false
+                || step.target?.windowRef?.isEmpty == false
+            if usesExactTarget {
+                errors.append("Background exact-target step \(step.id) is unsupported; use explicit foreground exact targeting")
+                hasExactInput = true
+                if !exactFields.allSatisfy({ $0 }) {
+                    errors.append("Background exact-target step \(step.id) requires process_id, instance_ref, and window_ref")
+                }
+                if step.action.kind != .key {
+                    errors.append("Background exact-target step \(step.id) currently supports only key actions")
+                }
+                if step.risk != .sensitive {
+                    errors.append("Background exact-target step \(step.id) must be sensitive")
+                }
+                if step.recovery.mode != "strict" || (step.recovery.maxAttempts ?? 1) != 1 {
+                    errors.append("Background exact-target step \(step.id) requires strict single-attempt recovery")
+                }
+                if !step.postconditions.contains(where: { $0.kind == .elementExists && $0.selector?.hasTarget == true }) {
+                    errors.append("Background exact-target step \(step.id) requires an element_exists postcondition")
+                }
+                if let processID = step.target?.processID,
+                   let instanceRef = step.target?.instanceRef,
+                   let windowRef = step.target?.windowRef {
+                    exactBindings.insert([String(processID), instanceRef, windowRef].joined(separator: "|"))
+                }
+            } else if [.click, .type, .key, .search, .scroll, .adapter].contains(step.action.kind) {
+                hasLegacyInput = true
+            }
             switch step.action.kind {
             case .click, .type, .search, .scroll:
                 if step.action.surface != .macApp {
@@ -548,6 +653,12 @@ public enum TaskPlanValidator {
         }
         if inputTargets.count > 1 {
             errors.append("A background task input channel must target exactly one application")
+        }
+        if exactBindings.count > 1 {
+            errors.append("A background exact-target task must bind every input step to one process and window")
+        }
+        if hasExactInput && hasLegacyInput {
+            errors.append("A background task cannot mix exact-target and application-level input")
         }
     }
 
@@ -633,6 +744,16 @@ public enum TaskPlanValidator {
             for key in privateKeys where action.parameters[key] != nil {
                 errors.append("Step \(stepID) adapter private input \(key) must use an ephemeral key")
             }
+            if FocusSessionExecutionOperation(rawValue: operation) != nil {
+                validateFocusSessionParameters(
+                    action.parameters,
+                    operation: operation,
+                    allowedBaseKeys: ["adapter_id", "app", "operation"],
+                    stepID: stepID,
+                    surface: "action",
+                    errors: &errors
+                )
+            }
             if let adapterRegistry {
                 do {
                     _ = try adapterRegistry.operation(adapterID: adapterID, name: operation)
@@ -691,6 +812,17 @@ public enum TaskPlanValidator {
                     || predicate.parameters["state"]?.stringValue == nil {
                     errors.append("Step \(stepID) \(label) adapter_state requires adapter_id and state")
                 }
+                if predicate.parameters["state"]?.stringValue == "focus_session_verified",
+                   let operation = predicate.parameters["focus_session_effect"]?.stringValue {
+                    validateFocusSessionParameters(
+                        predicate.parameters,
+                        operation: operation,
+                        allowedBaseKeys: ["adapter_id", "state", "focus_session_effect"],
+                        stepID: stepID,
+                        surface: label,
+                        errors: &errors
+                    )
+                }
             case .menuItemState:
                 guard let path = predicate.parameters["menu_path"]?.arrayValue,
                       path.count >= 2,
@@ -704,6 +836,39 @@ public enum TaskPlanValidator {
             case .windowVisible, .modalAbsent, .focusReadable:
                 break
             }
+        }
+    }
+
+    private static func validateFocusSessionParameters(
+        _ parameters: [String: JSONValue],
+        operation: String,
+        allowedBaseKeys: Set<String>,
+        stepID: String,
+        surface: String,
+        errors: inout [String]
+    ) {
+        guard let focusOperation = FocusSessionExecutionOperation(rawValue: operation) else {
+            errors.append("Step \(stepID) \(surface) has an unsupported focus-session operation")
+            return
+        }
+        var allowedKeys = allowedBaseKeys
+        if focusOperation == .arrangeWorkspace {
+            allowedKeys.formUnion(["display_id", "layout_name"])
+            guard let displayID = parameters["display_id"]?.doubleValue,
+                  displayID.rounded() == displayID,
+                  displayID >= 0,
+                  displayID <= Double(UInt32.max) else {
+                errors.append("Step \(stepID) \(surface) focus-session layout requires an unsigned 32-bit display_id")
+                return
+            }
+            guard let layoutName = parameters["layout_name"]?.stringValue,
+                  FocusSessionLayoutName(rawValue: layoutName) != nil else {
+                errors.append("Step \(stepID) \(surface) focus-session layout_name is not allowlisted")
+                return
+            }
+        }
+        for key in parameters.keys where !allowedKeys.contains(key) {
+            errors.append("Step \(stepID) \(surface) focus-session parameter is not allowlisted: \(key)")
         }
     }
 

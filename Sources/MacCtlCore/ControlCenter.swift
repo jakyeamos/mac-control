@@ -32,6 +32,7 @@ public struct ControlCenterExecution: Codable, Equatable {
     public let acquiredAt: Date
     public let expiresAt: Date
     public let stopping: Bool
+    public let taskProgress: ControlCenterTaskProgress?
 
     public init(
         executionID: String,
@@ -42,7 +43,8 @@ public struct ControlCenterExecution: Codable, Equatable {
         acquiredAt: Date,
         expiresAt: Date,
         stopping: Bool = false,
-        focusPolicy: FocusPolicy? = nil
+        focusPolicy: FocusPolicy? = nil,
+        taskProgress: ControlCenterTaskProgress? = nil
     ) {
         self.executionID = executionID
         self.taskID = taskID
@@ -53,6 +55,116 @@ public struct ControlCenterExecution: Codable, Equatable {
         self.acquiredAt = acquiredAt
         self.expiresAt = expiresAt
         self.stopping = stopping
+        self.taskProgress = taskProgress
+    }
+}
+
+public enum ControlCenterTaskStepState: String, Codable, Equatable {
+    case pending
+    case running
+    case verified
+    case stopped
+}
+
+/// A redacted projection of durable task state for the menu-bar Control Center.
+/// Step labels come only from plan IDs; targets, selectors, inputs, and output
+/// remain outside this forward-facing snapshot.
+public struct ControlCenterTaskStepProgress: Codable, Equatable {
+    public let stepID: String
+    public let label: String
+    public let state: ControlCenterTaskStepState
+
+    public init(stepID: String, label: String, state: ControlCenterTaskStepState) {
+        self.stepID = stepID
+        self.label = label
+        self.state = state
+    }
+}
+
+public struct ControlCenterTaskProgress: Codable, Equatable {
+    public let state: TaskLifecycleState
+    public let completedStepCount: Int
+    public let totalStepCount: Int
+    public let currentStepID: String?
+    public let lastErrorCode: String?
+    public let steps: [ControlCenterTaskStepProgress]
+
+    public init(
+        state: TaskLifecycleState,
+        completedStepCount: Int,
+        totalStepCount: Int,
+        currentStepID: String?,
+        lastErrorCode: String?,
+        steps: [ControlCenterTaskStepProgress]
+    ) {
+        self.state = state
+        self.completedStepCount = completedStepCount
+        self.totalStepCount = totalStepCount
+        self.currentStepID = currentStepID
+        self.lastErrorCode = lastErrorCode
+        self.steps = steps
+    }
+
+    public static func make(
+        plan: TaskPlan,
+        status: TaskStatusReport,
+        stopping: Bool = false
+    ) -> ControlCenterTaskProgress {
+        let completedCount = min(max(status.stepIndex, 0), plan.steps.count)
+        let stoppedStates: Set<TaskLifecycleState> = [
+            .paused, .blocked, .indeterminate, .cancelled, .expired
+        ]
+        let steps = plan.steps.enumerated().map { index, step in
+            let state: ControlCenterTaskStepState
+            if index < completedCount || status.state == .completed {
+                state = .verified
+            } else if index == completedCount,
+                      stopping || stoppedStates.contains(status.state) {
+                state = .stopped
+            } else if index == completedCount, status.state == .running {
+                state = .running
+            } else {
+                state = .pending
+            }
+            return ControlCenterTaskStepProgress(
+                stepID: step.id,
+                label: step.id
+                    .replacingOccurrences(of: "-", with: " ")
+                    .replacingOccurrences(of: "_", with: " ")
+                    .capitalized,
+                state: state
+            )
+        }
+        return ControlCenterTaskProgress(
+            state: stopping && status.state == .running ? .cancelled : status.state,
+            completedStepCount: completedCount,
+            totalStepCount: plan.steps.count,
+            currentStepID: status.currentStepID,
+            lastErrorCode: status.lastErrorCode,
+            steps: steps
+        )
+    }
+}
+
+public struct ControlCenterTaskOutcome: Codable, Equatable {
+    public let taskID: String
+    public let summary: String
+    public let applicationName: String?
+    public let progress: ControlCenterTaskProgress
+    public let expiresAt: Date
+
+    public init(
+        taskID: String,
+        summary: String,
+        applicationName: String?,
+        progress: ControlCenterTaskProgress,
+        expiresAt: Date
+    ) {
+        self.taskID = taskID
+        self.summary = summary
+        self.applicationName = applicationName
+        self.progress = progress
+        self.expiresAt = expiresAt
     }
 }
 
@@ -131,6 +243,7 @@ public struct ControlCenterSnapshot: Codable, Equatable {
     public let handsOffSession: ControlCenterHandsOffSession?
     public let permissions: [PermissionStatus]
     public let lifecycleDrain: ControlCenterLifecycleDrain?
+    public let taskOutcome: ControlCenterTaskOutcome?
 
     public init(
         approvals: [ControlCenterApproval],
@@ -139,7 +252,8 @@ public struct ControlCenterSnapshot: Codable, Equatable {
         lifecycleDrain: ControlCenterLifecycleDrain? = nil,
         focusActivity: ControlCenterFocusActivity? = nil,
         handsOffSession: ControlCenterHandsOffSession? = nil,
-        authorizationNotices: [AuthorizationNotice] = []
+        authorizationNotices: [AuthorizationNotice] = [],
+        taskOutcome: ControlCenterTaskOutcome? = nil
     ) {
         self.approvals = approvals
         self.authorizationNotices = authorizationNotices
@@ -148,6 +262,7 @@ public struct ControlCenterSnapshot: Codable, Equatable {
         self.handsOffSession = handsOffSession
         self.permissions = permissions
         self.lifecycleDrain = lifecycleDrain
+        self.taskOutcome = taskOutcome
     }
 }
 
@@ -201,6 +316,7 @@ public struct ControlCenterPresentation: Equatable {
     public let accessibilityLabel: String
     public let pendingCount: Int
     public let authorizationCount: Int
+    public let showsStatusItem: Bool
 
     public static func make(
         snapshot: ControlCenterSnapshot,
@@ -220,27 +336,13 @@ public struct ControlCenterPresentation: Equatable {
                 tooltip: "Daemon lifecycle drain active for \(durationLabel(remaining))",
                 accessibilityLabel: "Daemon lifecycle drain active, \(durationLabel(remaining)) remaining",
                 pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
-            )
-        }
-        if let nearestAuthorization = authorizationNotices.min(by: { $0.expiresAt < $1.expiresAt }) {
-            let remaining = max(0, nearestAuthorization.expiresAt.timeIntervalSince(now))
-            let label = authorizationNotices.count == 1
-                ? "Credential request"
-                : "\(authorizationNotices.count) requests"
-            let source = nearestAuthorization.provenance == .unverified ? " · unverified source" : ""
-            return ControlCenterPresentation(
-                state: .authorization,
-                label: label,
-                ringFraction: min(max(remaining / approvalLifetime, 0), 1),
-                tooltip: "\(label) needs attention\(source) · expires in \(durationLabel(remaining))",
-                accessibilityLabel: "\(label) needs attention\(source), expires in \(durationLabel(remaining))",
-                pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: true
             )
         }
         let missing = snapshot.permissions.filter {
-            $0.state == "missing" && ["Accessibility", "Input Monitoring", "Post Events"].contains($0.name)
+            ["missing", "unknown"].contains($0.state)
+                && ["Accessibility", "Input Monitoring", "Post Events"].contains($0.name)
         }
         let handsOffSession = snapshot.handsOffSession.flatMap { session in
             session.expiresAt > now ? session : nil
@@ -268,7 +370,6 @@ public struct ControlCenterPresentation: Equatable {
                 mode = "Computer leased"
             }
             let target = execution.applicationName.map { " to \($0)" } ?? ""
-            let countSuffix = approvals.isEmpty ? "" : " · \(approvals.count) approval\(approvals.count == 1 ? "" : "s")"
             let state: ControlCenterVisualState
             if execution.stopping {
                 state = .stopping
@@ -297,10 +398,11 @@ public struct ControlCenterPresentation: Equatable {
                 state: state,
                 label: label,
                 ringFraction: fraction,
-                tooltip: "\(mode)\(target) for \(durationLabel(remaining))\(countSuffix)",
-                accessibilityLabel: "\(mode)\(target), \(durationLabel(remaining)) remaining\(countSuffix)",
+                tooltip: "\(mode)\(target) for \(durationLabel(remaining))",
+                accessibilityLabel: "\(mode)\(target), \(durationLabel(remaining)) remaining",
                 pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: true
             )
         }
         if let handsOffSession {
@@ -317,10 +419,13 @@ public struct ControlCenterPresentation: Equatable {
                 tooltip: "Hands off\(target) · \(provider) active · \(durationLabel(remaining))\(task)",
                 accessibilityLabel: "Hands off\(target), \(provider) agent run active, \(durationLabel(remaining)) remaining",
                 pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: true
             )
         }
-        if let focusActivity = snapshot.focusActivity, focusActivity.expiresAt > now {
+        if missing.isEmpty,
+           let focusActivity = snapshot.focusActivity,
+           focusActivity.expiresAt > now {
             let focused = focusActivity.phase == .focused
             let label = focused ? "Focused" : "Focusing"
             let target = " to \(focusActivity.applicationName)"
@@ -332,10 +437,11 @@ public struct ControlCenterPresentation: Equatable {
                 tooltip: "Mac Control \(label.lowercased())\(target) · \(durationLabel(remaining))",
                 accessibilityLabel: "Mac Control \(label.lowercased())\(target)",
                 pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: false
             )
         }
-        if let nearest = approvals.min(by: { $0.expiresAt < $1.expiresAt }) {
+        if missing.isEmpty, let nearest = approvals.min(by: { $0.expiresAt < $1.expiresAt }) {
             let remaining = max(0, nearest.expiresAt.timeIntervalSince(now))
             let fraction = min(max(remaining / approvalLifetime, 0), 1)
             let label = approvals.count == 1 ? "Approval" : "\(approvals.count) approvals"
@@ -346,7 +452,8 @@ public struct ControlCenterPresentation: Equatable {
                 tooltip: "\(label) required · expires in \(durationLabel(remaining))",
                 accessibilityLabel: "\(label) required, nearest expires in \(durationLabel(remaining))",
                 pendingCount: approvals.count,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: false
             )
         }
         if !missing.isEmpty {
@@ -358,7 +465,25 @@ public struct ControlCenterPresentation: Equatable {
                 tooltip: "macctl needs: \(names)",
                 accessibilityLabel: "macctl degraded, missing \(names)",
                 pendingCount: 0,
-                authorizationCount: authorizationNotices.count
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: true
+            )
+        }
+        if let nearestAuthorization = authorizationNotices.min(by: { $0.expiresAt < $1.expiresAt }) {
+            let remaining = max(0, nearestAuthorization.expiresAt.timeIntervalSince(now))
+            let label = authorizationNotices.count == 1
+                ? "Credential request"
+                : "\(authorizationNotices.count) requests"
+            let source = nearestAuthorization.provenance == .unverified ? " · unverified source" : ""
+            return ControlCenterPresentation(
+                state: .authorization,
+                label: label,
+                ringFraction: min(max(remaining / approvalLifetime, 0), 1),
+                tooltip: "\(label) needs attention\(source) · expires in \(durationLabel(remaining))",
+                accessibilityLabel: "\(label) needs attention\(source), expires in \(durationLabel(remaining))",
+                pendingCount: approvals.count,
+                authorizationCount: authorizationNotices.count,
+                showsStatusItem: false
             )
         }
         return ControlCenterPresentation(
@@ -368,7 +493,8 @@ public struct ControlCenterPresentation: Equatable {
             tooltip: "macctl ready · computer available",
             accessibilityLabel: "macctl ready, computer available",
             pendingCount: 0,
-            authorizationCount: authorizationNotices.count
+            authorizationCount: authorizationNotices.count,
+            showsStatusItem: false
         )
     }
 

@@ -4,7 +4,167 @@ import XCTest
 @testable import MacCtlCore
 
 final class ControlCenterTests: XCTestCase {
-    func testHiddenControlCenterBuildsPopoverContentBeforeFirstPresentation() {
+    func testTaskProgressProjectionPreservesVerifiedStepsWhenCurrentStepStops() {
+        let plan = TaskPlan(
+            id: "focus-session",
+            name: "Focus session",
+            summary: "Prepare a focus session",
+            steps: [
+                TaskStep(id: "open-brief", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "open-scratchpad", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "arrange-workspace", action: ActionSpec(kind: .assert, surface: .macApp))
+            ]
+        )
+        let status = TaskStatusReport(
+            taskID: plan.id,
+            planDigest: "digest",
+            state: .blocked,
+            stepIndex: 1,
+            currentStepID: "open-scratchpad",
+            lastStepID: "open-brief",
+            attempts: 2,
+            lastRoute: "accessibility",
+            lastErrorCode: "task_postcondition_failed",
+            checkpointUpdatedAt: Date()
+        )
+
+        let progress = ControlCenterTaskProgress.make(plan: plan, status: status)
+
+        XCTAssertEqual(progress.completedStepCount, 1)
+        XCTAssertEqual(progress.steps.map(\.state), [.verified, .stopped, .pending])
+        XCTAssertEqual(progress.steps.map(\.label), ["Open Brief", "Open Scratchpad", "Arrange Workspace"])
+        XCTAssertEqual(progress.lastErrorCode, "task_postcondition_failed")
+    }
+
+    func testTaskProgressProjectionShowsRunningAndImmediateStopStates() {
+        let plan = TaskPlan(
+            id: "focus-session",
+            name: "Focus session",
+            summary: "Prepare a focus session",
+            steps: [
+                TaskStep(id: "open-brief", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "arrange-windows", action: ActionSpec(kind: .assert, surface: .macApp))
+            ]
+        )
+        let status = TaskStatusReport(
+            taskID: plan.id,
+            planDigest: "digest",
+            state: .running,
+            stepIndex: 0,
+            currentStepID: "open-brief",
+            attempts: 0,
+            lastRoute: nil,
+            lastErrorCode: nil,
+            checkpointUpdatedAt: Date()
+        )
+
+        XCTAssertEqual(
+            ControlCenterTaskProgress.make(plan: plan, status: status).steps.map(\.state),
+            [.running, .pending]
+        )
+        XCTAssertEqual(
+            ControlCenterTaskProgress.make(plan: plan, status: status, stopping: true).steps.map(\.state),
+            [.stopped, .pending]
+        )
+    }
+
+    func testControlCenterRendersTaskProgressWithoutPlanTargetsOrInputs() throws {
+        let progress = ControlCenterTaskProgress(
+            state: .blocked,
+            completedStepCount: 1,
+            totalStepCount: 3,
+            currentStepID: "open-scratchpad",
+            lastErrorCode: "task_postcondition_failed",
+            steps: [
+                ControlCenterTaskStepProgress(stepID: "open-brief", label: "Open Brief", state: .verified),
+                ControlCenterTaskStepProgress(stepID: "open-scratchpad", label: "Open Scratchpad", state: .stopped),
+                ControlCenterTaskStepProgress(stepID: "arrange-workspace", label: "Arrange Workspace", state: .pending)
+            ]
+        )
+        let hud = ApprovalHUD()
+        hud.snapshotHandler = {
+            ControlCenterSnapshot(
+                approvals: [],
+                execution: ControlCenterExecution(
+                    executionID: "execution",
+                    taskID: "focus-session",
+                    summary: "Prepare a focus session",
+                    applicationName: "Preview",
+                    physicalInputMode: .shared,
+                    acquiredAt: Date(),
+                    expiresAt: Date().addingTimeInterval(60),
+                    taskProgress: progress
+                ),
+                permissions: []
+            )
+        }
+
+        hud.refreshOnMain(populatePopover: true)
+        guard let view = hud.popover.contentViewController?.view else {
+            return XCTFail("Control Center popover content was not built")
+        }
+        let labels = allSubviews(of: view).compactMap { ($0 as? NSTextField)?.stringValue }
+        XCTAssertTrue(labels.contains("PROGRESS · 1 OF 3 VERIFIED"))
+        XCTAssertTrue(labels.contains("✓ Open Brief · Verified"))
+        XCTAssertTrue(labels.contains("■ Open Scratchpad · Stopped"))
+        XCTAssertTrue(labels.contains("○ Arrange Workspace · Pending"))
+        XCTAssertTrue(labels.contains("Stopped safely · task postcondition failed"))
+        XCTAssertFalse(labels.joined().contains("private"))
+        let captureURL = URL(fileURLWithPath: "/private/tmp/macctl-control-center-progress.png")
+        try? FileManager.default.removeItem(at: captureURL)
+        try renderPNG(view, to: captureURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
+    func testControlCenterRendersTheNamedLayoutAndTargetDisplaySummary() throws {
+        let display = FocusSessionDisplay(
+            id: 42,
+            name: "Studio Display",
+            visibleFrame: FocusSessionWindowFrame(x: 0, y: 40, width: 1440, height: 860)
+        )
+        let plan = try FocusSessionPlanComposer.taskPlan(display: display, layout: .briefPrimary)
+        let status = TaskStatusReport(
+            taskID: plan.id,
+            planDigest: TaskPlan.digest(plan),
+            state: .running,
+            stepIndex: 2,
+            currentStepID: "arrange-workspace",
+            attempts: 0,
+            lastRoute: "accessibility",
+            lastErrorCode: nil,
+            checkpointUpdatedAt: Date()
+        )
+        let hud = ApprovalHUD()
+        hud.snapshotHandler = {
+            ControlCenterSnapshot(
+                approvals: [],
+                execution: ControlCenterExecution(
+                    executionID: "execution",
+                    taskID: plan.id,
+                    summary: plan.summary,
+                    applicationName: "Preview",
+                    physicalInputMode: .shared,
+                    acquiredAt: Date(),
+                    expiresAt: Date().addingTimeInterval(60),
+                    taskProgress: ControlCenterTaskProgress.make(plan: plan, status: status)
+                ),
+                permissions: []
+            )
+        }
+
+        hud.refreshOnMain(populatePopover: true)
+        let view = try XCTUnwrap(hud.popover.contentViewController?.view)
+        let labels = allSubviews(of: view).compactMap { ($0 as? NSTextField)?.stringValue }
+        XCTAssertTrue(labels.contains(plan.summary + " · Preview"), "Rendered labels: \(labels)")
+        XCTAssertTrue(labels.contains("◉ Arrange Workspace · Running"), "Rendered labels: \(labels)")
+
+        let captureURL = URL(fileURLWithPath: "/private/tmp/macctl-control-center-display-layout.png")
+        try? FileManager.default.removeItem(at: captureURL)
+        try renderPNG(view, to: captureURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
+    func testSafetyPopoverDoesNotExposePendingApprovals() {
         let now = Date()
         let approval = ApprovalRecord(
             token: "private-token",
@@ -17,12 +177,19 @@ final class ControlCenterTests: XCTestCase {
             handoffTarget: nil,
             expiresAt: now.addingTimeInterval(300)
         )
-        let hud = ApprovalHUD(capsLockMonitor: CapsLockMonitor())
-        hud.pendingApprovalsHandler = { [approval] }
+        let hud = ApprovalHUD()
         hud.snapshotHandler = {
             ControlCenterSnapshot(
                 approvals: [ControlCenterApproval(record: approval)],
-                execution: nil,
+                execution: ControlCenterExecution(
+                    executionID: "execution",
+                    taskID: "task",
+                    summary: "Active control",
+                    applicationName: "Calculator",
+                    physicalInputMode: .shared,
+                    acquiredAt: now,
+                    expiresAt: now.addingTimeInterval(60)
+                ),
                 permissions: []
             )
         }
@@ -32,13 +199,14 @@ final class ControlCenterTests: XCTestCase {
         guard let view = hud.popover.contentViewController?.view else {
             return XCTFail("Control Center popover content was not built")
         }
-        XCTAssertEqual(view.accessibilityIdentifier(), "macctl.approval.window")
+        XCTAssertEqual(view.accessibilityIdentifier(), "macctl.control-safety.window")
+        XCTAssertNotNil(allSubviews(of: view).first {
+            $0.accessibilityIdentifier() == "macctl.control-safety.health"
+        })
         let buttons = allSubviews(of: view).compactMap { $0 as? NSButton }
-        XCTAssertFalse(buttons.isEmpty)
-        XCTAssertEqual(
-            buttons.first(where: { $0.title == "Approve" })?.accessibilityIdentifier(),
-            "macctl.approval.approve.approval-1"
-        )
+        XCTAssertNil(buttons.first(where: { $0.title == "Approve" }))
+        XCTAssertNil(buttons.first(where: { $0.title == "Deny" }))
+        XCTAssertNotNil(buttons.first(where: { $0.title == "Quit daemon" }))
         for button in buttons {
             XCTAssertEqual(button.focusRingType, .none, "Unexpected focus ring on \(button.title)")
         }
@@ -46,6 +214,27 @@ final class ControlCenterTests: XCTestCase {
 
     private func allSubviews(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap(allSubviews)
+    }
+
+    private func renderPNG(_ view: NSView, to url: URL) throws {
+        let fittingSize = view.fittingSize
+        let size = NSSize(width: max(fittingSize.width, 392), height: fittingSize.height + 16)
+        view.appearance = NSAppearance(named: .aqua)
+        view.frame = NSRect(origin: .zero, size: NSSize(width: size.width, height: fittingSize.height))
+        view.layoutSubtreeIfNeeded()
+        let canvas = NSView(frame: NSRect(origin: .zero, size: size))
+        canvas.appearance = view.appearance
+        canvas.wantsLayer = true
+        canvas.layer?.backgroundColor = NSColor.white.cgColor
+        canvas.addSubview(view)
+        guard let bitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else {
+            throw NSError(domain: "ControlCenterTests", code: 1)
+        }
+        canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "ControlCenterTests", code: 2)
+        }
+        try data.write(to: url, options: .atomic)
     }
 
     func testPresentationCoversIdleApprovalLeaseFreezeStoppingAndDegradedStates() {
@@ -60,6 +249,10 @@ final class ControlCenterTests: XCTestCase {
             ).state,
             .idle
         )
+        XCTAssertFalse(ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(approvals: [], execution: nil, permissions: [granted]),
+            now: now
+        ).showsStatusItem)
 
         let approvalPresentation = ControlCenterPresentation.make(
             snapshot: ControlCenterSnapshot(
@@ -72,6 +265,7 @@ final class ControlCenterTests: XCTestCase {
         XCTAssertEqual(approvalPresentation.state, .approval)
         XCTAssertEqual(approvalPresentation.pendingCount, 2)
         XCTAssertEqual(approvalPresentation.ringFraction ?? 0, 0.8, accuracy: 0.001)
+        XCTAssertFalse(approvalPresentation.showsStatusItem)
 
         for (mode, stopping, expected) in [
             (KeyboardPhysicalInputMode.shared, false, ControlCenterVisualState.leased),
@@ -97,10 +291,13 @@ final class ControlCenterTests: XCTestCase {
                 now: now.addingTimeInterval(25)
             )
             XCTAssertEqual(presentation.state, expected)
+            XCTAssertTrue(presentation.showsStatusItem)
             XCTAssertEqual(presentation.pendingCount, 1)
             XCTAssertEqual(presentation.ringFraction ?? 0, 0.75, accuracy: 0.001)
             XCTAssertFalse(presentation.tooltip.contains("mca_"))
             XCTAssertFalse(presentation.accessibilityLabel.contains("mca_"))
+            XCTAssertFalse(presentation.tooltip.localizedCaseInsensitiveContains("approval"))
+            XCTAssertFalse(presentation.accessibilityLabel.localizedCaseInsensitiveContains("approval"))
         }
 
         let focusedExecution = ControlCenterExecution(
@@ -143,6 +340,7 @@ final class ControlCenterTests: XCTestCase {
         )
         XCTAssertEqual(focusingPresentation.state, .focusing)
         XCTAssertEqual(focusingPresentation.label, "Focusing")
+        XCTAssertFalse(focusingPresentation.showsStatusItem)
 
         let completedActivity = ControlCenterFocusActivity(
             applicationName: activity.applicationName,
@@ -161,6 +359,7 @@ final class ControlCenterTests: XCTestCase {
         )
         XCTAssertEqual(focusedActivityPresentation.state, .focused)
         XCTAssertEqual(focusedActivityPresentation.label, "Focused")
+        XCTAssertFalse(focusedActivityPresentation.showsStatusItem)
 
         let expiredActivityPresentation = ControlCenterPresentation.make(
             snapshot: ControlCenterSnapshot(
@@ -177,6 +376,36 @@ final class ControlCenterTests: XCTestCase {
             ControlCenterPresentation.make(
                 snapshot: ControlCenterSnapshot(
                     approvals: [],
+                    execution: nil,
+                    permissions: [permission("Accessibility", "missing")]
+                ),
+                now: now
+            ).state,
+            .degraded
+        )
+        XCTAssertEqual(
+            ControlCenterPresentation.make(
+                snapshot: ControlCenterSnapshot(
+                    approvals: [],
+                    execution: nil,
+                    permissions: [permission("Input Monitoring", "unknown")]
+                ),
+                now: now
+            ).state,
+            .degraded
+        )
+        XCTAssertTrue(ControlCenterPresentation.make(
+            snapshot: ControlCenterSnapshot(
+                approvals: [approval],
+                execution: nil,
+                permissions: [permission("Accessibility", "missing")]
+            ),
+            now: now
+        ).showsStatusItem)
+        XCTAssertEqual(
+            ControlCenterPresentation.make(
+                snapshot: ControlCenterSnapshot(
+                    approvals: [approval],
                     execution: nil,
                     permissions: [permission("Accessibility", "missing")]
                 ),
@@ -832,7 +1061,10 @@ final class ControlCenterTests: XCTestCase {
         let completedResponse = runResponse
         responseLock.unlock()
         XCTAssertNotEqual(completedResponse?.status, .succeeded)
-        XCTAssertNil(service.controlCenterSnapshot().execution)
+        let stoppedSnapshot = service.controlCenterSnapshot()
+        XCTAssertNil(stoppedSnapshot.execution)
+        XCTAssertEqual(stoppedSnapshot.taskOutcome?.progress.state, .cancelled)
+        XCTAssertEqual(stoppedSnapshot.taskOutcome?.progress.steps.map(\.state), [.verified, .stopped])
         XCTAssertEqual(try runner.status(taskID: plan.id).state, .cancelled)
 
         let recoveryLease = try leases.acquire(
@@ -842,6 +1074,77 @@ final class ControlCenterTests: XCTestCase {
             confirm: true
         )
         XCTAssertTrue(leases.invalidate(token: recoveryLease.token))
+        XCTAssertNil(leases.activeLease())
+    }
+
+    func testPostconditionFailureRetainsCompletedActionsInStoppedOutcome() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-control-center-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var now = Date(timeIntervalSince1970: 100)
+        let approvals = TaskApprovalStore()
+        let leases = KeyboardDriveStore()
+        let executor = RecordingTaskExecutor()
+        executor.evaluationResults = [true]
+        executor.evaluationResult = false
+        let runner = TaskRunner(
+            checkpointStore: TaskCheckpointStore(directory: directory),
+            approvalStore: approvals,
+            actionExecutor: executor,
+            now: { now },
+            sleep: { interval in now = now.addingTimeInterval(interval) },
+            targetRevalidator: { _ in nil }
+        )
+        let predicate = TaskPredicate(kind: .applicationRunning, application: "Calculator")
+        let plan = TaskPlan(
+            id: "seeded-postcondition-failure",
+            name: "Seeded failure",
+            summary: "Show completed work before a safe stop",
+            steps: [
+                TaskStep(
+                    id: "completed-action",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    target: TaskTargetIdentity(application: "Calculator"),
+                    postconditions: [predicate]
+                ),
+                TaskStep(
+                    id: "failed-verification",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    target: TaskTargetIdentity(application: "Calculator"),
+                    postconditions: [predicate]
+                )
+            ]
+        )
+        let prepared = try runner.prepare(plan: plan)
+        _ = try approvals.approve(token: prepared.approval.token)
+        let app = calculatorApp()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardDriveStore: leases,
+            taskApprovalStore: approvals,
+            taskRunner: runner,
+            focusedElementInspector: EmptyFocusInspector(),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(sleep: { _ in }),
+            hasPostEventAccess: { true }
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "task.run",
+            params: [
+                "plan": try JSONValue.fromEncodable(plan),
+                "approval_token": .string(prepared.approval.token)
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .blocked)
+        let snapshot = service.controlCenterSnapshot()
+        XCTAssertNil(snapshot.execution)
+        XCTAssertEqual(snapshot.taskOutcome?.progress.state, .blocked)
+        XCTAssertEqual(snapshot.taskOutcome?.progress.steps.map(\.state), [.verified, .stopped])
+        XCTAssertEqual(snapshot.taskOutcome?.progress.lastErrorCode, "task_postcondition_failed")
         XCTAssertNil(leases.activeLease())
     }
 
@@ -1037,6 +1340,7 @@ private final class EmptyFocusInspector: FocusedElementInspecting {
 private final class RecordingTaskExecutor: TaskActionExecuting {
     var onExecute: (() -> Void)?
     var evaluationResult = true
+    var evaluationResults: [Bool] = []
     private(set) var executeCount = 0
 
     func execute(action: ActionSpec, context: TaskActionContext) throws -> TaskActionExecutionReport {
@@ -1046,7 +1350,8 @@ private final class RecordingTaskExecutor: TaskActionExecuting {
     }
 
     func evaluate(predicate: TaskPredicate, context: TaskActionContext) throws -> Bool {
-        evaluationResult
+        if !evaluationResults.isEmpty { return evaluationResults.removeFirst() }
+        return evaluationResult
     }
 }
 

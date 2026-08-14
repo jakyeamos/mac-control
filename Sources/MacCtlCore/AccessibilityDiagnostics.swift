@@ -451,6 +451,19 @@ public protocol WindowedAccessibilityTreeInspecting {
     ) throws -> AccessibilityTreeReport
 }
 
+/// Optional exact-window inspection capability. The opaque window reference
+/// is resolved again immediately before traversal; missing or duplicate
+/// matches fail closed rather than widening to the application root.
+public protocol WindowTargetedAccessibilityTreeInspecting {
+    func tree(
+        pid: pid_t,
+        application: AppInfo,
+        windowRef: String,
+        maxNodes: Int,
+        maxDepth: Int
+    ) throws -> AccessibilityTreeReport
+}
+
 public protocol AccessibilityScrollPerforming {
     func scroll(
         pid: pid_t,
@@ -474,7 +487,8 @@ private struct AccessibilityTreePageSeed {
     let window: AccessibilityTreeNode?
 }
 
-extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScrollPerforming, WindowedAccessibilityTreeInspecting {
+extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScrollPerforming,
+    WindowedAccessibilityTreeInspecting, WindowTargetedAccessibilityTreeInspecting {
     public func tree(
         pid: pid_t,
         application: AppInfo,
@@ -484,9 +498,49 @@ extension AccessibilityController: AccessibilityTreeInspecting, AccessibilityScr
         guard PermissionDiagnostics.hasAccessibility() else {
             throw AccessibilityControllerError.permissionDenied
         }
+        return tree(
+            root: AXUIElementCreateApplication(pid),
+            application: application,
+            maxNodes: maxNodes,
+            maxDepth: maxDepth
+        )
+    }
+
+    public func tree(
+        pid: pid_t,
+        application: AppInfo,
+        windowRef: String,
+        maxNodes: Int,
+        maxDepth: Int
+    ) throws -> AccessibilityTreeReport {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let applicationRoot = AXUIElementCreateApplication(pid)
+        let windows = (attribute(applicationRoot, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let matches = windows.filter {
+            (try? AccessibilityWindowIdentity.digest(for: $0)) == windowRef
+        }
+        guard !matches.isEmpty else { throw AccessibilityControllerError.windowNotFound }
+        guard matches.count == 1, let window = matches.first else {
+            throw AccessibilityControllerError.ambiguousWindowMatch(matches.count)
+        }
+        return tree(
+            root: window,
+            application: application,
+            maxNodes: maxNodes,
+            maxDepth: maxDepth
+        )
+    }
+
+    private func tree(
+        root: AXUIElement,
+        application: AppInfo,
+        maxNodes: Int,
+        maxDepth: Int
+    ) -> AccessibilityTreeReport {
         let boundedNodes = CapabilityAuditBounds.normalizedNodes(maxNodes)
         let boundedDepth = CapabilityAuditBounds.normalizedDepth(maxDepth)
-        let root = AXUIElementCreateApplication(pid)
         var nodes: [AccessibilityTreeNode] = []
         var ignoredContinuations: [AccessibilityTreeContinuation] = []
         var ignoredContinuationOverflow = false
