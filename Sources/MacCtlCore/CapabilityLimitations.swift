@@ -56,6 +56,382 @@ public struct MacControlLimitation: Codable, Equatable, Hashable {
     }
 }
 
+/// Confidence supplied with an observation. This is metadata for review, not
+/// a promotion mechanism; every submitted candidate remains unproven.
+public enum MacControlLimitationProposalConfidence: String, Codable, Equatable, Hashable {
+    case low
+    case medium
+    case high
+}
+
+/// The stdin contract for recording a newly observed boundary. The input is
+/// deliberately smaller than the persisted proposal: timestamps, identity,
+/// source, and candidate state are owned by the local store.
+public struct MacControlLimitationProposalInput: Codable, Equatable, Hashable {
+    public let id: String
+    public let title: String
+    public let posture: MacControlLimitationPosture
+    public let scope: [String]
+    public let trigger: String
+    public let callWhen: String
+    public let doNotCallWhen: String
+    public let preferredAlternative: String
+    public let verification: String
+    public let evidence: [String]
+    public let confidence: MacControlLimitationProposalConfidence
+    public let notes: String?
+
+    public init(
+        id: String,
+        title: String,
+        posture: MacControlLimitationPosture,
+        scope: [String],
+        trigger: String,
+        callWhen: String,
+        doNotCallWhen: String,
+        preferredAlternative: String,
+        verification: String,
+        evidence: [String],
+        confidence: MacControlLimitationProposalConfidence = .medium,
+        notes: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.posture = posture
+        self.scope = scope
+        self.trigger = trigger
+        self.callWhen = callWhen
+        self.doNotCallWhen = doNotCallWhen
+        self.preferredAlternative = preferredAlternative
+        self.verification = verification
+        self.evidence = evidence
+        self.confidence = confidence
+        self.notes = notes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case posture
+        case scope
+        case trigger
+        case callWhen = "call_when"
+        case doNotCallWhen = "do_not_call_when"
+        case preferredAlternative = "preferred_alternative"
+        case verification
+        case evidence
+        case confidence
+        case notes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.posture = try container.decode(MacControlLimitationPosture.self, forKey: .posture)
+        self.scope = try container.decode([String].self, forKey: .scope)
+        self.trigger = try container.decode(String.self, forKey: .trigger)
+        self.callWhen = try container.decode(String.self, forKey: .callWhen)
+        self.doNotCallWhen = try container.decode(String.self, forKey: .doNotCallWhen)
+        self.preferredAlternative = try container.decode(String.self, forKey: .preferredAlternative)
+        self.verification = try container.decode(String.self, forKey: .verification)
+        self.evidence = try container.decode([String].self, forKey: .evidence)
+        self.confidence = try container.decodeIfPresent(
+            MacControlLimitationProposalConfidence.self,
+            forKey: .confidence
+        ) ?? .medium
+        self.notes = try container.decodeIfPresent(String.self, forKey: .notes)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(posture, forKey: .posture)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(trigger, forKey: .trigger)
+        try container.encode(callWhen, forKey: .callWhen)
+        try container.encode(doNotCallWhen, forKey: .doNotCallWhen)
+        try container.encode(preferredAlternative, forKey: .preferredAlternative)
+        try container.encode(verification, forKey: .verification)
+        try container.encode(evidence, forKey: .evidence)
+        try container.encode(confidence, forKey: .confidence)
+        try container.encodeIfPresent(notes, forKey: .notes)
+    }
+}
+
+/// An immutable, local candidate created by an agent observation. The
+/// canonical ledger remains source-controlled and reviewed; this record is a
+/// queue for review, not a dynamic routing override.
+public struct MacControlLimitationProposal: Codable, Equatable, Hashable {
+    public static let schemaVersionValue = "mac-control-limitation-proposal/v1"
+
+    public let schemaVersion: String
+    public let proposalID: String
+    public let submittedAt: Date
+    public let source: String
+    public let confidence: MacControlLimitationProposalConfidence
+    public let candidate: MacControlLimitation
+    public let notes: String?
+
+    public init(
+        proposalID: String,
+        submittedAt: Date,
+        source: String,
+        confidence: MacControlLimitationProposalConfidence,
+        candidate: MacControlLimitation,
+        notes: String?
+    ) {
+        self.schemaVersion = Self.schemaVersionValue
+        self.proposalID = proposalID
+        self.submittedAt = submittedAt
+        self.source = source
+        self.confidence = confidence
+        self.candidate = candidate
+        self.notes = notes
+    }
+}
+
+/// Machine-readable discovery metadata for the contribution lane. These
+/// commands are local-only and do not appear as daemon execution methods.
+public struct MacControlLimitationsProposalSurface: Codable, Equatable, Hashable {
+    public let proposeCommand: String
+    public let listCommand: String
+    public let storage: String
+    public let candidateState: String
+    public let appendOnly: Bool
+    public let executionAuthority: Bool
+    public let promotion: String
+
+    public static let current = MacControlLimitationsProposalSurface(
+        proposeCommand: "macctl control limitations propose --stdin --json",
+        listCommand: "macctl control limitations proposals --json",
+        storage: "owner_only_local_append_only",
+        candidateState: MacControlLimitationState.unproven.rawValue,
+        appendOnly: true,
+        executionAuthority: false,
+        promotion: "reviewed_source_change"
+    )
+
+    public init(
+        proposeCommand: String,
+        listCommand: String,
+        storage: String,
+        candidateState: String,
+        appendOnly: Bool,
+        executionAuthority: Bool,
+        promotion: String
+    ) {
+        self.proposeCommand = proposeCommand
+        self.listCommand = listCommand
+        self.storage = storage
+        self.candidateState = candidateState
+        self.appendOnly = appendOnly
+        self.executionAuthority = executionAuthority
+        self.promotion = promotion
+    }
+}
+
+public struct MacControlLimitationsProposalSubmission: Codable, Equatable, Hashable {
+    public static let schemaVersionValue = "mac-control-limitation-proposal-response/v1"
+
+    public let schemaVersion: String
+    public let status: String
+    public let executionAuthority: Bool
+    public let proposal: MacControlLimitationProposal
+
+    public init(proposal: MacControlLimitationProposal) {
+        self.schemaVersion = Self.schemaVersionValue
+        self.status = "candidate"
+        self.executionAuthority = false
+        self.proposal = proposal
+    }
+}
+
+public struct MacControlLimitationsProposalList: Codable, Equatable, Hashable {
+    public static let schemaVersionValue = "mac-control-limitation-proposals/v1"
+
+    public let schemaVersion: String
+    public let proposals: [MacControlLimitationProposal]
+    public let count: Int
+    public let ownerOnlyStorage: Bool
+    public let appendOnly: Bool
+    public let executionAuthority: Bool
+
+    public init(proposals: [MacControlLimitationProposal], ownerOnlyStorage: Bool) {
+        self.schemaVersion = Self.schemaVersionValue
+        self.proposals = proposals
+        self.count = proposals.count
+        self.ownerOnlyStorage = ownerOnlyStorage
+        self.appendOnly = true
+        self.executionAuthority = false
+    }
+}
+
+public enum MacControlLimitationProposalStoreError: Error, LocalizedError, Equatable {
+    case invalidInput(String)
+    case capacityReached(Int)
+    case duplicateProposalID(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidInput(let message):
+            return "Invalid limitation proposal: \(message)"
+        case .capacityReached(let maximum):
+            return "Limitation proposal store reached its maximum of \(maximum) candidates"
+        case .duplicateProposalID(let proposalID):
+            return "Limitation proposal ID already exists: \(proposalID)"
+        }
+    }
+}
+
+/// Persists agent observations without allowing them to rewrite the reviewed
+/// ledger. One owner-only JSON file is created per submission; there is no
+/// update or delete operation, and list reads fail closed on malformed data.
+public final class MacControlLimitationProposalStore {
+    public static let maximumProposalCount = 512
+
+    private let directory: URL
+    private let fileManager: FileManager
+    private let now: () -> Date
+    private let idGenerator: () -> String
+
+    public init(
+        directory: URL = MacCtlPaths.limitationProposalsDirectory,
+        fileManager: FileManager = .default,
+        now: @escaping () -> Date = Date.init,
+        idGenerator: @escaping () -> String = { UUID().uuidString.lowercased() }
+    ) {
+        self.directory = directory
+        self.fileManager = fileManager
+        self.now = now
+        self.idGenerator = idGenerator
+    }
+
+    public func append(_ input: MacControlLimitationProposalInput) throws -> MacControlLimitationProposal {
+        try validate(input)
+        return try OwnerOnlyFileStore.withExclusiveDirectoryLock(directory, fileManager: fileManager) {
+            let existingURLs = try proposalURLs()
+            guard existingURLs.count < Self.maximumProposalCount else {
+                throw MacControlLimitationProposalStoreError.capacityReached(Self.maximumProposalCount)
+            }
+
+            let proposalID = idGenerator()
+            guard proposalID.count <= 80,
+                  proposalID.range(of: "^[a-z0-9]+(?:-[a-z0-9]+)*$", options: .regularExpression) != nil else {
+                throw MacControlLimitationProposalStoreError.invalidInput("generated proposal ID is not path-safe")
+            }
+            let destination = directory.appendingPathComponent("\(proposalID).json")
+            guard !fileManager.fileExists(atPath: destination.path) else {
+                throw MacControlLimitationProposalStoreError.duplicateProposalID(proposalID)
+            }
+
+            let candidate = MacControlLimitation(
+                id: input.id,
+                title: input.title,
+                state: .unproven,
+                posture: input.posture,
+                scope: input.scope,
+                trigger: input.trigger,
+                callWhen: input.callWhen,
+                doNotCallWhen: input.doNotCallWhen,
+                preferredAlternative: input.preferredAlternative,
+                verification: input.verification,
+                evidence: input.evidence
+            )
+            let proposal = MacControlLimitationProposal(
+                proposalID: proposalID,
+                submittedAt: now(),
+                source: "agent_observation",
+                confidence: input.confidence,
+                candidate: candidate,
+                notes: input.notes
+            )
+            try OwnerOnlyFileStore.write(JSONCodec.encode(proposal), to: destination, fileManager: fileManager)
+            return proposal
+        }
+    }
+
+    public func list() throws -> [MacControlLimitationProposal] {
+        try OwnerOnlyFileStore.withExclusiveDirectoryLock(directory, fileManager: fileManager) {
+            try proposalURLs().map { url in
+                try JSONCodec.decode(MacControlLimitationProposal.self, from: Data(contentsOf: url))
+            }.sorted {
+                if $0.submittedAt == $1.submittedAt { return $0.proposalID < $1.proposalID }
+                return $0.submittedAt < $1.submittedAt
+            }
+        }
+    }
+
+    public func ownerOnlyStorage() -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: directory.path),
+              let permissions = attributes[.posixPermissions] as? NSNumber,
+              permissions.intValue & 0o777 == 0o700 else {
+            return false
+        }
+        guard let urls = try? proposalURLs() else { return false }
+        return urls.allSatisfy { url in
+            guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  let permissions = attributes[.posixPermissions] as? NSNumber else {
+                return false
+            }
+            return permissions.intValue & 0o777 == 0o600
+        }
+    }
+
+    private func proposalURLs() throws -> [URL] {
+        guard fileManager.fileExists(atPath: directory.path) else { return [] }
+        return try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "json" }
+    }
+
+    private func validate(_ input: MacControlLimitationProposalInput) throws {
+        try validateIdentifier(input.id, label: "id", maximum: 80)
+        try validateText(input.title, label: "title", maximum: 160)
+        guard !input.scope.isEmpty, input.scope.count <= 8 else {
+            throw MacControlLimitationProposalStoreError.invalidInput("scope must contain 1 to 8 entries")
+        }
+        for scope in input.scope {
+            try validateText(scope, label: "scope entry", maximum: 80)
+        }
+        try validateText(input.trigger, label: "trigger", maximum: 1_000)
+        try validateText(input.callWhen, label: "call_when", maximum: 1_000)
+        try validateText(input.doNotCallWhen, label: "do_not_call_when", maximum: 1_000)
+        try validateText(input.preferredAlternative, label: "preferred_alternative", maximum: 160)
+        try validateText(input.verification, label: "verification", maximum: 1_000)
+        guard !input.evidence.isEmpty, input.evidence.count <= 16 else {
+            throw MacControlLimitationProposalStoreError.invalidInput("evidence must contain 1 to 16 entries")
+        }
+        for evidence in input.evidence {
+            try validateText(evidence, label: "evidence entry", maximum: 500)
+        }
+        if let notes = input.notes {
+            try validateText(notes, label: "notes", maximum: 1_000)
+        }
+    }
+
+    private func validateIdentifier(_ value: String, label: String, maximum: Int) throws {
+        guard value.count >= 1, value.count <= maximum,
+              value.range(of: "^[a-z0-9]+(?:-[a-z0-9]+)*$", options: .regularExpression) != nil else {
+            throw MacControlLimitationProposalStoreError.invalidInput(
+                "\(label) must be lowercase kebab-case and no longer than \(maximum) characters"
+            )
+        }
+    }
+
+    private func validateText(_ value: String, label: String, maximum: Int) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.count <= maximum else {
+            throw MacControlLimitationProposalStoreError.invalidInput(
+                "\(label) must be non-empty and no longer than \(maximum) characters"
+            )
+        }
+    }
+}
+
 /// A small, local, versioned preflight contract for choosing whether Mac
 /// Control should participate in a task. This is intentionally separate from
 /// recent blocker observations: it prevents known dead ends before a live
@@ -64,17 +440,20 @@ public struct MacControlLimitationsLedger: Codable, Equatable {
     public let schemaVersion: String
     public let reviewedAt: String
     public let purpose: String
+    public let proposalSurface: MacControlLimitationsProposalSurface?
     public let entries: [MacControlLimitation]
 
     public init(
         schemaVersion: String,
         reviewedAt: String,
         purpose: String,
-        entries: [MacControlLimitation]
+        entries: [MacControlLimitation],
+        proposalSurface: MacControlLimitationsProposalSurface? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.reviewedAt = reviewedAt
         self.purpose = purpose
+        self.proposalSurface = proposalSurface
         self.entries = entries
     }
 
@@ -213,6 +592,7 @@ public struct MacControlLimitationsLedger: Codable, Equatable {
                 verification: "The direct command returns the value; missing or unreadable output remains unknown.",
                 evidence: ["skills/mac-control/SKILL.md", "skills/mac-control/references/routing.md"]
             )
-        ]
+        ],
+        proposalSurface: MacControlLimitationsProposalSurface.current
     )
 }

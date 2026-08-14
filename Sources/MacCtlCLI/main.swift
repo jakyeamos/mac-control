@@ -669,10 +669,7 @@ struct CLI {
         case "status":
             return render(sendOrLocal(method: "control.status", params: [:], localFallback: true))
         case "limitations":
-            guard args.dropFirst().isEmpty else {
-                throw CLIError.usage("Usage: macctl control limitations [--json]")
-            }
-            return render(localService.localReadOnlyHandle(RequestEnvelope(method: "control.limitations")))
+            return try runLimitations(Array(args.dropFirst()))
         case "hands-off":
             return try runHandsOffSession(Array(args.dropFirst()))
         case "authorization":
@@ -874,6 +871,40 @@ struct CLI {
             return render(sendControlRequest(method: "control.perform", params: params))
         default:
             throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
+        }
+    }
+
+    private func runLimitations(_ args: [String]) throws -> Int32 {
+        guard let subcommand = args.first else {
+            return render(localService.localReadOnlyHandle(RequestEnvelope(method: "control.limitations")))
+        }
+        switch subcommand {
+        case "propose":
+            guard args.count == 2, args[1] == "--stdin" else {
+                throw CLIError.usage("Usage: macctl control limitations propose --stdin [--json]")
+            }
+            let data = FileHandle.standardInput.readDataToEndOfFile()
+            guard !data.isEmpty,
+                  let input = try? JSONCodec.decode(MacControlLimitationProposalInput.self, from: data) else {
+                throw CLIError.usage(
+                    "--stdin expects one mac-control-limitation-proposal/v1 input JSON object"
+                )
+            }
+            let proposal = try MacControlLimitationProposalStore().append(input)
+            return renderValue(MacControlLimitationsProposalSubmission(proposal: proposal))
+        case "proposals":
+            guard args.dropFirst().isEmpty else {
+                throw CLIError.usage("Usage: macctl control limitations proposals [--json]")
+            }
+            let store = MacControlLimitationProposalStore()
+            return renderValue(MacControlLimitationsProposalList(
+                proposals: try store.list(),
+                ownerOnlyStorage: store.ownerOnlyStorage()
+            ))
+        default:
+            throw CLIError.usage(
+                "Usage: macctl control limitations [--json] | propose --stdin [--json] | proposals [--json]"
+            )
         }
     }
 
@@ -1667,6 +1698,8 @@ struct CLI {
         macctl keyboard send <key>... --lease-token <token>
         macctl control status [--json]
         macctl control limitations [--json]
+        macctl control limitations propose --stdin [--json]
+        macctl control limitations proposals [--json]
         macctl control authorization prepare --project <project> --action <safe-action> --summary <safe-summary> [--repository <repo>] [--task-id <id> --task-title <title>] [--thread-id <id> --thread-title <title>] [--source-reference codex://thread/<id>] [--requesting-executable <name>] [--requesting-helper <name>] [--target-service <service>] [--kind keychain|credential|permission|other] [--expires-in N]
         macctl control authorization bind <request-id> --process-id <pid>
         macctl control authorization list

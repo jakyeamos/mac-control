@@ -93,6 +93,11 @@ class MacControlSkillTests(unittest.TestCase):
             "direct-interface-first",
             "rendered-web-content",
             "no-universal-fallback-ladder",
+            "control limitations propose --stdin --json",
+            "control limitations proposals --json",
+            "owner-only file per submission",
+            "forces the candidate\nstate to `unproven`",
+            "reviewed source-controlled ledger",
         ):
             self.assertIn(marker, text)
 

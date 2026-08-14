@@ -141,6 +141,13 @@ not spend live-probe time rediscovering a known dead end. The ledger is static
 routing guidance, not a capability profile, permission result, route authority,
 or substitute for current task-specific verification.
 
+The ledger has a separate contribution edge. `macctl control limitations propose --stdin` writes
+one owner-only JSON candidate per observation under the local limitation-proposals directory;
+`macctl control limitations proposals` reads that append-only store. The store assigns identity
+and time, forces candidates to `unproven`, and is intentionally local-only rather than a daemon
+execution method. Candidates never override the reviewed ledger or authorize a route. Promotion
+is a reviewed source-controlled change across the ledger, agent contract, skill, and tests.
+
 Do not make AIOS, Career Ops, a remote API, or a TCP listener a runtime
 dependency. Callers may invoke this local control plane; ownership of their
 workflow and credentials remains outside this repository.

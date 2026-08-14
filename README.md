@@ -760,6 +760,36 @@ Use it to choose whether Mac Control belongs in the plan; after a constrained
 route is selected, use the task/app-specific capability probe and live
 postcondition. The ledger is routing guidance, not live capability evidence.
 
+Agents can add newly observed boundaries without editing or silently promoting
+the reviewed ledger. Submit a structured candidate through the local,
+owner-only append-only proposal lane:
+
+```sh
+cat <<'JSON' | ~/.local/bin/macctl control limitations propose --stdin --json
+{
+  "id": "new-boundary",
+  "title": "Observed boundary title",
+  "posture": "handoff_only",
+  "scope": ["native_app_ui"],
+  "trigger": "The exact observed condition that exposed the boundary.",
+  "call_when": "The narrow condition under which Mac Control remains eligible.",
+  "do_not_call_when": "The condition that should route elsewhere.",
+  "preferred_alternative": "computer_use_fresh_state",
+  "verification": "The readback or evidence needed to validate the boundary.",
+  "evidence": ["test-or-receipt-reference"],
+  "confidence": "medium",
+  "notes": "Optional review context."
+}
+JSON
+~/.local/bin/macctl control limitations proposals --json
+```
+
+The store creates one candidate file per submission under
+`~/Library/Application Support/macctl/limitation-proposals/`. Candidate state
+is always `unproven`; proposals are evidence for review, not live capability
+evidence, route selection, or execution authority. Promotion happens through a
+reviewed source-controlled ledger/docs/tests change.
+
 Agents can inspect the route contract before acting and batch verified navigation
 within one foreground app:
 

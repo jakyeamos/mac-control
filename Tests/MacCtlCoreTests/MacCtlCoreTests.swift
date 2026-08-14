@@ -4747,6 +4747,66 @@ final class MacCtlCoreTests: XCTestCase {
                 "control.limitations is a local, versioned call/no-call ledger; consult it before probing or executing Mac Control, and treat entries as routing guidance rather than execution authority"
             )) == true
         )
+        let proposalSurface = try XCTUnwrap(response.result["proposalSurface"]?.objectValue)
+        XCTAssertEqual(
+            proposalSurface["proposeCommand"]?.stringValue,
+            "macctl control limitations propose --stdin --json"
+        )
+        XCTAssertEqual(
+            proposalSurface["listCommand"]?.stringValue,
+            "macctl control limitations proposals --json"
+        )
+        XCTAssertEqual(proposalSurface["candidateState"]?.stringValue, "unproven")
+        XCTAssertEqual(proposalSurface["appendOnly"]?.boolValue, true)
+        XCTAssertEqual(proposalSurface["executionAuthority"]?.boolValue, false)
+    }
+
+    func testLimitationProposalStoreAppendsUnprovenCandidatesWithoutPromotingLedger() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-limitations-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let input = MacControlLimitationProposalInput(
+            id: "new-native-boundary",
+            title: "A newly observed native boundary",
+            posture: .handoffOnly,
+            scope: ["native_app_ui"],
+            trigger: "The target exposes no stable activation control.",
+            callWhen: "A fresh exact control and postcondition are available.",
+            doNotCallWhen: "The target remains presentation-only.",
+            preferredAlternative: "computer_use_fresh_state",
+            verification: "The receiving provider reads back the target state.",
+            evidence: ["test:boundary-observation"],
+            confidence: .high,
+            notes: "Keep this candidate separate from the reviewed ledger."
+        )
+        let submittedAt = Date(timeIntervalSince1970: 123)
+        let store = MacControlLimitationProposalStore(
+            directory: directory,
+            now: { submittedAt },
+            idGenerator: { "proposal-1" }
+        )
+
+        let proposal = try store.append(input)
+        XCTAssertEqual(proposal.proposalID, "proposal-1")
+        XCTAssertEqual(proposal.source, "agent_observation")
+        XCTAssertEqual(proposal.confidence, .high)
+        XCTAssertEqual(proposal.candidate.id, input.id)
+        XCTAssertEqual(proposal.candidate.state, .unproven)
+        XCTAssertFalse(MacControlLimitationsLedger.current.entries.contains { $0.id == input.id })
+        XCTAssertEqual(try store.list(), [proposal])
+        XCTAssertTrue(store.ownerOnlyStorage())
+
+        let proposalURL = directory.appendingPathComponent("proposal-1.json")
+        let attributes = try FileManager.default.attributesOfItem(atPath: proposalURL.path)
+        XCTAssertEqual(((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777, 0o600)
+
+        XCTAssertThrowsError(try store.append(input)) { error in
+            XCTAssertEqual(
+                error as? MacControlLimitationProposalStoreError,
+                .duplicateProposalID("proposal-1")
+            )
+        }
     }
 
     func testCapabilityProfileDefaultsKnownLimitationsForLegacyPayloads() throws {

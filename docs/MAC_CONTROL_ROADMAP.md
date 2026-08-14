@@ -85,6 +85,9 @@ Goal 1 deliverables:
 - A versioned local known-limitations ledger, exposed through
   `control limitations` and the agent skill, so known call/no-call and handoff
   boundaries are selected before live capability assessment.
+- An owner-only append-only limitation-proposal lane so agents can retain newly
+  observed boundaries for review without changing the canonical ledger or
+  treating unproven observations as capability evidence.
 
 Goal 2 deliverables:
 

@@ -40,6 +40,27 @@ merely to rediscover a ledger entry. After the ledger allows Mac Control, use th
 task/app-specific probe and current provider state below; a ledger entry never promotes a
 stale, caller-supplied, or unverified route.
 
+## Record a newly observed boundary
+
+Agents may record a real, newly observed routing boundary without editing the canonical
+ledger in place:
+
+```sh
+macctl control limitations propose --stdin --json
+macctl control limitations proposals --json
+```
+
+The proposal stdin object uses `id`, `title`, `posture`, `scope`, `trigger`, `call_when`,
+`do_not_call_when`, `preferred_alternative`, `verification`, and `evidence`; it may also
+include `confidence` (`low`, `medium`, or `high`) and `notes`. The local store assigns the
+proposal ID and timestamp, writes one owner-only file per submission, and forces the candidate
+state to `unproven`. Repeated observations may be submitted as separate candidates.
+
+Treat proposals as a review queue only. They do not alter `control limitations`, authorize a
+route, or prove current capability. A maintainer promotes a candidate only through a reviewed source-controlled ledger,
+contract, documentation, and test change; do not submit speculation,
+secrets, private input, or raw screenshots/OCR.
+
 ## Route before acting
 
 Use a mature direct CLI, API, typed connector, or browser DOM route when it covers the exact

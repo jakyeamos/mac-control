@@ -11,6 +11,18 @@ Run `macctl control limitations --json` before choosing a Mac Control route. The
 `do_not_call`, `handoff_only`, and `call_with_constraints`. It prevents known dead ends from
 turning into live capability reconstruction; it does not grant execution authority.
 
+If a fresh observation finds a boundary missing from the ledger, record a candidate rather than
+reconstructing it on the next task:
+
+```sh
+macctl control limitations propose --stdin --json
+macctl control limitations proposals --json
+```
+
+This is a local, owner-only, append-only review lane. Candidates are forced to `unproven` and
+never affect routing or execution. Promotion requires a reviewed source-controlled ledger,
+documentation, and test change.
+
 | Ledger trigger | Mac Control disposition | Preferred route |
 | --- | --- | --- |
 | A mature direct interface covers the exact task | `do_not_call` | Direct CLI/API/typed connector/browser DOM |
@@ -32,6 +44,8 @@ turning into live capability reconstruction; it does not grant execution authori
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
 | Known limitation preflight is needed before considering Mac Control | `control limitations` | Read the local versioned call/no-call ledger without daemon or Accessibility probing. |
+| A new boundary was observed and should be retained for review | `control limitations propose --stdin` | Append one owner-only `unproven` candidate without mutating the canonical ledger. |
+| Review candidates already recorded by agents | `control limitations proposals` | Read the append-only candidate store; candidates have no routing or execution authority. |
 | Rendered browser page content is the target | Browser connector handoff | Declare `target_surface=web_content`; Mac Control returns a tab-addressed provider handoff without activating browser UI. |
 | A broad profile is missing, stale, or explicitly needed for planning | `control capability-audit` | Perform one bounded, read-only AX/provider audit and persist stable descriptors. |
 | A bounded inventory is needed across installed applicable apps | `control capability-audit-batch` | Audit up to 24 already-running apps, persist resumable per-app receipts, and never launch or dispatch input. |
