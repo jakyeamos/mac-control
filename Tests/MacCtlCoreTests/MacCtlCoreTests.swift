@@ -5470,6 +5470,42 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertNil(receipt.controlTarget)
     }
 
+    func testOperationReceiptDecoderAcceptsLegacyTargetChangedOutcome() throws {
+        let data = Data(
+            """
+            {
+              "schemaVersion": 4,
+              "operationID": "legacy-target-changed-operation",
+              "requestID": "legacy-target-changed-request",
+              "method": "action.run",
+              "actionOutcome": {
+                "state": "target_changed",
+                "provider": "mac_control",
+                "fallback_allowed": false,
+                "fresh_state_required": true
+              },
+              "runtimeIdentity": {
+                "processID": 123,
+                "executablePath": "/tmp/macctld",
+                "bundlePath": "/tmp/macctld.app",
+                "bundleIdentifier": "com.jakyeamos.macctl.daemon",
+                "bundleVersion": "1"
+              },
+              "permissionContext": "daemon",
+              "permissions": [],
+              "status": "blocked",
+              "evidence": [],
+              "startedAt": "2026-07-22T00:00:00Z",
+              "completedAt": "2026-07-22T00:00:01Z"
+            }
+            """.utf8
+        )
+
+        let receipt = try JSONCodec.decode(OperationReceipt.self, from: data)
+        XCTAssertEqual(receipt.actionOutcome?.state, .targetChanged)
+        XCTAssertEqual(receipt.actionOutcome?.failureClass, nil)
+    }
+
     func testUnavailableDoctorDoesNotReportClientPermissionsAsDaemonPermissions() throws {
         let service = MacCtlService(
             receiptStore: OperationReceiptStore(

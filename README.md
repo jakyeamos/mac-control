@@ -879,7 +879,9 @@ Every control response exposes a provider-neutral `outcome`. Only
 scroll failures that recommend Computer Use, the agent must call
 `get_app_state`, locate a fresh unique scroll target, use `sky.scroll`, and
 verify a changed state; it must not replay a stale AX target or treat a
-dispatched event as success.
+dispatched event as success. `target_changed` is terminal for the captured
+snapshot: refresh target identity before retrying and never replay the stale
+action.
 
 For a bounded structural Accessibility check, inspect or audit the running app
 without reading AX values or private content:

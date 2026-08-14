@@ -200,6 +200,8 @@ The outcome states provide first-class recovery categories:
 
 - `target_missing`: refresh the target lookup; use a declared fallback only when allowed.
 - `target_ambiguous`: refine identity and stop before dispatch.
+- `target_changed`: treat the snapshot as terminal; refresh target identity before any
+  retry and never replay the stale action.
 - `no_observed_change` or `verification_unavailable`: refresh state and verify again through
   the recommended provider; do not blindly replay the action.
 - `foreground_race`: retry through an atomic app-scoped action or checkpointed task.
