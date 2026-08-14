@@ -671,6 +671,31 @@ public final class ControlSession {
         return try? focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
     }
 
+    func requireGlobalKeyboardFocus(for application: AppInfo) throws {
+        guard let pid = application.processID else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        guard let foreground = foregroundApplication() else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        guard exactKeyboardApplicationIdentityMatches(application, foreground) else {
+            throw KeyboardControlError.appScopeMismatch(
+                expected: application.bundleID ?? application.name,
+                actual: foreground.bundleID ?? foreground.name
+            )
+        }
+        do {
+            let focused = try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+            guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                throw KeyboardControlError.focusedTargetUnavailable
+            }
+        } catch AccessibilityControllerError.permissionDenied {
+            throw KeyboardControlError.permissionDenied("Accessibility")
+        } catch {
+            throw KeyboardControlError.focusedTargetUnavailable
+        }
+    }
+
     private func validateScope(_ lease: KeyboardDriveLease, against application: AppInfo) throws {
         guard lease.scope == .app else { return }
         guard let expected = lease.application,
@@ -1025,6 +1050,10 @@ public final class SemanticActionRouter {
             interKeyDelay: interKeyDelay,
             beforeEach: { [session] _ in
                 _ = try session.revalidate(context)
+                try session.requireGlobalKeyboardFocus(for: context.foregroundApplication)
+            },
+            afterEach: { [session] _ in
+                try session.requireGlobalKeyboardFocus(for: context.foregroundApplication)
             }
         )
         let verification = try session.completeAction(

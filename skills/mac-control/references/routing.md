@@ -12,6 +12,7 @@ task.
 | A browser DOM connector can identify and verify the page element | Browser DOM | Keep semantic web actions in the DOM. |
 | An ideal-state manifest claims web content through native Accessibility | Reject the manifest claim and use a browser connector | A native route observing browser chrome does not prove semantic control of rendered page content. |
 | A native app exposes a declared typed Mac Control adapter | Mac Control adapter | Use the narrow declared operation and its verification. |
+| VS Code Problems data is needed semantically | `adapter diagnostics` for the exact disposable fixture | Read the extension-owned `vscode.languages.getDiagnostics` snapshot; do not open Problems with global keyboard input. |
 | A task has a fresh measured candidate for this app/version/target | The eligible manifest candidate | Rank complete-action latency, p95 latency, then recoveries after all gates pass. |
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
@@ -63,6 +64,14 @@ task.
   input path.
 - Act on an element that is only visually distinguishable: use a visual or coordinate route
   only when the task manifest explicitly opts in and records the route.
+- Read VS Code Problems counts or diagnostic locations: use
+  `macctl adapter diagnostics --adapter-id vscode --fixture-id <id> --json` and require the
+  exact fixture PID, bundle, application path, workspace digest, fresh snapshot, and redacted
+  provider evidence. The route is semantic evidence, not visual panel acceptance.
+- Exercise the disposable VS Code Problems fixture: create and launch it through
+  `scripts/vscode_fixture.py`, then use `status` as a bounded identity/semantic check. A
+  `visual_acceptance=unverified`, `frontmost_proof=not_claimed`, or `focus_proof=not_claimed`
+  result cannot support a visual acceptance claim.
 
 ## Ambiguous cases
 
@@ -113,6 +122,9 @@ task.
   stops on the first unverified step, and always reports completed count and lease release.
 - Full Keyboard Access or a required TCC grant is missing: report `blocked` and the exact user
   action. Do not silently enable or bypass it.
+- A VS Code fixture is exact but not proven frontmost/focused, or its native snapshot is stale,
+  private, ambiguous, or identity-mismatched: report `vscode_diagnostics_blocked` for the
+  affected claim, stop, and do not relaunch or replay input blindly.
 
 ## App archetypes and capability boundaries
 

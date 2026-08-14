@@ -294,6 +294,22 @@ public struct FocusedElementSnapshot: Codable, Equatable {
     }
 }
 
+/// Global keyboard events have no target readback. Every caller must bind the
+/// foreground observation and the focused AX observation to the same exact
+/// process, bundle identity, and application path before dispatching.
+@inline(__always)
+func exactKeyboardApplicationIdentityMatches(_ expected: AppInfo, _ actual: AppInfo) -> Bool {
+    expected.processID != nil
+        && expected.processID == actual.processID
+        && expected.bundleID == actual.bundleID
+        && expected.path == actual.path
+}
+
+@inline(__always)
+func exactKeyboardFocusedTargetMatches(_ expected: AppInfo, _ focused: FocusedElementSnapshot) -> Bool {
+    exactKeyboardApplicationIdentityMatches(expected, focused.targetApplication)
+}
+
 public protocol FocusedElementInspecting {
     func focusedElementSnapshot(pid: pid_t, application: AppInfo) throws -> FocusedElementSnapshot
 }
@@ -333,6 +349,7 @@ public enum KeyboardControlError: Error, LocalizedError, Equatable {
     case invalidInterKeyDelay
     case permissionDenied(String)
     case foregroundUnavailable
+    case focusedTargetUnavailable
     case appScopeMismatch(expected: String, actual: String)
 
     public var errorDescription: String? {
@@ -361,6 +378,8 @@ public enum KeyboardControlError: Error, LocalizedError, Equatable {
             return "Required macOS permission is missing: \(permission)"
         case .foregroundUnavailable:
             return "The foreground application could not be read; keyboard input was blocked"
+        case .focusedTargetUnavailable:
+            return "The focused target could not be proven immediately around global keyboard input"
         case .appScopeMismatch(let expected, let actual):
             return "Keyboard lease is bound to \(expected), but the foreground application is \(actual)"
         }
@@ -808,7 +827,8 @@ public final class KeyboardAccessController {
         targetApplication: AppInfo,
         leaseExpiresAt: Date,
         interKeyDelay: TimeInterval,
-        beforeEach: @escaping (Int) throws -> Void
+        beforeEach: @escaping (Int) throws -> Void,
+        afterEach: ((Int) throws -> Void)? = nil
     ) throws -> KeyboardActionReport {
         guard (1...Self.maximumNamedRepetitions).contains(count) else {
             throw KeyboardControlError.repetitionLimitExceeded
@@ -818,7 +838,8 @@ public final class KeyboardAccessController {
         try dispatch(
             keys: keys,
             interKeyDelay: interKeyDelay,
-            beforeEach: beforeEach
+            beforeEach: beforeEach,
+            afterEach: afterEach
         )
         return KeyboardActionReport(
             action: command.rawValue,
@@ -834,14 +855,16 @@ public final class KeyboardAccessController {
         targetApplication: AppInfo,
         leaseExpiresAt: Date,
         interKeyDelay: TimeInterval,
-        beforeEach: @escaping (Int) throws -> Void
+        beforeEach: @escaping (Int) throws -> Void,
+        afterEach: ((Int) throws -> Void)? = nil
     ) throws -> KeyboardActionReport {
         let validatedKeys = try Self.validateRawSequence(keys)
         try validateInterKeyDelay(interKeyDelay)
         try dispatch(
             keys: validatedKeys,
             interKeyDelay: interKeyDelay,
-            beforeEach: beforeEach
+            beforeEach: beforeEach,
+            afterEach: afterEach
         )
         return KeyboardActionReport(
             action: "send",
@@ -888,11 +911,13 @@ public final class KeyboardAccessController {
     private func dispatch(
         keys: [String],
         interKeyDelay: TimeInterval,
-        beforeEach: (Int) throws -> Void
+        beforeEach: (Int) throws -> Void,
+        afterEach: ((Int) throws -> Void)?
     ) throws {
         for (index, key) in keys.enumerated() {
             try beforeEach(index)
             try eventSender.send(keySpecification: key)
+            try afterEach?(index)
             if index < keys.count - 1, interKeyDelay > 0 {
                 Thread.sleep(forTimeInterval: interKeyDelay)
             }

@@ -946,7 +946,7 @@ to the Accessibility-based `inspect.front-window` and `locate.named-object`
 operations; every other operation remains foreground-only until independently
 verified and explicitly declared. The initial app allowlist covers
 Finder, System Settings, Terminal, TextEdit, Preview, Mail, Calendar, Notes,
-and Messages. Adapters prefer native/AppKit, Accessibility, and keyboard
+Messages, and Visual Studio Code. Adapters prefer native/AppKit, Accessibility, and keyboard
 routes; typed AppleScript is available only for declared operations and never
 as arbitrary script execution. Unsupported operations, missing Automation,
 ambiguous targets, modal dialogs, unreadable focus, and hung applications
@@ -964,6 +964,38 @@ then a read-only adapter inspection or an empty draft operation only when the
 declared Automation permission is available. Missing permission, ambiguous
 target, expired authority, and unsupported capability must be recorded as
 blocked evidence rather than bypassed.
+
+#### VS Code Problems diagnostics
+
+Use the native extension-owned diagnostics route when the task needs semantic
+Problems data. The adapter calls the fixture extension's
+`vscode.languages.getDiagnostics` integration and returns only redacted counts,
+digests, identity, and freshness evidence; it never uses OS keyboard input:
+
+```sh
+swift run macctl adapter diagnostics --adapter-id vscode \
+  --fixture-id <fixture-id> --json
+```
+
+For a disposable same-bundle visual fixture, create and inspect an isolated
+workspace/profile/extension first:
+
+```sh
+python3 scripts/vscode_fixture.py --root <fixture-root> create <fixture-id>
+python3 scripts/vscode_fixture.py --root <fixture-root> launch <fixture-id>
+python3 scripts/vscode_fixture.py --root <fixture-root> status <fixture-id>
+python3 scripts/vscode_fixture.py --root <fixture-root> cleanup <fixture-id>
+```
+
+The fixture records the exact bundle, PID, application path, workspace,
+profile, extension, and unique window title. Its status deliberately reports
+`visual_acceptance=unverified`, `frontmost_proof=not_claimed`, and
+`focus_proof=not_claimed`; the native adapter is semantic evidence, not visual
+Problems-panel acceptance. If a foreground action is still needed, the
+handoff is explicit: prepare, target, reverify exact identity/frontmost/focus,
+perform the minimum approved input, verify the result, and optionally restore
+the prior app/window. If any proof is missing or ambiguous, stop with the
+typed blocker and do not retry blindly.
 
 After migrating from an older bare `macctld` executable, remove the old
 `macctld` entry from Accessibility, Screen Recording, and Input Monitoring if

@@ -56,6 +56,18 @@ public final class AppController {
         throw AppControllerError.appNotFound(nameOrBundleID)
     }
 
+    /// Resolves one exact running process instead of the first process for a
+    /// bundle. This is intentionally narrower than `resolve` and is used by
+    /// same-bundle disposable fixtures and other identity-bound adapters.
+    public func runningApplication(bundleID: String, processID: pid_t) -> AppInfo? {
+        guard let running = workspace.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleID && $0.processIdentifier == processID
+        }), let url = running.bundleURL else {
+            return nil
+        }
+        return appInfo(for: url, runningApplication: running)
+    }
+
     @discardableResult
     public func open(
         _ nameOrBundleID: String,
@@ -210,19 +222,28 @@ public final class AppController {
 
     private func appInfo(for url: URL) -> AppInfo? {
         guard let bundle = Bundle(url: url) else { return nil }
-        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-            ?? url.deletingPathExtension().lastPathComponent
         let bundleID = bundle.bundleIdentifier
         let running = workspace.runningApplications.first(where: {
             $0.bundleIdentifier == bundleID || $0.bundleURL?.path == url.path
         })
+        return appInfo(for: url, runningApplication: running)
+    }
+
+    private func appInfo(
+        for url: URL,
+        runningApplication: NSRunningApplication?
+    ) -> AppInfo? {
+        guard let bundle = Bundle(url: url) else { return nil }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? url.deletingPathExtension().lastPathComponent
+        let bundleID = bundle.bundleIdentifier
         return AppInfo(
             name: name,
             bundleID: bundleID,
             path: url.path,
-            isRunning: running != nil,
-            processID: running?.processIdentifier,
+            isRunning: runningApplication != nil,
+            processID: runningApplication?.processIdentifier,
             bundleVersion: (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
                 ?? (bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
         )

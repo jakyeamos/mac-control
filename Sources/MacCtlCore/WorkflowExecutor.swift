@@ -349,11 +349,25 @@ public final class WorkflowExecutor {
                     interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
                     beforeEach: { [controlSession, currentContext] _ in
                         _ = try controlSession.revalidate(currentContext)
+                        try controlSession.requireGlobalKeyboardFocus(
+                            for: currentContext.foregroundApplication
+                        )
                         let focus = try self.readSearchFocus(
                             application: currentContext.foregroundApplication
                         )
                         guard SearchActionContract.matches(selector: selector, focus: focus) else {
                             throw WorkflowExecutionError.indeterminate("search focus changed while clearing")
+                        }
+                    },
+                    afterEach: { [controlSession, currentContext] _ in
+                        try controlSession.requireGlobalKeyboardFocus(
+                            for: currentContext.foregroundApplication
+                        )
+                        let focus = try self.readSearchFocus(
+                            application: currentContext.foregroundApplication
+                        )
+                        guard SearchActionContract.matches(selector: selector, focus: focus) else {
+                            throw WorkflowExecutionError.indeterminate("search focus changed after clearing")
                         }
                     }
                 )
@@ -369,12 +383,14 @@ public final class WorkflowExecutor {
         guard SearchActionContract.matches(selector: selector, focus: focusBeforeQuery) else {
             throw WorkflowExecutionError.indeterminate("search focus changed before query")
         }
+        try controlSession.requireGlobalKeyboardFocus(for: currentContext.foregroundApplication)
         do {
             try searchTextTyper.type(query)
         } catch {
             throw WorkflowExecutionError.indeterminate("search query dispatch was not verified")
         }
         _ = try controlSession.revalidate(currentContext)
+        try controlSession.requireGlobalKeyboardFocus(for: currentContext.foregroundApplication)
         let finalFocus: FocusedElementSnapshot
         do {
             finalFocus = try readSearchFocus(application: currentContext.foregroundApplication)
@@ -401,9 +417,15 @@ public final class WorkflowExecutor {
             throw WorkflowExecutionError.blocked("foreground unavailable")
         }
         do {
-            return try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+            let focused = try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+            guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                throw WorkflowExecutionError.blocked("keyboard focus target mismatch")
+            }
+            return focused
         } catch AccessibilityControllerError.permissionDenied {
             throw KeyboardControlError.permissionDenied("Accessibility")
+        } catch let error as WorkflowExecutionError {
+            throw error
         } catch {
             throw WorkflowExecutionError.blocked("search focus is unreadable")
         }

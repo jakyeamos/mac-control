@@ -299,6 +299,17 @@ public final class AppAdapterRegistry {
             routes: [.appleScript],
             redactedObservationSchema: ["application", "draft_created"]
         )
+        let vscodeDiagnostics = AppAdapterOperation(
+            name: "diagnostics.summary",
+            mutating: false,
+            risk: .safe,
+            routes: [.native],
+            redactedObservationSchema: [
+                "fixture_id", "workspace_digest", "error_count", "warning_count",
+                "info_count", "hint_count", "diagnostic_digest", "generated_at"
+            ],
+            focusSupport: .backgroundSafe
+        )
 
         let core: [(String, String, String)] = [
             ("finder", "Finder", "com.apple.finder"),
@@ -314,6 +325,15 @@ public final class AppAdapterRegistry {
             ("messages", "Messages", "com.apple.MobileSMS")
         ]
         var result: [AppAdapterManifest] = []
+        result.append(AppAdapterManifest(
+            adapterID: "vscode",
+            displayName: "Visual Studio Code",
+            supportedBundleIdentifiers: [
+                "com.microsoft.VSCode",
+                "com.microsoft.VSCodeInsiders"
+            ],
+            operations: [vscodeDiagnostics]
+        ))
         for (id, displayName, bundleID) in core {
             var operations = [open, activate, inspect, locate]
             if id == "textedit" || id == "preview" {

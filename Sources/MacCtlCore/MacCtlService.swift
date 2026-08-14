@@ -156,7 +156,7 @@ private struct CapabilityAuditExecution {
 public final class MacCtlService {
     private static let lifecycleReadOnlyMethods: Set<String> = [
         "doctor", "capabilities", "status", "keyboard.status", "keyboard.inspect",
-        "keyboard.freeze.status", "task.status", "adapter.capabilities", "control.status",
+        "keyboard.freeze.status", "task.status", "adapter.capabilities", "adapter.diagnostics", "control.status",
         "control.center.snapshot", "control.hands_off.status", "control.capabilities", "route.list", "route.inspect",
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
@@ -215,6 +215,7 @@ public final class MacCtlService {
     private let taskCheckpointStore: TaskCheckpointStore
     private let taskRunner: TaskRunner
     private let adapterRegistry: AppAdapterRegistry
+    private let vscodeDiagnosticsReader: VSCodeDiagnosticsReading
     private let targetInspector: ControlTargetInspecting
     private let focusedElementInspector: FocusedElementInspecting
     private let accessibilityTreeInspector: AccessibilityTreeInspecting
@@ -272,6 +273,7 @@ public final class MacCtlService {
         taskApprovalStore: TaskApprovalStore = TaskApprovalStore(),
         taskCheckpointStore: TaskCheckpointStore = TaskCheckpointStore(),
         adapterRegistry: AppAdapterRegistry = AppAdapterRegistry(),
+        vscodeDiagnosticsReader: VSCodeDiagnosticsReading = FileVSCodeDiagnosticsReader(),
         taskActionExecutor: TaskActionExecuting? = nil,
         taskRunner: TaskRunner? = nil,
         targetInspector: ControlTargetInspecting? = nil,
@@ -315,6 +317,8 @@ public final class MacCtlService {
         self.taskApprovalStore = taskApprovalStore
         self.taskCheckpointStore = taskCheckpointStore
         self.adapterRegistry = adapterRegistry
+        let resolvedVSCodeDiagnosticsReader = vscodeDiagnosticsReader
+        self.vscodeDiagnosticsReader = resolvedVSCodeDiagnosticsReader
         let defaultAccessibilityController = AccessibilityController()
         self.warmPathStore = warmPathStore
         self.capabilityProfileStore = capabilityProfileStore
@@ -365,7 +369,8 @@ public final class MacCtlService {
             ?? AppScopedShortcutKeyboardDispatcher(
                 keyboard: keyboardAccessController,
                 leases: keyboardDriveStore,
-                foregroundApplication: resolvedForegroundApplication
+                foregroundApplication: resolvedForegroundApplication,
+                focusedElementInspector: resolvedFocusedElementInspector
             )
         self.shortcutEngine = shortcutEngine ?? ShortcutEngine(
             store: shortcutBindingStore,
@@ -411,14 +416,45 @@ public final class MacCtlService {
             keyboardAccessController: keyboardAccessController,
             semanticActionRouter: resolvedSemanticActionRouter,
             adapterRegistry: adapterRegistry,
-            foregroundApplication: resolvedForegroundApplication
+            foregroundApplication: resolvedForegroundApplication,
+            vscodeDiagnosticsReader: resolvedVSCodeDiagnosticsReader
         )
         self.taskRunner = taskRunner ?? TaskRunner(
             checkpointStore: taskCheckpointStore,
             approvalStore: taskApprovalStore,
             actionExecutor: resolvedTaskExecutor,
-            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, adapterRegistry] step in
+            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, adapterRegistry, resolvedVSCodeDiagnosticsReader] step in
                 let target = step.target
+                if step.action.kind == .adapter,
+                   step.action.parameters["adapter_id"]?.stringValue == "vscode",
+                   step.action.parameters["operation"]?.stringValue == "diagnostics.summary" {
+                    guard let fixtureID = step.action.parameters["fixture_id"]?.stringValue,
+                          !fixtureID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let fixtureTarget = try resolvedVSCodeDiagnosticsReader.target(fixtureID: fixtureID)
+                    guard let application = appController.runningApplication(
+                        bundleID: fixtureTarget.bundleID,
+                        processID: fixtureTarget.processID
+                    ) else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let snapshot = ControlTargetSnapshot(
+                        application: application,
+                        focusedElement: nil,
+                        fingerprint: ControlTargetFingerprints.make(
+                            application: application,
+                            focus: nil,
+                            window: AccessibilityWindowState(visible: true, modal: false)
+                        ),
+                        windowVisible: true,
+                        modal: false,
+                        focusReadable: false,
+                        hung: false
+                    )
+                    try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
+                    return snapshot
+                }
                 var requestedApplication = target?.application ?? target?.bundleID
                 if requestedApplication == nil,
                    [.launchApp, .activateWindow].contains(step.action.kind) {
@@ -720,6 +756,8 @@ public final class MacCtlService {
                         source: "macctld"
                     )]
                 )
+            case "adapter.diagnostics":
+                return try adapterDiagnostics(request)
             case "control.status":
                 return try controlStatus(request)
             case "control.center.snapshot":
@@ -1581,6 +1619,10 @@ public final class MacCtlService {
                         token: token,
                         requireFullKeyboardAccess: false
                     )
+                    try self.requireGlobalKeyboardFocus(application: application)
+                },
+                afterEach: { _ in
+                    try self.requireGlobalKeyboardFocus(application: application)
                 }
             )
         }
@@ -1591,6 +1633,55 @@ public final class MacCtlService {
                 kind: "keyboard_input",
                 message: "Raw non-printable keyboard shortcuts ran under a live lease and per-key focus checks",
                 source: "macctld"
+            )]
+        )
+    }
+
+    private func adapterDiagnostics(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let adapterID = try requiredString(request, key: "adapter_id")
+        let operation = try requiredString(request, key: "operation")
+        guard adapterID == "vscode", operation == "diagnostics.summary" else {
+            throw AppAdapterError.unsupportedOperation(adapterID: adapterID, operation: operation)
+        }
+        let fixtureID = try requiredString(request, key: "fixture_id")
+        let target = try vscodeDiagnosticsReader.target(fixtureID: fixtureID)
+        guard let application = appController.runningApplication(
+            bundleID: target.bundleID,
+            processID: target.processID
+        ) else {
+            throw VSCodeDiagnosticsError.identityMismatch
+        }
+        let maxAge: TimeInterval
+        if let rawMaxAge = request.params["max_age_seconds"] {
+            guard let requestedMaxAge = rawMaxAge.doubleValue else {
+                throw VSCodeDiagnosticsError.invalidMaxAge
+            }
+            maxAge = requestedMaxAge
+        } else {
+            maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
+        }
+        let observation = try vscodeDiagnosticsReader.read(
+            fixtureID: fixtureID,
+            application: application,
+            maxAge: maxAge
+        )
+        return try success(
+            request,
+            result: [
+                "adapter_id": .string(adapterID),
+                "operation": .string(operation),
+                "route": .string(AppAdapterRoute.native.rawValue),
+                "observation": try JSONValue.fromEncodable(observation)
+            ],
+            evidence: [Evidence(
+                kind: "vscode_diagnostics",
+                message: "VS Code extension-owned diagnostics were read without OS keyboard input",
+                source: "macctld",
+                metadata: [
+                    "fixture_id": .string(fixtureID),
+                    "process_id": .number(Double(target.processID)),
+                    "provider": .string("vscode.languages.getDiagnostics")
+                ]
             )]
         )
     }
@@ -4205,6 +4296,34 @@ public final class MacCtlService {
         return (lease, application)
     }
 
+    private func requireGlobalKeyboardFocus(application: AppInfo) throws {
+        guard let processID = application.processID else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        guard let foreground = foregroundApplication() else {
+            throw KeyboardControlError.foregroundUnavailable
+        }
+        guard exactKeyboardApplicationIdentityMatches(application, foreground) else {
+            throw KeyboardControlError.appScopeMismatch(
+                expected: keyboardApplicationLabel(application),
+                actual: keyboardApplicationLabel(foreground)
+            )
+        }
+        do {
+            let focused = try focusedElementInspector.focusedElementSnapshot(
+                pid: processID,
+                application: application
+            )
+            guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                throw KeyboardControlError.focusedTargetUnavailable
+            }
+        } catch AccessibilityControllerError.permissionDenied {
+            throw KeyboardControlError.permissionDenied("Accessibility")
+        } catch {
+            throw KeyboardControlError.focusedTargetUnavailable
+        }
+    }
+
     private func requestedKeyboardLifetime(from request: RequestEnvelope) throws -> TimeInterval? {
         guard let raw = request.params["seconds"] else { return nil }
         guard let seconds = raw.doubleValue else { throw KeyboardDriveStoreError.invalidLifetime }
@@ -5336,7 +5455,7 @@ public final class MacCtlService {
                 "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
-                "task.resume", "task.cancel", "adapter.capabilities",
+                "task.resume", "task.cancel", "adapter.capabilities", "adapter.diagnostics",
                 "shortcut.audit", "shortcut.propose", "shortcut.inspect", "shortcut.setup", "shortcut.run", "shortcut.remove"
             ],
             optionalBackends: ["AppleScript/JXA", "shortcuts", "devicectl developer-device diagnostics"],
@@ -5369,6 +5488,7 @@ public final class MacCtlService {
                 "only an explicit pre-action target-not-found failure may advance through a declared fallback chain",
                 "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
+                "VS Code diagnostics use an exact disposable fixture process and an extension-owned getDiagnostics snapshot; they never fall back to OS keyboard input",
                 "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
                 "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique; repeated descriptors can use redacted ancestorDigest and geometryDigest), re-resolves it, and compares bounded structural viewport metadata",
                 "semantic scroll and native row-activation failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
@@ -6216,6 +6336,25 @@ public final class MacCtlService {
                 status = .blocked
                 code = .taskBlocked
             }
+        case let error as VSCodeDiagnosticsError:
+            switch error {
+            case .invalidFixtureID, .invalidMaxAge:
+                status = .failed
+                code = .invalidRequest
+                details["retryable"] = .bool(false)
+            case .fixtureDescriptorMissing, .fixtureNotReady, .snapshotMissing,
+                    .invalidSnapshot, .identityMismatch, .staleSnapshot:
+                status = .blocked
+                code = .taskBlocked
+                details["retryable"] = .bool(true)
+            }
+            details["failure_class"] = .string("vscode_diagnostics_blocked")
+            evidence = [Evidence(
+                kind: "vscode_diagnostics",
+                message: error.localizedDescription,
+                source: "macctld",
+                metadata: details
+            )]
         case let error as AppAdapterError:
             status = .blocked
             switch error {
@@ -6331,6 +6470,14 @@ public final class MacCtlService {
                 evidence = [Evidence(
                     kind: "keyboard_focus_guard",
                     message: "Foreground state could not be read; keyboard input was blocked",
+                    source: "macctld"
+                )]
+            case .focusedTargetUnavailable:
+                status = .blocked
+                code = .keyboardFocusUnavailable
+                evidence = [Evidence(
+                    kind: "keyboard_focus_guard",
+                    message: "The focused target could not be proven; keyboard input was blocked",
                     source: "macctld"
                 )]
             case .appScopeMismatch(let expected, let actual):

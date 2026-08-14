@@ -61,6 +61,13 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("shortcut-bindings", isDirectory: true)
     }
 
+    /// Disposable, owner-only VS Code fixture state. The fixture descriptor
+    /// and diagnostics snapshot are never treated as proof of foreground or
+    /// focus; those proofs remain daemon-owned at dispatch time.
+    public static var vscodeFixturesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("vscode-fixtures", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -104,7 +111,8 @@ public enum MacCtlPaths {
             warmPathsDirectory,
             capabilityProfilesDirectory,
             capabilityAuditBatchesDirectory,
-            shortcutBindingsDirectory
+            shortcutBindingsDirectory,
+            vscodeFixturesDirectory
         ]
         for directory in directories {
             try FileManager.default.createDirectory(

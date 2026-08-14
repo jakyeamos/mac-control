@@ -12,6 +12,12 @@ Expected safety outcomes are explicit:
 - foreground/focus mismatch: stop the workflow, record verification failure,
   and investigate the named-app or focus policy rather than retrying global
   input.
+- `vscode_diagnostics_blocked`: stop when the disposable VS Code fixture,
+  extension snapshot, exact PID/bundle/path, freshness, or redaction proof is
+  missing. The native diagnostics route is preferred; do not substitute global
+  keyboard input. If visual Problems-panel acceptance is requested, require a
+  fresh exact frontmost and focused observation; otherwise report the visual
+  proof as unverified and do not retry blindly.
 - receipt/storage failure: stop before execution when durable evidence cannot
   be written with owner-only permissions.
 - signing identity, bundle identifier, or install-path change: perform the
@@ -22,4 +28,6 @@ Use `doctor --json`, `status --json`, `receipts status --json`, and
 packaged daemon and restart the user LaunchAgent, but must not manufacture
 receipts or alter a device/account to make a gate green. Unsupported provider
 surfaces remain blocked; do not replace them with an unverified local route or
-manufacture live evidence.
+manufacture live evidence. A foreground handoff, if still necessary, is
+explicit: prepare, target, reverify identity/frontmost/focus, perform the
+minimum input, verify the result, and optionally restore the prior app/window.

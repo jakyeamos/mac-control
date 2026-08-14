@@ -22,6 +22,17 @@ Bare printable keys are rejected from raw keyboard sequences so text and
 credentials remain on ephemeral-input plus approval. Focus inspection returns
 only role, subrole, identifier, title, and target application.
 
+Global keyboard input additionally fails closed unless the exact process/PID and
+application path are still frontmost and the focused target is readable
+immediately before dispatch and immediately after every focus-changing event.
+The VS Code Problems route does not use this input path: its disposable
+same-bundle fixture extension owns a native `vscode.languages.getDiagnostics`
+snapshot, and the daemon accepts only a fresh, redacted summary tied to the
+exact fixture ID, bundle, PID, application path, workspace digest, and
+provider. Diagnostic messages and private document content never cross that
+snapshot or receipt boundary. Visual Problems-panel acceptance remains a
+separate live GUI proof.
+
 An opt-in physical-input mode is available only on a session lease. It uses a
 bounded macOS session event tap, requires user-granted Accessibility and Input
 Monitoring access, fails closed when the tap cannot be installed, and releases

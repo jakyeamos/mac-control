@@ -98,7 +98,7 @@ final class SearchActionTests: XCTestCase {
         let app = searchApp()
         let search = searchFocus(for: app)
         let distant = focusedElement(for: app, role: "AXButton", subrole: "AXPushButton", identifier: "row-41")
-        let inspector = SearchFocusInspector([distant, distant, search])
+        let inspector = SearchFocusInspector([distant, distant, distant, search])
         let harness = try SearchExecutorHarness(
             app: app,
             focusInspector: inspector,
@@ -138,7 +138,7 @@ final class SearchActionTests: XCTestCase {
         let distant = focusedElement(for: app, role: "AXButton", subrole: "AXPushButton", identifier: "row-41")
         let harness = try SearchExecutorHarness(
             app: app,
-            focusInspector: SearchFocusInspector([distant, distant, searchFocus(for: app)]),
+            focusInspector: SearchFocusInspector([distant, distant, distant, searchFocus(for: app)]),
             resolver: SearchFieldResolver()
         )
 
@@ -232,10 +232,10 @@ final class SearchActionTests: XCTestCase {
             action: searchAction(),
             context: searchContext(app: app, lease: foregroundHarness.lease, query: "foreground-race")
         )) { error in
-            guard case .uncertain(let reason) = error as? TaskActionExecutionError else {
-                return XCTFail("Expected an indeterminate foreground result, got \(error)")
+            guard case .blocked(let reason) = error as? TaskActionExecutionError else {
+                return XCTFail("Expected a typed foreground blocker, got \(error)")
             }
-            XCTAssertEqual(reason, "search_shortcut_dispatch")
+            XCTAssertEqual(reason, "keyboard_target_not_frontmost")
         }
         XCTAssertTrue(foregroundHarness.eventSender.keys.isEmpty)
         XCTAssertTrue(foregroundHarness.textTyper.values.isEmpty)
