@@ -26,6 +26,11 @@ Expected safety outcomes are explicit:
   `call_with_constraints` entries require the listed route, authority, and
   postcondition. A ledger entry is not live evidence and must not be used to
   promote a stale or caller-supplied route.
+- A limitation proposal is only a candidate observation. If the proposal store
+  is unavailable, keep the observation in the task handoff and do not edit the
+  canonical ledger from a live run. If the store accepts it, still read the
+  canonical ledger for current routing; a candidate remains `unproven` until a
+  reviewed source/docs/tests change.
 
 Use `doctor --json`, `status --json`, `receipts status --json`, and
 `release check --json` for diagnosis. Recovery may rebuild/reinstall the

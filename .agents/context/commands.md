@@ -43,6 +43,13 @@ contacting the daemon, inspecting an app, or walking Accessibility. It is
 routing guidance, not execution authority. Only after the ledger permits Mac
 Control should an agent run the app/task-specific capability probe.
 
+When an agent observes a boundary that is not yet canonical, it may submit a structured
+candidate through the local append-only lane:
+`macctl control limitations propose --stdin --json`. List candidates with
+`macctl control limitations proposals --json`. The store is owner-only, forces every candidate
+to `unproven`, and never changes the ledger or grants execution authority; promotion requires a
+reviewed source-controlled change.
+
 For read-only runtime diagnostics, use the built CLI only after the package
 build: `swift run macctl doctor --json`, `capabilities --json`, `status
 --json`, `receipts status --json`, and `release check --json`. Release checks

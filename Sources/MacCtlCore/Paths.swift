@@ -67,6 +67,13 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("shortcut-bindings", isDirectory: true)
     }
 
+    /// Agent-reported limitation candidates are kept apart from the reviewed
+    /// source ledger. They are append-only observations, never execution
+    /// authority or automatic ledger updates.
+    public static var limitationProposalsDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("limitation-proposals", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -111,7 +118,8 @@ public enum MacCtlPaths {
             warmPathsDirectory,
             capabilityProfilesDirectory,
             capabilityAuditBatchesDirectory,
-            shortcutBindingsDirectory
+            shortcutBindingsDirectory,
+            limitationProposalsDirectory
         ]
         for directory in directories {
             try FileManager.default.createDirectory(

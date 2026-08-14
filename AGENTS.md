@@ -11,6 +11,11 @@ Read this router before repository work.
   versioned call/no-call ledger). Treat `do_not_call` and `handoff_only` entries as routing
   boundaries, and treat `call_with_constraints` entries as requiring their listed exact
   route and postcondition; the ledger never grants execution authority.
+- When a fresh observation reveals a boundary not yet in the ledger, record it with
+  `macctl control limitations propose --stdin --json`; inspect candidates with
+  `macctl control limitations proposals --json`. Proposals are owner-only, append-only,
+  forced to `unproven`, and never change routing or execution authority until a reviewed
+  source/docs/test change promotes them into the canonical ledger.
 - Exact process and window identities remain read-only for direct app-level
   commands. For a safe, zero-focus semantic button press, use the separate
   `action.resolve --intent-stdin` then `action.run <resolution-id>` front door.
