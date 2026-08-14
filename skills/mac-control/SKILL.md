@@ -42,8 +42,15 @@ stale, caller-supplied, or unverified route.
 
 ## Record a newly observed boundary
 
-Agents may record a real, newly observed routing boundary without editing the canonical
-ledger in place:
+Record a proposal when a real task observation reveals a reusable Mac Control routing
+boundary that is not already represented in the ledger, such as an unsupported exact route,
+a required provider handoff, or a route that works only under a specific constraint. Do this
+after the relevant route attempt or evidence, not as a substitute for the ledger preflight.
+Do not submit a one-off failure, a duplicate of an existing entry, or speculation merely to
+make the ledger longer.
+
+Agents may submit a candidate without maintainer approval through the append-only proposal
+lane, without editing the canonical ledger in place:
 
 ```sh
 macctl control limitations propose --stdin --json
@@ -56,10 +63,11 @@ include `confidence` (`low`, `medium`, or `high`) and `notes`. The local store a
 proposal ID and timestamp, writes one owner-only file per submission, and forces the candidate
 state to `unproven`. Repeated observations may be submitted as separate candidates.
 
-Treat proposals as a review queue only. They do not alter `control limitations`, authorize a
+Treat proposals as review evidence only. They do not alter `control limitations`, authorize a
 route, or prove current capability. A maintainer promotes a candidate only through a reviewed source-controlled ledger,
-contract, documentation, and test change; do not submit speculation,
-secrets, private input, or raw screenshots/OCR.
+contract, documentation, and test change. Do not submit secrets,
+private input, or raw screenshots/OCR. If the proposal store is unavailable, keep the
+observation in the task handoff and continue to use the canonical ledger for routing.
 
 ## Route before acting
 

@@ -790,6 +790,13 @@ is always `unproven`; proposals are evidence for review, not live capability
 evidence, route selection, or execution authority. Promotion happens through a
 reviewed source-controlled ledger/docs/tests change.
 
+Changes to this agent-facing workflow are not complete until the source skill is
+projected into `~/.agents/skills/mac-control/SKILL.md` with
+`python3 scripts/install_mac_control_skill.py install` and the installed
+`macctl` command surface is checked. Run
+`python3 scripts/check_global_mac_control_projection.py` as the projection gate.
+Local documentation alone does not activate the trigger for agents.
+
 Agents can inspect the route contract before acting and batch verified navigation
 within one foreground app:
 
