@@ -1,0 +1,14 @@
+{
+  "schema": "agent-usability-behavior-evidence/v1",
+  "tool": "macctl",
+  "observed_at": "2026-08-12",
+  "status": "passed",
+  "commands": [
+    "swift test",
+    "python3 -m unittest discover -s Tests/BenchmarkTests",
+    "python3 -m unittest discover -s Tests/SkillTests",
+    "python3 scripts/check_environment_contract.py",
+    "./scripts/test-with-coverage.sh"
+  ],
+  "summary": "272 Swift behavior tests, 34 benchmark-accounting tests, and 6 skill-contract tests passed; environment contract and coverage export passed"
+}

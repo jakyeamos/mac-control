@@ -1,10 +1,32 @@
 {
   "schema_version": 1,
-  "revision": 1,
+  "revision": 2,
   "commitments": [
-    {"id": "bootstrap-boundary", "kind": "constraint", "statement": "Only .project-compass/ may be changed by this bootstrap; preserve unrelated dirty work and ownership.", "status": "active", "source": {"ref": "conversation:2026-08-02-project-compass-fleet-bootstrap", "note": "User-authorized scope.", "observed_at": "2026-08-02T13:25:04Z"}},
+    {"id": "bootstrap-boundary", "kind": "constraint", "statement": "Only .project-compass/ may be changed by this bootstrap; preserve unrelated dirty work and ownership.", "status": "superseded", "source": {"ref": "conversation:2026-08-02-project-compass-fleet-bootstrap", "note": "Bootstrap-only scope no longer governs the user-authorized implementation task.", "observed_at": "2026-08-02T13:25:04Z"}},
     {"id": "owner-only-macos-control", "kind": "constraint", "statement": "mac-control remains owner-only and permission-aware; this bootstrap does not request macOS permissions or invoke local effects.", "status": "active", "source": {"ref": "README.md", "note": "Explicit control-plane boundary.", "observed_at": "2026-08-02T13:25:04Z"}}
   ],
-  "reconciliations": [],
-  "updated_at": "2026-08-02T13:25:04Z"
+  "reconciliations": [
+    {
+      "id": "all-five-refresh",
+      "observed_at": "2026-08-13T00:26:02Z",
+      "source": {"ref": "conversation:2026-08-12-all-five-improvements", "note": "User authorized implementing all five identified improvements.", "observed_at": "2026-08-13T00:26:02Z"},
+      "classification": "additive",
+      "materiality": "high",
+      "incoming": "Complete all five high-leverage Mac Control improvements and refresh Project Compass from current evidence.",
+      "project_evidence": [
+        {"ref": "docs/evidence/agent-usability-2026-08-12.json", "observed_at": "2026-08-13T00:26:02Z"},
+        {"ref": ".project-compass/contract.json", "observed_at": "2026-08-13T00:26:02Z"}
+      ],
+      "preserved": ["Owner-only permissions, authority, provider boundaries, and fail-closed verification remain active."],
+      "changed": ["Focus sessions, durable release evidence, opportunistic capability observation, macOS CI, agent distribution, and Project Compass now reflect the verified source implementation."],
+      "contradicted": [],
+      "deferred": ["Persistent installation and daemon activation await exact owner approval and a clear authority state."],
+      "left_behind": ["Installed Control Center popover verification remains blocked by unavailable AXPress behavior."],
+      "unknown": ["Cross-provider behavioral trigger/output parity remains unavailable in the current Pronto runtime."],
+      "disposition": "proceed-with-preservation",
+      "question": "",
+      "reason": "All safe source and distribution work is verified; the remaining live mutation is preserved as an explicit owner-controlled gate."
+    }
+  ],
+  "updated_at": "2026-08-13T00:26:02Z"
 }

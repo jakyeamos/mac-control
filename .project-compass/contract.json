@@ -1,23 +1,203 @@
 {
   "schema_version": 1,
-  "revision": 1,
+  "revision": 2,
   "project": {
     "name": "mac-control",
-    "identity": "macctl, a command-first owner-only macOS control plane with a guarded local daemon, socket, and explicit Apple permission boundaries.",
-    "audience": "The owner and local automation that need inspectable, permission-aware control of supported macOS capabilities.",
-    "core_loop": "Discover a supported capability, request it through the guarded local control plane, inspect permission and execution evidence, and recover or stop when the boundary is not satisfied.",
-    "north_star": "Local macOS control is explicit, owner-scoped, inspectable, and recoverable rather than hidden behind unsafe automation.",
-    "not_this": ["A remote administration service", "A permission bypass or stealth automation tool", "A daemon that treats unverified effects as success"]
+    "identity": "macctl, a command-first owner-only macOS control plane with guarded local execution, durable redacted evidence, and explicit provider boundaries.",
+    "audience": "The owner and local agents that need fast, inspectable, permission-aware control of supported macOS capabilities.",
+    "core_loop": "Discover the narrowest supported route, bind authority to an exact plan and target, execute through the guarded local control plane, verify the visible outcome, retain redacted evidence, and stop or hand off when the boundary is not satisfied.",
+    "north_star": "Agents gain faster and more complete access to the Mac without hiding authority, focus movement, verification, or recovery from the owner.",
+    "not_this": [
+      "A remote administration service",
+      "A permission bypass or stealth automation tool",
+      "A daemon that treats dispatch or source tests as verified user-visible success"
+    ]
   },
   "targets": {
-    "mvp": {"definition": "The owner can discover and invoke supported local capabilities through macctl with explicit permission checks and machine-readable outcomes."},
-    "complete_product": {"definition": "The control plane safely covers its supported macOS capability set with stable command, daemon, socket, permission, audit, and recovery behavior."}
+    "mvp": {
+      "definition": "The owner can discover and invoke supported local capabilities through macctl with explicit permission checks, bounded authority, and machine-readable outcomes."
+    },
+    "complete_product": {
+      "definition": "The control plane safely covers its supported macOS capability set with stable command, daemon, focus, evidence, distribution, permission, audit, and recovery behavior."
+    }
   },
   "pillars": [
-    {"id": "owner-scoped-control", "name": "Owner-scoped control", "outcomes": [{"id": "guarded-local-invocation", "name": "A local capability invocation is bounded by owner scope, explicit permissions, and an inspectable result.", "targets": ["mvp", "complete_product"], "maturity": 50, "confidence": "medium", "layers": {"intended": "The owner retains control over which macOS effects are requested and trusted.", "planned": "The project defines macctl, a daemon, local socket, and Apple framework boundaries.", "implemented": "The repository contains the command-first control-plane implementation.", "verified": "Repository documentation establishes the security boundary; no fresh TCC or daemon invocation was run here."}, "evidence": [{"ref": "README.md", "note": "Defines macctl, owner-only scope, daemon, socket, and permission boundary.", "observed_at": "2026-08-02T13:25:04Z"}, {"ref": ".agents/context/README.md", "note": "Provides repository context and local ownership constraints.", "observed_at": "2026-08-02T13:25:04Z"}], "blockers": [{"kind": "external", "summary": "macOS TCC permissions and live daemon/device behavior require owner-controlled verification."}]}]},
-    {"id": "inspectable-effects", "name": "Inspectable effects", "outcomes": [{"id": "permission-aware-result", "name": "A command result distinguishes permitted, denied, unavailable, attempted, and verified local effects.", "targets": ["complete_product"], "maturity": 25, "confidence": "medium", "layers": {"intended": "The control plane never turns a request into an unsupported success claim.", "planned": "The command-first surface and local socket are intended to make outcomes inspectable.", "implemented": "The repository contains the control-plane surfaces and documented permission handling.", "verified": "No live permission matrix or effect verification was performed in this bootstrap."}, "evidence": [{"ref": "README.md", "note": "Documents command-first and permission-aware scope.", "observed_at": "2026-08-02T13:25:04Z"}], "blockers": [{"kind": "verification", "summary": "Capability-by-capability positive, negative, and ambiguous trigger evidence remains incomplete."}]}]}
+    {
+      "id": "owner-scoped-control",
+      "name": "Owner-scoped control",
+      "outcomes": [
+        {
+          "id": "guarded-local-invocation",
+          "name": "A local capability invocation is bounded by owner scope, explicit permissions, and an inspectable result.",
+          "targets": ["mvp", "complete_product"],
+          "maturity": 75,
+          "confidence": "high",
+          "layers": {
+            "intended": "The owner retains control over which macOS effects are requested and trusted.",
+            "planned": "The project defines an owner-only socket, packaged daemon, lifecycle drain, typed plans, approval digests, and provider handoffs.",
+            "implemented": "The CLI, daemon, authority stores, focus policies, task runner, and provider-neutral outcomes are implemented and covered by the full source gate.",
+            "verified": "All 272 Swift tests passed; a live preflight observed the packaged owner daemon, matching launchd identity, owner-only socket and stores, and all required TCC grants. The newly built daemon was not installed because persistent activation lacked exact approval and another task held renewable keyboard authority."
+          },
+          "evidence": [
+            {"ref": "Sources/MacCtlCore/MacCtlService.swift", "note": "Owns guarded routing, authority, capability discovery, lifecycle interlock, and verified outcomes.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/MacCtlCoreTests/MacCtlCoreTests.swift", "note": "Full source behavior suite passed as part of 272 Swift tests.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "README.md", "note": "Defines owner-only deployment, authority, provider, and live-release boundaries.", "observed_at": "2026-08-13T00:26:02Z"}
+          ],
+          "blockers": [
+            {"kind": "external", "summary": "Installing and activating the newly built persistent daemon requires exact owner approval after active keyboard authority clears."}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inspectable-effects",
+      "name": "Inspectable and durable effects",
+      "outcomes": [
+        {
+          "id": "permission-aware-result",
+          "name": "A command result distinguishes permitted, denied, unavailable, attempted, and verified local effects, and retains the minimum durable release evidence.",
+          "targets": ["mvp", "complete_product"],
+          "maturity": 75,
+          "confidence": "high",
+          "layers": {
+            "intended": "The control plane never turns a request into an unsupported success claim.",
+            "planned": "Machine-readable outcomes, redacted receipts, and a read-only release gate make effects and missing proof inspectable.",
+            "implemented": "Release proof now survives rolling diagnostic eviction in a bounded per-dimension archive published with owner-only cross-process locking, durable flush, and atomic rename.",
+            "verified": "Archive retention, ordering, redaction modes, and concurrent writers passed focused tests; the full coverage and environment gates passed. The live release check correctly blocked on the older installed protocol and missing fresh GUI evidence rather than synthesizing success."
+          },
+          "evidence": [
+            {"ref": "Sources/MacCtlCore/ReleaseEvidenceArchive.swift", "note": "Classifies and retains the newest exact proof for every release dimension.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Sources/MacCtlCore/OwnerOnlyFileStore.swift", "note": "Provides cross-process owner-only atomic publication.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift", "note": "Four focused archive tests passed, including concurrent independent writers.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "docs/evidence/agent-usability-2026-08-12.json", "note": "Records the complete source, benchmark, skill, environment, and coverage gates.", "observed_at": "2026-08-13T00:26:02Z"}
+          ],
+          "blockers": [
+            {"kind": "verification", "summary": "The new archive and protocol still require verification through the newly installed daemon plus fresh owner-controlled GUI and approval smoke evidence."}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "focus-session-control",
+      "name": "Plan-bound focus sessions",
+      "outcomes": [
+        {
+          "id": "display-bound-layout",
+          "name": "A focus session targets an explicit connected display and named layout, with the target bound through approval, execution, and verification.",
+          "targets": ["complete_product"],
+          "maturity": 75,
+          "confidence": "medium",
+          "layers": {
+            "intended": "Agents can compose a useful work setup quickly without guessing displays, windows, or postconditions.",
+            "planned": "Display identity and named layout are part of the canonical plan and approval digest.",
+            "implemented": "Display discovery, balanced and brief-primary layouts, fail-closed targeting, execution, and independent postconditions are implemented across the CLI, daemon, and Control Center projection.",
+            "verified": "Thirteen focus-session and twenty Control Center source tests passed. The built CLI enumerated the live display, composed the canonical request, and failed closed for an unknown display. Installed Control Center AXPress verification remains unavailable."
+          },
+          "evidence": [
+            {"ref": "Sources/MacCtlCore/FocusSessionPlan.swift", "note": "Binds target display and named layout into the canonical plan and digest.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/MacCtlCoreTests/FocusSessionPlanTests.swift", "note": "Thirteen positive, negative, and boundary tests passed.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/MacCtlCoreTests/ControlCenterTests.swift", "note": "Twenty Control Center projection and authority tests passed.", "observed_at": "2026-08-13T00:26:02Z"}
+          ],
+          "blockers": [
+            {"kind": "verification", "summary": "The installed Control Center popover could not be exercised through AXPress, so source rendering is not installed UI proof."}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "agent-multiplier",
+      "name": "Agent learning and distribution",
+      "outcomes": [
+        {
+          "id": "capability-evidence-flywheel",
+          "name": "Normal use improves bounded capability evidence for already-running native apps without launching or acting on them.",
+          "targets": ["complete_product"],
+          "maturity": 75,
+          "confidence": "high",
+          "layers": {
+            "intended": "Repeated normal use lowers future discovery cost while preserving provider and authority boundaries.",
+            "planned": "Fast probes may identify a missing or stale broad profile and schedule one coalesced off-path observation.",
+            "implemented": "Capability probes expose an explicit auditOpportunity state and queue serialized bounded read-only audits only for already-running native apps.",
+            "verified": "Focused tests passed for schedule, dedupe, completion, cache reuse, web-content exclusion, and closed-app exclusion; the full Swift suite passed."
+          },
+          "evidence": [
+            {"ref": "Sources/MacCtlCore/ControlCapabilities.swift", "note": "Defines the machine-readable audit opportunity contract.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Sources/MacCtlCore/MacCtlService.swift", "note": "Schedules bounded serialized observation without launches, activation, input, or web-content inspection.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/MacCtlCoreTests/MacCtlCoreTests.swift", "note": "Covers positive, duplicate, satisfied, web-content, and closed-app behavior.", "observed_at": "2026-08-13T00:26:02Z"}
+          ],
+          "blockers": []
+        },
+        {
+          "id": "portable-agent-contract",
+          "name": "Source gates and the routed agent contract remain portable and parity-checked across supported agent roots.",
+          "targets": ["complete_product"],
+          "maturity": 75,
+          "confidence": "high",
+          "layers": {
+            "intended": "Agents receive the same current safety and routing contract wherever the supported provider loads it.",
+            "planned": "macOS CI validates source and contract gates while installed/live proof remains explicitly local.",
+            "implemented": "A SHA-pinned macOS CI workflow covers build, behavior, coverage, benchmark accounting, skill tests, and environment contract; the installer promotes the repository skill into canonical and Codex roots.",
+            "verified": "The local CI-equivalent gate passed, installer check reports matching source/canonical hashes and a valid Codex projection, Pronto observes Codex projected and Gemini native, and the repository change-surface score is 4/4."
+          },
+          "evidence": [
+            {"ref": ".github/workflows/ci.yml", "note": "Defines the source-only macOS CI gate and local-live proof boundary.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": "Tests/SkillTests/test_mac_control_skill.py", "note": "Six structural, trigger-boundary, installer, and projection tests passed.", "observed_at": "2026-08-13T00:26:02Z"},
+            {"ref": ".agents/change-surface-matrix.json", "note": "Pronto reports 4/4 add, change, remove, and surface evidence.", "observed_at": "2026-08-13T00:26:02Z"}
+          ],
+          "blockers": [
+            {"kind": "verification", "summary": "Pronto cannot score behavioral provider parity because its local runtime has no trigger/output fixture ingestion; Claude is unsupported and Cursor remains behavior-unverified."}
+          ]
+        }
+      ]
+    }
   ],
-  "source_layers": {"intended": [{"ref": "README.md", "note": "Product identity and owner boundary.", "observed_at": "2026-08-02T13:25:04Z"}], "planned": [{"ref": ".agents/context/README.md", "note": "Repository scope and local constraints.", "observed_at": "2026-08-02T13:25:04Z"}], "implemented": [{"ref": "README.md", "note": "Current macctl and daemon architecture.", "observed_at": "2026-08-02T13:25:04Z"}], "verified": [{"ref": "README.md", "note": "Documented claims only; no live permission or effect run here.", "observed_at": "2026-08-02T13:25:04Z"}]},
-  "drift": [{"kind": "verification-gap", "summary": "The owner-scoped control outcome depends on live macOS permission and effect evidence that documentation alone cannot establish.", "status": "open", "observed_at": "2026-08-02T13:25:04Z", "evidence": [{"ref": "README.md", "note": "Documents the control boundary without live TCC proof.", "observed_at": "2026-08-02T13:25:04Z"}]}],
-  "updated_at": "2026-08-02T13:25:04Z"
+  "source_layers": {
+    "intended": [
+      {"ref": "README.md", "note": "Product identity, owner boundary, capability learning, evidence, and release contract.", "observed_at": "2026-08-13T00:26:02Z"}
+    ],
+    "planned": [
+      {"ref": ".agents/context/architecture.md", "note": "Current control-plane architecture and provider seams.", "observed_at": "2026-08-13T00:26:02Z"},
+      {"ref": "docs/MAC_CONTROL_ROADMAP.md", "note": "Current delivery sequence and remaining live verification work.", "observed_at": "2026-08-13T00:26:02Z"}
+    ],
+    "implemented": [
+      {"ref": "Sources/MacCtlCore/MacCtlService.swift", "note": "Primary daemon behavior and cross-surface routing.", "observed_at": "2026-08-13T00:26:02Z"},
+      {"ref": "Sources/MacCtlCore/ReleaseEvidenceArchive.swift", "note": "Durable per-dimension release evidence.", "observed_at": "2026-08-13T00:26:02Z"},
+      {"ref": ".github/workflows/ci.yml", "note": "macOS source and contract gate.", "observed_at": "2026-08-13T00:26:02Z"}
+    ],
+    "verified": [
+      {"ref": "docs/evidence/agent-usability-2026-08-12.json", "note": "Current complete local source-gate result.", "observed_at": "2026-08-13T00:26:02Z"},
+      {"ref": "Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift", "note": "Focused durability and concurrency evidence.", "observed_at": "2026-08-13T00:26:02Z"},
+      {"ref": "Tests/MacCtlCoreTests/FocusSessionPlanTests.swift", "note": "Focus display, layout, digest, execution, and verification evidence.", "observed_at": "2026-08-13T00:26:02Z"}
+    ]
+  },
+  "drift": [
+    {
+      "kind": "implementation-drift",
+      "summary": "The source and agent contract are newer than the installed packaged daemon; live release checks therefore cannot validate the new protocol or durable archive yet.",
+      "status": "open",
+      "observed_at": "2026-08-13T00:26:02Z",
+      "evidence": [
+        {"ref": ".agents/context/deployment.md", "note": "Persistent installation is owner-controlled and lifecycle-interlocked.", "observed_at": "2026-08-13T00:26:02Z"}
+      ]
+    },
+    {
+      "kind": "verification-gap",
+      "summary": "The built focus-session CLI behavior is exercised, but the installed Control Center popover could not be operated through Accessibility.",
+      "status": "open",
+      "observed_at": "2026-08-13T00:26:02Z",
+      "evidence": [
+        {"ref": "Tests/MacCtlCoreTests/ControlCenterTests.swift", "note": "Source projection passes; installed UI behavior remains a separate gate.", "observed_at": "2026-08-13T00:26:02Z"}
+      ]
+    },
+    {
+      "kind": "verification-gap",
+      "summary": "Canonical and Codex skill hashes match, but runtime-level behavioral trigger/output parity is not available in Pronto and unsupported providers remain explicit.",
+      "status": "open",
+      "observed_at": "2026-08-13T00:26:02Z",
+      "evidence": [
+        {"ref": "Tests/SkillTests/test_mac_control_skill.py", "note": "Repository skill boundaries and projection behavior pass locally.", "observed_at": "2026-08-13T00:26:02Z"}
+      ]
+    }
+  ],
+  "updated_at": "2026-08-13T00:26:02Z"
 }
