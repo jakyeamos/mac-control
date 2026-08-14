@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import Darwin
 import Foundation
 
 public enum AppControllerError: Error, LocalizedError {
@@ -26,20 +28,30 @@ public final class AppController {
     private let fileManager = FileManager.default
     private let runningApplicationProvider: () -> [RunningApplicationDescriptor]
     private let foregroundApplicationProvider: () -> RunningApplicationDescriptor?
+    private let processDescriptorProvider: (Int32) -> RunningApplicationDescriptor?
+    private let accessibilityApplicationProbe: (Int32) -> AccessibilityApplicationProbeResult
 
     public init(
         runningApplicationProvider: (() -> [RunningApplicationDescriptor])? = nil,
+        processDescriptorProvider: ((Int32) -> RunningApplicationDescriptor?)? = nil,
+        accessibilityApplicationProbe: ((Int32) -> AccessibilityApplicationProbeResult)? = nil
     ) {
         self.runningApplicationProvider = runningApplicationProvider ?? Self.systemRunningApplications
         self.foregroundApplicationProvider = Self.systemForegroundApplication
+        self.processDescriptorProvider = processDescriptorProvider ?? Self.systemProcessDescriptor
+        self.accessibilityApplicationProbe = accessibilityApplicationProbe ?? Self.systemAccessibilityApplicationProbe
     }
 
     public init(
         runningApplicationProvider: @escaping () -> [RunningApplicationDescriptor],
-        foregroundApplicationProvider: @escaping () -> RunningApplicationDescriptor?
+        foregroundApplicationProvider: @escaping () -> RunningApplicationDescriptor?,
+        processDescriptorProvider: ((Int32) -> RunningApplicationDescriptor?)? = nil,
+        accessibilityApplicationProbe: ((Int32) -> AccessibilityApplicationProbeResult)? = nil
     ) {
         self.runningApplicationProvider = runningApplicationProvider
         self.foregroundApplicationProvider = foregroundApplicationProvider
+        self.processDescriptorProvider = processDescriptorProvider ?? Self.systemProcessDescriptor
+        self.accessibilityApplicationProbe = accessibilityApplicationProbe ?? Self.systemAccessibilityApplicationProbe
     }
 
     /// Lists every matching regular GUI process instead of collapsing bundle
@@ -54,7 +66,13 @@ public final class AppController {
     /// Resolves an exact live process. Every supplied identity field must
     /// agree; stale instance references fail closed and never fall back.
     public func resolveRunningTarget(_ selector: ApplicationTargetSelector) throws -> ApplicationInstanceInfo {
-        let applicationMatches = listRunningInstances(matching: selector.application)
+        var applicationMatches = listRunningInstances(matching: selector.application)
+        if let processID = selector.processID,
+           !applicationMatches.contains(where: { $0.processID == processID }),
+           let descriptor = processDescriptorProvider(processID),
+           Self.matches(descriptor, nameOrBundleID: selector.application) {
+            applicationMatches.append(ApplicationInstanceInfo(descriptor: descriptor))
+        }
         guard !applicationMatches.isEmpty else {
             throw ApplicationTargetResolutionError.targetMissing
         }
@@ -85,6 +103,29 @@ public final class AppController {
         return instance
     }
 
+    /// Resolves a PID-bound target and independently proves that macOS exposes
+    /// an addressable AXApplication root for that exact process. Process
+    /// discovery alone is never treated as Accessibility addressability.
+    public func bindAccessibilityTarget(
+        _ selector: ApplicationTargetSelector
+    ) throws -> ApplicationInstanceInfo {
+        let instance = try resolveRunningTarget(selector)
+        switch accessibilityApplicationProbe(instance.processID) {
+        case .addressable:
+            return instance
+        case .permissionDenied:
+            throw ApplicationTargetResolutionError.accessibilityPermissionDenied
+        case .unavailable(let nativeError):
+            let registeredAppBundle = instance.bundleID != nil
+                && instance.path.localizedCaseInsensitiveContains(".app")
+            throw ApplicationTargetResolutionError.accessibilityApplicationUnavailable(
+                processID: instance.processID,
+                unregisteredDevelopmentTarget: !registeredAppBundle,
+                nativeError: nativeError
+            )
+        }
+    }
+
     public func listApplications() -> [AppInfo] {
         var applications: [String: AppInfo] = [:]
         for url in applicationURLs() {
@@ -98,6 +139,12 @@ public final class AppController {
     }
 
     public func resolve(_ nameOrBundleID: String) throws -> AppInfo {
+        let explicitURL = URL(fileURLWithPath: nameOrBundleID).standardizedFileURL
+        if explicitURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
+           fileManager.fileExists(atPath: explicitURL.path),
+           let info = appInfo(for: explicitURL) {
+            return info
+        }
         if let running = workspace.runningApplications.first(where: {
             $0.bundleIdentifier == nameOrBundleID || $0.localizedName == nameOrBundleID
         }), let url = running.bundleURL, let info = appInfo(for: url) {
@@ -287,6 +334,8 @@ public final class AppController {
         nameOrBundleID: String
     ) -> Bool {
         application.bundleID == nameOrBundleID
+            || URL(fileURLWithPath: application.path).standardizedFileURL.path
+                == URL(fileURLWithPath: nameOrBundleID).standardizedFileURL.path
             || application.name.caseInsensitiveCompare(nameOrBundleID) == .orderedSame
             || URL(fileURLWithPath: application.path)
                 .deletingPathExtension().lastPathComponent
@@ -294,7 +343,9 @@ public final class AppController {
     }
 
     private static func systemRunningApplications() -> [RunningApplicationDescriptor] {
-        NSWorkspace.shared.runningApplications.compactMap(systemDescriptor(for:))
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap(systemDescriptor(for:))
     }
 
     /// Preserves the PID reported by the system foreground oracle. Re-resolving
@@ -306,15 +357,16 @@ public final class AppController {
     }
 
     private static func systemDescriptor(for running: NSRunningApplication) -> RunningApplicationDescriptor? {
-        guard running.activationPolicy == .regular,
-              running.processIdentifier > 0,
-              let url = running.bundleURL else {
+        guard running.processIdentifier > 0 else {
             return nil
         }
-        let bundle = Bundle(url: url)
+        let url = running.bundleURL ?? running.executableURL
+        guard let url else { return rawSystemProcessDescriptor(running.processIdentifier, name: running.localizedName) }
+        let bundle = running.bundleURL.flatMap(Bundle.init(url:))
         let name = running.localizedName
             ?? (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? running.executableURL?.lastPathComponent
             ?? url.deletingPathExtension().lastPathComponent
         return RunningApplicationDescriptor(
             name: name,
@@ -325,5 +377,60 @@ public final class AppController {
             bundleVersion: (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
                 ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
         )
+    }
+
+    private static func systemProcessDescriptor(_ processID: Int32) -> RunningApplicationDescriptor? {
+        if let running = NSRunningApplication(processIdentifier: processID),
+           let descriptor = systemDescriptor(for: running) {
+            return descriptor
+        }
+        return rawSystemProcessDescriptor(processID, name: nil)
+    }
+
+    private static func rawSystemProcessDescriptor(
+        _ processID: Int32,
+        name: String?
+    ) -> RunningApplicationDescriptor? {
+        guard processID > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let copied = proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, infoSize)
+        guard copied == infoSize, info.pbi_uid == geteuid() else { return nil }
+
+        var pathBuffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let pathLength = proc_pidpath(processID, &pathBuffer, UInt32(pathBuffer.count))
+        guard pathLength > 0 else { return nil }
+        let path = String(cString: pathBuffer)
+        let launchDate: Date? = if info.pbi_start_tvsec > 0 {
+            Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec)
+                + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+        } else {
+            nil
+        }
+        return RunningApplicationDescriptor(
+            name: name ?? URL(fileURLWithPath: path).lastPathComponent,
+            bundleID: nil,
+            path: path,
+            processID: processID,
+            launchDate: launchDate,
+            bundleVersion: nil
+        )
+    }
+
+    private static func systemAccessibilityApplicationProbe(
+        _ processID: Int32
+    ) -> AccessibilityApplicationProbeResult {
+        guard PermissionDiagnostics.hasAccessibility() else { return .permissionDenied }
+        let application = AXUIElementCreateApplication(processID)
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(
+            application,
+            kAXRoleAttribute as CFString,
+            &value
+        )
+        guard error == .success, (value as? String) == kAXApplicationRole else {
+            return .unavailable(nativeError: error.rawValue)
+        }
+        return .addressable
     }
 }

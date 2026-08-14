@@ -188,6 +188,7 @@ Rectangle, Loop, keyboard-shortcut, pointer-drag, or raw-coordinate route:
 
 ```sh
 macctl app instances --app "<app>" --json
+macctl app bind --app "<expected-name-or-path>" --process-id <pid> --json
 macctl window displays --json
 macctl window list --app "<app>" \
   --process-id <pid> --instance-ref <instance-ref> --json
@@ -200,10 +201,25 @@ macctl window place --app "<app>" --window focused \
 macctl window restore --restore-token <token> --confirm --json
 ```
 
-When multiple regular GUI processes share an app or bundle identity, first use
-`app instances` and then bind read-only window/tree inspection to the returned
-PID and, when present, launch-bound `instance_ref`. Treat PID, instance, and
-window references as conjunctive: `target_missing`, `target_ambiguous`, or
+When multiple regular registered GUI processes share an app or bundle identity, first
+use `app instances` and then bind read-only window/tree inspection to the
+returned PID and, when present, launch-bound `instance_ref`. For a development
+process that is discoverable by PID but absent from the registered app catalog,
+use `app bind` with the expected executable name or exact path. The command
+keeps that identity conjunctive and independently probes the exact PID's
+`AXApplication` root. A process, healthy daemon, and granted Accessibility
+permission do not establish AX addressability.
+
+If binding reports
+`development_binary_not_registered_as_accessibility_application`, classify Mac
+Control as `blocked_unsupported` for that unregistered target while preserving
+installed-app support. Do not retry by app name or widen to another PID. Build
+a real `.app` with an Info.plist and normal application activation policy, use
+`app open <absolute-app-path>` to launch that exact development bundle, then
+rediscover and bind its PID. Mac Control does not wrap a bare executable as an
+application.
+
+Treat PID, instance, and window references as conjunctive: `target_missing`, `target_ambiguous`, or
 `target_changed` is terminal for that snapshot, and must never fall back to a
 different process or focused window. `window list` is read-only and returns
 opaque title-free references; refresh it when a window reference becomes stale.

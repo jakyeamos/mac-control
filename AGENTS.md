@@ -14,6 +14,12 @@ Read this router before repository work.
   one `AXPress`, a declared desired-state readback, a short-lived one-shot
   resolution, and an unchanged unrelated foreground PID. Never activate,
   replay, widen, or fall back after a possible dispatch.
+- For an unregistered development process, use `app bind --app <expected>
+  --process-id <pid>` before AX inspection. Process discovery, daemon health,
+  and permission checks do not prove addressability. A failed AX root probe is
+  `blocked_unsupported`; use an explicit registered `.app` development build
+  through `app open <absolute-app-path>`, then rediscover and bind its PID.
+  Installed app control remains supported.
 - Exact keyboard input remains available only through an approved foreground
   `task.run` key step bound to `process_id`, launch-bound `instance_ref`, and
   opaque `window_ref`. It requires an exclusive task keyboard lease plus independent

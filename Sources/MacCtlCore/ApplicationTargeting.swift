@@ -159,6 +159,12 @@ public enum ApplicationTargetResolutionError: Error, LocalizedError, Equatable {
     case targetMissing
     case targetAmbiguous(Int)
     case targetChanged
+    case accessibilityPermissionDenied
+    case accessibilityApplicationUnavailable(
+        processID: Int32,
+        unregisteredDevelopmentTarget: Bool,
+        nativeError: Int32
+    )
 
     public var errorDescription: String? {
         switch self {
@@ -168,6 +174,43 @@ public enum ApplicationTargetResolutionError: Error, LocalizedError, Equatable {
             return "The application selector matched \(count) running instances; provide a process ID or instance reference"
         case .targetChanged:
             return "The requested application instance changed or restarted"
+        case .accessibilityPermissionDenied:
+            return "Accessibility permission is required to bind the process as an Accessibility application"
+        case .accessibilityApplicationUnavailable(_, let unregisteredDevelopmentTarget, _):
+            if unregisteredDevelopmentTarget {
+                return "The development binary is running but is not registered as an addressable Accessibility application; launch a bundled development app and retry"
+            }
+            return "The process is running but does not expose an addressable Accessibility application"
         }
+    }
+}
+
+public enum AccessibilityApplicationProbeResult: Equatable {
+    case addressable
+    case permissionDenied
+    case unavailable(nativeError: Int32)
+}
+
+public struct PIDAccessibilityBindingReport: Codable, Equatable {
+    public let schemaVersion = "macctl-pid-accessibility-binding/v1"
+    public let bindingMode = "process_id"
+    public let addressability = "accessibility_application"
+    public let target: ApplicationInstanceInfo
+    public let registeredAppBundle: Bool
+    public let bundledDevelopmentFallback = "launch_registered_app_bundle"
+
+    public init(target: ApplicationInstanceInfo) {
+        self.target = target
+        registeredAppBundle = target.bundleID != nil
+            && target.path.localizedCaseInsensitiveContains(".app")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case bindingMode = "binding_mode"
+        case addressability
+        case target
+        case registeredAppBundle = "registered_app_bundle"
+        case bundledDevelopmentFallback = "bundled_development_fallback"
     }
 }

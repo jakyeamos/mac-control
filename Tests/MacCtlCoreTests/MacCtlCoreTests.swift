@@ -7072,10 +7072,11 @@ final class MacCtlCoreTests: XCTestCase {
         let completedAt = Date(timeIntervalSince1970: 9_999)
         let taskCapabilities = TaskCapabilityReport()
         let capabilityReport = CapabilityReport(
-            capabilities: ["control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "receipts.trace.begin", "receipts.trace.complete", "receipts.trace", "shortcut.audit", "shortcut.run"],
+            capabilities: ["app.bind", "control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "receipts.trace.begin", "receipts.trace.complete", "receipts.trace", "shortcut.audit", "shortcut.run"],
             optionalBackends: [],
             permissionGates: [],
             safety: [
+                "app.bind keeps expected process identity conjunctive, independently probes the exact PID's AXApplication root, and preserves a registered app-bundle fallback for unsupported development targets",
                 "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",

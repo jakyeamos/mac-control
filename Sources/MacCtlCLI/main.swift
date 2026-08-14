@@ -92,7 +92,7 @@ struct CLI {
 
     private func runApp(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl app list|instances --app <app>|open <name-or-bundle-id>")
+            throw CLIError.usage("Usage: macctl app list|instances --app <app>|bind --app <app> --process-id <pid>|open <name-or-bundle-id>")
         }
         switch subcommand {
         case "list":
@@ -103,13 +103,26 @@ struct CLI {
                 params: ["app": .string(try requiredOption("--app", from: args))],
                 localFallback: false
             ))
+        case "bind":
+            let rawProcessID = try requiredOption("--process-id", from: args)
+            guard let processID = Int32(rawProcessID), processID > 0 else {
+                throw CLIError.usage("--process-id must be a positive 32-bit process ID")
+            }
+            return render(sendOrLocal(
+                method: "app.bind",
+                params: [
+                    "app": .string(try requiredOption("--app", from: args)),
+                    "process_id": .number(Double(processID))
+                ],
+                localFallback: false
+            ))
         case "open":
             guard let name = args.dropFirst().first else { throw CLIError.usage("Usage: macctl app open <name-or-bundle-id>") }
             var params: [String: JSONValue] = ["name": .string(name)]
             try addFocusPolicy(from: args, to: &params)
             return render(sendOrLocal(method: "app.open", params: params, localFallback: false))
         default:
-            throw CLIError.usage("Usage: macctl app list|instances --app <app>|open <name-or-bundle-id>")
+            throw CLIError.usage("Usage: macctl app list|instances --app <app>|bind --app <app> --process-id <pid>|open <name-or-bundle-id>")
         }
     }
 
@@ -1625,6 +1638,7 @@ struct CLI {
         macctl status --json
         macctl app list [--json]
         macctl app instances --app <app> [--json]
+        macctl app bind --app <app> --process-id <pid> [--json]
         macctl app open <name-or-bundle-id> [--focus-policy automatic|foreground|background] [--background]
         macctl action resolve --intent-stdin [--json]
         macctl action run <resolution-id> [--json]

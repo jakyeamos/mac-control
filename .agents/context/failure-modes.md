@@ -16,6 +16,11 @@ Expected safety outcomes are explicit:
   be written with owner-only permissions.
 - signing identity, bundle identifier, or install-path change: perform the
   documented TCC migration and re-run the full release gate.
+- `development_binary_not_registered_as_accessibility_application`: the
+  process and permission checks passed, but the exact PID did not expose an
+  addressable `AXApplication` root. Keep the result `blocked_unsupported`;
+  build and launch a registered `.app` development bundle, then rediscover and
+  rebind its PID. Do not classify this as a daemon or permission failure.
 
 Use `doctor --json`, `status --json`, `receipts status --json`, and
 `release check --json` for diagnosis. Recovery may rebuild/reinstall the

@@ -20,9 +20,17 @@ readback. Its in-memory restore authority is short-lived, single-use, and bound
 to the original process, window digest, frame, and display; it is not durable
 workflow approval or a third-party window-manager adapter.
 
-Read-only native targeting resolves application identity before Accessibility
-traversal. `app.instances` enumerates regular GUI processes and returns a
-launch-bound opaque `instance_ref`; `window.list` returns title-free opaque
+Read-only native targeting resolves process identity before Accessibility
+traversal. `app.instances` enumerates regular registered GUI processes
+and returns a launch-bound opaque `instance_ref`; `app.bind --app <expected>
+--process-id <pid>` additionally admits a same-user process discovered by PID,
+keeps the expected app name/path conjunctive, and independently proves that
+the exact PID exposes an addressable `AXApplication` root. Process discovery,
+daemon health, and Accessibility permission are not substitutes for that probe.
+An unbundled process whose AX root is unavailable is typed as
+`development_binary_not_registered_as_accessibility_application` with a
+registered `.app` development fallback; installed app support is unchanged.
+`window.list` returns title-free opaque
 `window_ref` values within one resolved PID. Every supplied app, PID, instance,
 and window field is conjunctive. Ambiguity, disappearance, PID reuse, or stale
 window identity fails closed without falling back to the first bundle match,

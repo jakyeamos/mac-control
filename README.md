@@ -819,6 +819,36 @@ without reading AX values or private content:
   --manifest ./accessibility-manifest.json --json
 ```
 
+For a development process that may not be registered as a normal application,
+bind the exact PID before attempting window or tree inspection:
+
+```sh
+~/.local/bin/macctl app bind --app "ExampleDev" --process-id 12345 --json
+```
+
+The supplied expected identity (bundle ID, name, or exact path) and PID remain
+conjunctive. A successful
+`macctl-pid-accessibility-binding/v1` response means the exact process exposes
+an addressable `AXApplication` root; it does not grant mutation authority. If
+the process exists but the AX root is unavailable, Mac Control reports
+`classification: blocked_unsupported` and distinguishes
+`development_binary_not_registered_as_accessibility_application` from
+`accessibility_permission_missing`. Installed app control remains supported.
+
+The durable fallback is to build a real `.app` bundle with an Info.plist and
+normal application activation policy, then launch that exact development
+bundle through the existing app route and bind its PID:
+
+```sh
+~/.local/bin/macctl app open "/absolute/path/to/ExampleDev.app" --json
+~/.local/bin/macctl app instances --app "/absolute/path/to/ExampleDev.app" --json
+~/.local/bin/macctl app bind --app "/absolute/path/to/ExampleDev.app" \
+  --process-id 12345 --json
+```
+
+`app open` accepts an explicit existing `.app` path for this fallback; it does
+not wrap, register, or reinterpret a bare executable as an application.
+
 When more than one GUI process has the same app identity, discover the live
 instances and bind inspection to one process before reading its windows or
 Accessibility tree:

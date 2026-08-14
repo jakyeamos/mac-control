@@ -160,7 +160,7 @@ public final class MacCtlService {
         "control.center.snapshot", "control.hands_off.status", "control.capabilities", "route.list", "route.inspect",
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
-        "app.instances", "window.displays", "window.list", "window.inspect",
+        "app.instances", "app.bind", "window.displays", "window.list", "window.inspect",
         "action.resolve",
         "workflow.list", "workflow.validate", "approval.list", "receipts.list",
         "receipts.status", "receipts.trace", "logs", "shortcut.audit", "shortcut.inspect"
@@ -403,7 +403,7 @@ public final class MacCtlService {
                 return ApplicationInstanceInfo(application: application, processID: processID)
             }
         } else {
-            resolvedApplicationTargetResolver = { try appController.resolveRunningTarget($0) }
+            resolvedApplicationTargetResolver = { try appController.bindAccessibilityTarget($0) }
         }
         self.resolveApplicationTarget = resolvedApplicationTargetResolver
         let resolvedApplicationActivator = activateApplication ?? { try appController.activate($0) }
@@ -933,6 +933,31 @@ public final class MacCtlService {
                         application: application,
                         instances: listApplicationInstances(application)
                     )
+                )
+            case "app.bind":
+                let selector = try targetSelector(from: request)
+                guard selector.processID != nil else {
+                    throw WorkflowExecutionError.unsafeInput(
+                        "app.bind requires an exact process_id"
+                    )
+                }
+                let target = try resolveApplicationTarget(selector)
+                return try success(
+                    request,
+                    value: PIDAccessibilityBindingReport(target: target),
+                    evidence: [Evidence(
+                        kind: "pid_accessibility_binding",
+                        message: "The exact process exposed an addressable Accessibility application root",
+                        source: "macctld",
+                        metadata: [
+                            "process_id": .number(Double(target.processID)),
+                            "binding_mode": .string("process_id"),
+                            "registered_app_bundle": .bool(
+                                target.bundleID != nil
+                                    && target.path.localizedCaseInsensitiveContains(".app")
+                            )
+                        ]
+                    )]
                 )
             case "action.resolve":
                 return try resolveExactAction(request)
@@ -6280,7 +6305,7 @@ public final class MacCtlService {
     private func capabilityReport() -> CapabilityReport {
         CapabilityReport(
             capabilities: [
-                "app.list", "app.open", "launchApp", "activateWindow", "click", "type", "key", "search",
+                "app.list", "app.open", "app.bind", "launchApp", "activateWindow", "click", "type", "key", "search",
                 "scroll", "waitFor", "capture", "ocr", "assert", "workflow.prepare", "workflow.run",
                 "workflow.background", "approval.approve", "approval.deny",
                 "keyboard.status", "keyboard.setup", "keyboard.enable", "keyboard.inspect",
@@ -6317,6 +6342,7 @@ public final class MacCtlService {
                 "keyboard focus inspection returns only role, subrole, identifier, title, and target application",
                 "route selection uses a fresh measured app/task/version/target manifest after safety and permission gates",
                 "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
+                "app.bind keeps expected process identity conjunctive, independently probes the exact PID's AXApplication root, and preserves a registered app-bundle fallback for unsupported development targets",
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capabilities is a fast route probe that may read a cached broad profile but never walks the Accessibility tree",
@@ -7247,7 +7273,7 @@ public final class MacCtlService {
 
     private func errorResponse(_ request: RequestEnvelope, error: Error) -> ResponseEnvelope {
         var status: OperationStatus
-        let code: MacCtlErrorCode
+        var code: MacCtlErrorCode
         var details: [String: JSONValue] = [:]
         var evidence: [Evidence] = []
         switch error {
@@ -7341,12 +7367,42 @@ public final class MacCtlService {
                 details["candidate_count"] = .number(Double(count))
             case .targetChanged:
                 details["failure_class"] = .string("target_changed")
+            case .accessibilityPermissionDenied:
+                code = .permissionDenied
+                details["failure_class"] = .string("permission_denied")
+                details["diagnosis"] = .string("accessibility_permission_missing")
+            case let .accessibilityApplicationUnavailable(
+                processID,
+                unregisteredDevelopmentTarget,
+                nativeError
+            ):
+                code = .adapterUnsupported
+                details["failure_class"] = .string("action_unavailable")
+                details["classification"] = .string("blocked_unsupported")
+                details["process_id"] = .number(Double(processID))
+                details["native_ax_error"] = .number(Double(nativeError))
+                details["diagnosis"] = .string(
+                    unregisteredDevelopmentTarget
+                        ? "development_binary_not_registered_as_accessibility_application"
+                        : "accessibility_application_unavailable"
+                )
+                details["installed_app_control_supported"] = .bool(true)
+                details["bundled_development_fallback"] = .string("launch_registered_app_bundle")
+                details["next_action"] = .string(
+                    "launch_development_build_as_registered_app_bundle_then_bind"
+                )
             }
             details["provider"] = .string("mac_control")
-            details["route"] = .string("application_instance_resolution")
+            details["route"] = .string(
+                request.method == "app.bind"
+                    ? "pid_accessibility_binding"
+                    : "application_instance_resolution"
+            )
             details["retryable"] = .bool(false)
             evidence = [Evidence(
-                kind: "application_target_resolution_failure",
+                kind: request.method == "app.bind"
+                    ? "pid_accessibility_binding_failure"
+                    : "application_target_resolution_failure",
                 message: error.localizedDescription,
                 source: "macctld",
                 metadata: details

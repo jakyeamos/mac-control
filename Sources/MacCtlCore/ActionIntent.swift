@@ -767,6 +767,10 @@ public final class ExactActionIntentController: ExactActionIntentControlling {
             case .targetMissing: throw ExactActionIntentError.targetMissing
             case .targetAmbiguous(let count): throw ExactActionIntentError.targetAmbiguous(count)
             case .targetChanged: throw ExactActionIntentError.targetChanged
+            case .accessibilityPermissionDenied:
+                throw AccessibilityControllerError.permissionDenied
+            case .accessibilityApplicationUnavailable:
+                throw ExactActionIntentError.actionUnavailable
             }
         }
         catch let error as NativeWindowControlError {

@@ -51,6 +51,32 @@ final class ExactTargetingTests: XCTestCase {
         }
     }
 
+    func testAppControllerResolvesExplicitBundledDevelopmentAppPath() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacCtl-DevBundle-\(UUID().uuidString).app", isDirectory: true)
+        let contents = root.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": "com.example.macctl-dev-fixture",
+            "CFBundleName": "MacCtl Dev Fixture",
+            "CFBundleVersion": "1"
+        ]
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: plist,
+            format: .xml,
+            options: 0
+        )
+        try plistData.write(to: contents.appendingPathComponent("Info.plist"))
+
+        let controller = AppController(runningApplicationProvider: { [] })
+        let application = try controller.resolve(root.path)
+
+        XCTAssertEqual(application.name, "MacCtl Dev Fixture")
+        XCTAssertEqual(application.bundleID, "com.example.macctl-dev-fixture")
+        XCTAssertEqual(application.path, root.standardizedFileURL.path)
+    }
+
     func testInstanceReferenceIsUnavailableWithoutLaunchIdentity() {
         let controller = AppController(runningApplicationProvider: {
             [self.descriptor(pid: 303, launchedAt: nil)]
@@ -70,6 +96,92 @@ final class ExactTargetingTests: XCTestCase {
         XCTAssertEqual(observed.bundleID, first.bundleID)
         XCTAssertEqual(observed.path, first.path)
         XCTAssertEqual(observed.processID, frontmost.processID)
+    }
+
+    func testPIDBindingAddressesUnregisteredDevelopmentProcess() throws {
+        let developmentProcess = RunningApplicationDescriptor(
+            name: "ExampleDev",
+            bundleID: nil,
+            path: "/private/tmp/ExampleDev",
+            processID: 303,
+            launchDate: Date(timeIntervalSince1970: 3_000)
+        )
+        var probedPIDs: [Int32] = []
+        let controller = AppController(
+            runningApplicationProvider: { [] },
+            processDescriptorProvider: { $0 == 303 ? developmentProcess : nil },
+            accessibilityApplicationProbe: {
+                probedPIDs.append($0)
+                return .addressable
+            }
+        )
+
+        let binding = try controller.bindAccessibilityTarget(ApplicationTargetSelector(
+            application: "ExampleDev",
+            processID: 303
+        ))
+
+        XCTAssertEqual(binding.processID, 303)
+        XCTAssertNil(binding.bundleID)
+        XCTAssertEqual(binding.path, "/private/tmp/ExampleDev")
+        XCTAssertNotNil(binding.instanceRef)
+        XCTAssertEqual(probedPIDs, [303])
+    }
+
+    func testPIDBindingKeepsApplicationIdentityConjunctiveBeforeProbe() {
+        let developmentProcess = RunningApplicationDescriptor(
+            name: "ExampleDev",
+            bundleID: nil,
+            path: "/private/tmp/ExampleDev",
+            processID: 303,
+            launchDate: Date(timeIntervalSince1970: 3_000)
+        )
+        var probeCount = 0
+        let controller = AppController(
+            runningApplicationProvider: { [] },
+            processDescriptorProvider: { $0 == 303 ? developmentProcess : nil },
+            accessibilityApplicationProbe: { _ in
+                probeCount += 1
+                return .addressable
+            }
+        )
+
+        XCTAssertThrowsError(try controller.bindAccessibilityTarget(ApplicationTargetSelector(
+            application: "DifferentProcess",
+            processID: 303
+        ))) { error in
+            XCTAssertEqual(error as? ApplicationTargetResolutionError, .targetMissing)
+        }
+        XCTAssertEqual(probeCount, 0)
+    }
+
+    func testPIDBindingClassifiesUnregisteredDevelopmentTarget() {
+        let developmentProcess = RunningApplicationDescriptor(
+            name: "ExampleDev",
+            bundleID: nil,
+            path: "/private/tmp/ExampleDev",
+            processID: 303,
+            launchDate: Date(timeIntervalSince1970: 3_000)
+        )
+        let controller = AppController(
+            runningApplicationProvider: { [] },
+            processDescriptorProvider: { $0 == 303 ? developmentProcess : nil },
+            accessibilityApplicationProbe: { _ in .unavailable(nativeError: -25205) }
+        )
+
+        XCTAssertThrowsError(try controller.bindAccessibilityTarget(ApplicationTargetSelector(
+            application: "ExampleDev",
+            processID: 303
+        ))) { error in
+            XCTAssertEqual(
+                error as? ApplicationTargetResolutionError,
+                .accessibilityApplicationUnavailable(
+                    processID: 303,
+                    unregisteredDevelopmentTarget: true,
+                    nativeError: -25205
+                )
+            )
+        }
     }
 
     func testAccessibilityTreeUsesExactProcessAndWindowReference() throws {
@@ -126,6 +238,110 @@ final class ExactTargetingTests: XCTestCase {
             },
             [401, 402]
         )
+    }
+
+    func testServicePublishesPIDAccessibilityBindingReport() throws {
+        let instance = ApplicationInstanceInfo(descriptor: descriptor(pid: 707, launchedAt: 7_007))
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplicationTarget: { selector in
+                XCTAssertEqual(selector.application, "Code")
+                XCTAssertEqual(selector.processID, 707)
+                return instance
+            }
+        )
+
+        let response = service.handle(RequestEnvelope(method: "app.bind", params: [
+            "app": .string("Code"),
+            "process_id": .number(707)
+        ]))
+
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(response.result["schema_version"]?.stringValue, "macctl-pid-accessibility-binding/v1")
+        XCTAssertEqual(response.result["binding_mode"]?.stringValue, "process_id")
+        XCTAssertEqual(response.result["addressability"]?.stringValue, "accessibility_application")
+        XCTAssertEqual(response.result["target"]?["process_id"]?.doubleValue, 707)
+        XCTAssertEqual(response.evidence.first?.kind, "pid_accessibility_binding")
+    }
+
+    func testServiceRejectsPIDBindingWithoutExactProcessIDBeforeResolution() {
+        var resolveCount = 0
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplicationTarget: { _ in
+                resolveCount += 1
+                return ApplicationInstanceInfo(
+                    descriptor: self.descriptor(pid: 707, launchedAt: 7_007)
+                )
+            }
+        )
+
+        let response = service.handle(RequestEnvelope(method: "app.bind", params: [
+            "app": .string("Code")
+        ]))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.unsafeInput.rawValue)
+        XCTAssertEqual(
+            response.error?.message,
+            "Unsafe workflow input: app.bind requires an exact process_id"
+        )
+    }
+
+    func testServiceReportsBlockedUnsupportedDevelopmentBindingWithBundledFallback() {
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplicationTarget: { _ in
+                throw ApplicationTargetResolutionError.accessibilityApplicationUnavailable(
+                    processID: 808,
+                    unregisteredDevelopmentTarget: true,
+                    nativeError: -25205
+                )
+            }
+        )
+
+        let response = service.handle(RequestEnvelope(method: "app.bind", params: [
+            "app": .string("ExampleDev"),
+            "process_id": .number(808)
+        ]))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.adapterUnsupported.rawValue)
+        XCTAssertEqual(response.outcome?.state, .actionUnavailable)
+        XCTAssertEqual(response.error?.details["classification"]?.stringValue, "blocked_unsupported")
+        XCTAssertEqual(
+            response.error?.details["diagnosis"]?.stringValue,
+            "development_binary_not_registered_as_accessibility_application"
+        )
+        XCTAssertEqual(response.error?.details["installed_app_control_supported"]?.boolValue, true)
+        XCTAssertEqual(
+            response.error?.details["bundled_development_fallback"]?.stringValue,
+            "launch_registered_app_bundle"
+        )
+        XCTAssertEqual(
+            response.outcome?.nextAction,
+            "launch_development_build_as_registered_app_bundle_then_bind"
+        )
+    }
+
+    func testServiceKeepsPIDBindingPermissionFailureDistinctFromTargetSupport() {
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplicationTarget: { _ in
+                throw ApplicationTargetResolutionError.accessibilityPermissionDenied
+            }
+        )
+
+        let response = service.handle(RequestEnvelope(method: "app.bind", params: [
+            "app": .string("ExampleDev"),
+            "process_id": .number(909)
+        ]))
+
+        XCTAssertEqual(response.status, .blocked)
+        XCTAssertEqual(response.error?.code, MacCtlErrorCode.permissionDenied.rawValue)
+        XCTAssertEqual(response.outcome?.state, .permissionBlocked)
+        XCTAssertEqual(response.error?.details["diagnosis"]?.stringValue, "accessibility_permission_missing")
     }
 
     func testChangedInstanceStopsBeforeAccessibilityInspection() {

@@ -78,6 +78,12 @@ class MacControlSkillTests(unittest.TestCase):
             "`indeterminate_but_verified`",
             "`dispatch_indeterminate`",
             "Never replay the resolution",
+            "`app bind`",
+            "`AXApplication` root",
+            "development_binary_not_registered_as_accessibility_application",
+            "`blocked_unsupported`",
+            "`app open <absolute-app-path>`",
+            "Mac Control does not wrap a bare executable",
         ):
             self.assertIn(marker, text)
 

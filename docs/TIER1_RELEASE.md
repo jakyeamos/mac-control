@@ -35,9 +35,12 @@ decision remains user-controlled, and an external unannounced dialog cannot be a
 Mac Control in v1.
 
 The release report also includes `agent.contract`. That check requires the
-provider-neutral outcome surface, capability discovery, bounded control batch,
-and daemon-executed route-benchmark provenance to be present in the live daemon
-capability report. Passing it proves contract exposure only; it does not replace
+PID Accessibility binding surface, provider-neutral outcome surface, capability
+discovery, bounded control batch, and daemon-executed route-benchmark provenance
+to be present in the live daemon capability report. PID binding must keep the
+expected process identity conjunctive, probe the exact `AXApplication` root,
+and preserve the registered `.app` fallback for unsupported development targets.
+Passing it proves contract exposure only; it does not replace
 the separate live GUI, task-control, keyboard, or transient safety-item evidence
 dimensions below.
 

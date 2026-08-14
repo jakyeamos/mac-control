@@ -627,6 +627,7 @@ public final class ReleaseGate {
             )
         }
         let requiredCapabilities = [
+            "app.bind",
             "control.outcome",
             "control.batch",
             "control.capabilities",
@@ -640,6 +641,7 @@ public final class ReleaseGate {
             "shortcut.run"
         ]
         let requiredSafetyMarkers = [
+            "app.bind keeps expected process identity conjunctive, independently probes the exact PID's AXApplication root, and preserves a registered app-bundle fallback for unsupported development targets",
             "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
             "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
             "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
@@ -658,7 +660,7 @@ public final class ReleaseGate {
             id: "agent.contract",
             state: missing.isEmpty ? .passed : .blocked,
             message: missing.isEmpty
-                ? "Agent-facing outcomes, provider handoff, bounded batching, and measured route provenance are exposed"
+                ? "Agent-facing PID binding, outcomes, provider handoff, bounded batching, and measured route provenance are exposed"
                 : "Agent-facing control contract is incomplete",
             details: [
                 "missing": .array(missing.map(JSONValue.string)),
