@@ -4705,12 +4705,66 @@ final class MacCtlCoreTests: XCTestCase {
         ))
 
         XCTAssertTrue(chrome.contractCapabilities.contains("window_scoped_accessibility_selector"))
-        XCTAssertEqual(chrome.schemaVersion, 6)
+        XCTAssertEqual(chrome.schemaVersion, 7)
         XCTAssertTrue(chrome.contractCapabilities.contains("control.capability_leads"))
         XCTAssertTrue(chrome.contractCapabilities.contains("verified_context_menu"))
         XCTAssertTrue(chrome.contractCapabilities.contains("control.blocker_observations"))
         XCTAssertEqual(chrome.unsupportedCapabilities, ["chrome_tab_group_mutation"])
         XCTAssertTrue(safari.unsupportedCapabilities.isEmpty)
+    }
+
+    func testControlLimitationsLedgerIsLocalExplicitAndNotExecutionAuthority() throws {
+        let service = MacCtlService(permissionContext: "test")
+        let response = service.handle(RequestEnvelope(method: "control.limitations"))
+
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(
+            response.result["schemaVersion"]?.stringValue,
+            "mac-control-limitations/v1"
+        )
+        XCTAssertEqual(
+            response.evidence.first?.kind,
+            "control_limitations"
+        )
+        XCTAssertEqual(
+            response.evidence.first?.metadata["execution_authority"]?.boolValue,
+            false
+        )
+        let ids = try XCTUnwrap(response.result["entries"]?.arrayValue)
+            .compactMap { $0.objectValue?["id"]?.stringValue }
+        XCTAssertTrue(ids.contains("direct-interface-first"))
+        XCTAssertTrue(ids.contains("rendered-web-content"))
+        XCTAssertTrue(ids.contains("no-universal-fallback-ladder"))
+        XCTAssertTrue(ids.contains("semantic-scroll-without-verified-viewport"))
+
+        let capabilities = service.handle(RequestEnvelope(method: "capabilities"))
+        XCTAssertEqual(capabilities.status, .succeeded)
+        XCTAssertTrue(
+            capabilities.result["capabilities"]?.arrayValue?.contains(.string("control.limitations")) == true
+        )
+        XCTAssertTrue(
+            capabilities.result["safety"]?.arrayValue?.contains(.string(
+                "control.limitations is a local, versioned call/no-call ledger; consult it before probing or executing Mac Control, and treat entries as routing guidance rather than execution authority"
+            )) == true
+        )
+    }
+
+    func testCapabilityProfileDefaultsKnownLimitationsForLegacyPayloads() throws {
+        let profile = ControlCapabilityProfile(application: WarmPathApplicationIdentity(
+            name: "Finder",
+            bundleID: "com.apple.finder",
+            path: "/System/Library/CoreServices/Finder.app"
+        ))
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONCodec.encode(profile)) as? [String: Any]
+        )
+        object.removeValue(forKey: "knownLimitations")
+
+        let decoded = try JSONCodec.decode(
+            ControlCapabilityProfile.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        XCTAssertEqual(decoded.knownLimitations, MacControlLimitationsLedger.current.entries)
     }
 
     func testLegacyDoctorAndCapabilityReportsDecodeWithoutKeyboardFields() throws {
@@ -7072,7 +7126,7 @@ final class MacCtlCoreTests: XCTestCase {
         let completedAt = Date(timeIntervalSince1970: 9_999)
         let taskCapabilities = TaskCapabilityReport()
         let capabilityReport = CapabilityReport(
-            capabilities: ["app.bind", "control.outcome", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "receipts.trace.begin", "receipts.trace.complete", "receipts.trace", "shortcut.audit", "shortcut.run"],
+            capabilities: ["app.bind", "control.outcome", "control.batch", "control.capabilities", "control.limitations", "control.capability_audit", "control.capability_audit_batch", "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve", "route.benchmark", "receipts.trace.begin", "receipts.trace.complete", "receipts.trace", "shortcut.audit", "shortcut.run"],
             optionalBackends: [],
             permissionGates: [],
             safety: [
@@ -7080,6 +7134,7 @@ final class MacCtlCoreTests: XCTestCase {
                 "route selection requires daemon-executed measurements; caller-supplied registrations are inventory-only",
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
+                "control.limitations is a local, versioned call/no-call ledger; consult it before probing or executing Mac Control, and treat entries as routing guidance rather than execution authority",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
                 "cross-provider traces join Mac Control handoff evidence with browser observations while preserving provider-specific provenance",

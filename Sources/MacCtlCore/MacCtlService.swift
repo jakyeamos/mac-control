@@ -157,7 +157,7 @@ public final class MacCtlService {
     private static let lifecycleReadOnlyMethods: Set<String> = [
         "doctor", "capabilities", "status", "keyboard.status", "keyboard.inspect",
         "keyboard.freeze.status", "task.status", "adapter.capabilities", "control.status",
-        "control.center.snapshot", "control.hands_off.status", "control.capabilities", "route.list", "route.inspect",
+        "control.center.snapshot", "control.hands_off.status", "control.capabilities", "control.limitations", "route.list", "route.inspect",
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
         "app.instances", "app.bind", "window.displays", "window.list", "window.inspect",
@@ -900,6 +900,8 @@ public final class MacCtlService {
                 return try performControlBatch(request)
             case "control.capabilities":
                 return try controlCapabilities(request)
+            case "control.limitations":
+                return try controlLimitations(request)
             case "control.capability_audit":
                 return try controlCapabilityAudit(request)
             case "control.capability_audit_batch":
@@ -2098,7 +2100,27 @@ public final class MacCtlService {
                     "broad_profile_cache_hit": .bool(cachedProfile.cacheHit),
                     "deep_audit_recommended": .bool(cachedProfile.summary.deepAuditRecommended),
                     "audit_opportunity_state": .string(auditOpportunity.state.rawValue),
-                    "recent_blocker_count": .number(Double(recentBlockers.count))
+                    "recent_blocker_count": .number(Double(recentBlockers.count)),
+                    "limitation_ledger_version": .string(MacControlLimitationsLedger.current.schemaVersion),
+                    "limitation_count": .number(Double(profile.knownLimitations.count))
+                ]
+            )]
+        )
+    }
+
+    private func controlLimitations(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        try success(
+            request,
+            value: MacControlLimitationsLedger.current,
+            evidence: [Evidence(
+                kind: "control_limitations",
+                message: "The versioned local call/no-call ledger was reported without daemon, permission, app, or Accessibility probing",
+                source: "macctl",
+                metadata: [
+                    "ledger_version": .string(MacControlLimitationsLedger.current.schemaVersion),
+                    "reviewed_at": .string(MacControlLimitationsLedger.current.reviewedAt),
+                    "entry_count": .number(Double(MacControlLimitationsLedger.current.entries.count)),
+                    "execution_authority": .bool(false)
                 ]
             )]
         )
@@ -6462,7 +6484,7 @@ public final class MacCtlService {
                 "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression", "keyboard.lease.navigation-mode",
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
                 "keyboard.navigate", "keyboard.send",
-                "control.status", "control.perform", "control.batch", "control.capabilities", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
+                "control.status", "control.perform", "control.batch", "control.capabilities", "control.limitations", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
                 "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
                 "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
@@ -6497,6 +6519,7 @@ public final class MacCtlService {
                 "control outcomes are provider-neutral and expose target, action, verification, and handoff state",
                 "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
                 "control.capabilities is a fast route probe that may read a cached broad profile but never walks the Accessibility tree",
+                "control.limitations is a local, versioned call/no-call ledger; consult it before probing or executing Mac Control, and treat entries as routing guidance rather than execution authority",
                 "web-content target surfaces fail closed with a machine-readable browser-provider handoff and never activate browser UI",
                 "cross-provider traces join Mac Control handoff evidence with browser observations while preserving provider-specific provenance",
                 "cross-provider completion credentials are short-lived, single-use, stdin-only, stored only as digests, and never authorize provider execution",

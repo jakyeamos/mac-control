@@ -663,11 +663,16 @@ struct CLI {
 
     private func runControl(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
+            throw CLIError.usage("Usage: macctl control status|limitations|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
         }
         switch subcommand {
         case "status":
             return render(sendOrLocal(method: "control.status", params: [:], localFallback: true))
+        case "limitations":
+            guard args.dropFirst().isEmpty else {
+                throw CLIError.usage("Usage: macctl control limitations [--json]")
+            }
+            return render(localService.localReadOnlyHandle(RequestEnvelope(method: "control.limitations")))
         case "hands-off":
             return try runHandsOffSession(Array(args.dropFirst()))
         case "authorization":
@@ -1661,6 +1666,7 @@ struct CLI {
         macctl keyboard navigate <command> --lease-token <token> [--count N]
         macctl keyboard send <key>... --lease-token <token>
         macctl control status [--json]
+        macctl control limitations [--json]
         macctl control authorization prepare --project <project> --action <safe-action> --summary <safe-summary> [--repository <repo>] [--task-id <id> --task-title <title>] [--thread-id <id> --thread-title <title>] [--source-reference codex://thread/<id>] [--requesting-executable <name>] [--requesting-helper <name>] [--target-service <service>] [--kind keychain|credential|permission|other] [--expires-in N]
         macctl control authorization bind <request-id> --process-id <pid>
         macctl control authorization list

@@ -12,6 +12,34 @@ a Mac.
 Load this packet once. If the source, canonical installation, or provider projection resolves
 to the same skill, do not load another copy.
 
+## Known limitations ledger — read before routing
+
+Before assessing Mac Control or running a capability probe, read the local ledger:
+
+```sh
+macctl control limitations --json
+```
+
+This command is a fast, local preflight. It does not contact the daemon, inspect an app,
+walk Accessibility, request permissions, or authorize execution. The
+`mac-control-limitations/v1` ledger is a versioned call/no-call contract, not a substitute for
+task-specific live evidence. Apply its posture:
+
+- `do_not_call`: use the named direct provider or stop; do not spend time reconstructing a
+  Mac Control route (`direct-interface-first`, `rendered-web-content`,
+  `unregistered-development-process`, `read-only-settings-query`).
+- `handoff_only`: Mac Control may describe the boundary, but the preferred provider owns
+  dispatch and fresh-state verification (`semantic-scroll-without-verified-viewport`,
+  `presentation-only-accessibility-row`).
+- `call_with_constraints`: Mac Control is eligible only through the listed exact route,
+  authority, and postcondition (`no-universal-fallback-ladder`, `direct-background-control`,
+  `exact-keyboard-input`, `visual-or-coordinate-only-target`).
+
+Do not launch `control capabilities`, `control capability-audit`, or a live GUI assessment
+merely to rediscover a ledger entry. After the ledger allows Mac Control, use the fast
+task/app-specific probe and current provider state below; a ledger entry never promotes a
+stale, caller-supplied, or unverified route.
+
 ## Route before acting
 
 Use a mature direct CLI, API, typed connector, or browser DOM route when it covers the exact

@@ -4,6 +4,21 @@ Use these cases when the correct control surface is not obvious. The first princ
 choose the highest-confidence, lowest-overhead route that can perform and verify the exact
 task.
 
+## Known-limitations preflight
+
+Run `macctl control limitations --json` before choosing a Mac Control route. The local
+`mac-control-limitations/v1` ledger is the first routing check and distinguishes
+`do_not_call`, `handoff_only`, and `call_with_constraints`. It prevents known dead ends from
+turning into live capability reconstruction; it does not grant execution authority.
+
+| Ledger trigger | Mac Control disposition | Preferred route |
+| --- | --- | --- |
+| A mature direct interface covers the exact task | `do_not_call` | Direct CLI/API/typed connector/browser DOM |
+| Target is rendered webpage content | `do_not_call` | Browser connector with tab/frame and DOM readback |
+| No unique verified scroll viewport or presentation-only row | `handoff_only` | Computer Use or another provider with fresh state |
+| Background mutation, exact keyboard, or visual/coordinate target | `call_with_constraints` | Exact named task/action front door or explicit manifest route |
+| Stale, ambiguous, unmeasured, or possibly dispatched route | `call_with_constraints` | Fresh provider route; never a universal fallback ladder |
+
 ## Route matrix
 
 | Situation | Route | Reason |
@@ -16,6 +31,7 @@ task.
 | A task has a fresh measured candidate for this app/version/target | The eligible manifest candidate | Rank complete-action latency, p95 latency, then recoveries after all gates pass. |
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
+| Known limitation preflight is needed before considering Mac Control | `control limitations` | Read the local versioned call/no-call ledger without daemon or Accessibility probing. |
 | Rendered browser page content is the target | Browser connector handoff | Declare `target_surface=web_content`; Mac Control returns a tab-addressed provider handoff without activating browser UI. |
 | A broad profile is missing, stale, or explicitly needed for planning | `control capability-audit` | Perform one bounded, read-only AX/provider audit and persist stable descriptors. |
 | A bounded inventory is needed across installed applicable apps | `control capability-audit-batch` | Audit up to 24 already-running apps, persist resumable per-app receipts, and never launch or dispatch input. |
@@ -32,6 +48,9 @@ task.
 
 - Read `AppleKeyboardUIMode`: use `/usr/bin/defaults read`; the direct read fully covers the
   fact and is faster than daemon-backed control.
+- Before any Mac Control assessment, read `control limitations --json`. A `do_not_call` entry
+  ends Mac Control routing; `handoff_only` transfers dispatch and verification; and
+  `call_with_constraints` requires its exact route and oracle.
 - A v3 repository manifest says all eight criteria are true: report eight legacy declarations,
   score `0/8`, and migrate each task to typed v4 semantic claims with source grounding.
 - Move focus to the next control in System Settings: use atomic `macctl control perform

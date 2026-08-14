@@ -745,6 +745,21 @@ Missing transient UI is absence of evidence rather than negative evidence.
 Use `route register` only for explicitly caller-supplied external metadata; it
 is not equivalent to the daemon-executed benchmark.
 
+Before an agent assesses Mac Control, it should read the local known-limitations
+ledger. This is intentionally faster than a daemon or GUI probe and makes the
+provider boundary explicit:
+
+```sh
+~/.local/bin/macctl control limitations --json
+```
+
+The versioned `mac-control-limitations/v1` response distinguishes
+`do_not_call`, `handoff_only`, and `call_with_constraints` entries. It does not
+contact the daemon, inspect an app, walk Accessibility, or authorize an action.
+Use it to choose whether Mac Control belongs in the plan; after a constrained
+route is selected, use the task/app-specific capability probe and live
+postcondition. The ledger is routing guidance, not live capability evidence.
+
 Agents can inspect the route contract before acting and batch verified navigation
 within one foreground app:
 

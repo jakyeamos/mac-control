@@ -107,6 +107,46 @@ public struct ControlCapabilityProfile: Codable, Equatable {
     public let cachedBroadProfile: CapabilityProfileCacheSummary?
     public let recentBlockers: [ControlBlockerObservation]
     public let auditOpportunity: CapabilityAuditOpportunity?
+    /// Static routing guidance that should be consulted before live probing.
+    /// This is not execution authority and is separate from recent blockers,
+    /// which are observations of already-failed actions.
+    public let knownLimitations: [MacControlLimitation]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case probeMode
+        case application
+        case archetype
+        case classificationSource
+        case targetSurface
+        case localExecution
+        case foregroundRequirement
+        case providerHandoffRequired
+        case recommendedProvider
+        case nextAction
+        case taskID
+        case targetFingerprint
+        case manifestFound
+        case routeContextCurrent
+        case freshMeasuredRoutes
+        case staleOrUnprovenRoutes
+        case callerSuppliedRoutes
+        case contractCapabilities
+        case unsupportedCapabilities
+        case advertisedCapabilities
+        case handoffProviders
+        case preferredProviders
+        case profileLayers
+        case anchors
+        case verificationMethods
+        case invalidatesOn
+        case routeSelectionPolicy
+        case deepAuditAvailable
+        case cachedBroadProfile
+        case recentBlockers
+        case auditOpportunity
+        case knownLimitations
+    }
 
     public init(
         application: WarmPathApplicationIdentity,
@@ -120,9 +160,10 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         recentBlockers: [ControlBlockerObservation] = [],
         auditOpportunity: CapabilityAuditOpportunity? = nil,
         targetSurface: ControlTargetSurface = .macAppUI,
-        profileRegistry: AppControlProfileRegistry = .standard
+        profileRegistry: AppControlProfileRegistry = .standard,
+        knownLimitations: [MacControlLimitation] = MacControlLimitationsLedger.current.entries
     ) {
-        self.schemaVersion = 6
+        self.schemaVersion = 7
         self.probeMode = "fast_route_probe"
         self.application = application
         let effectiveProfile = profileRegistry.profile(for: application)
@@ -155,6 +196,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
             "control.outcome",
             "control.batch",
             "control.capabilities",
+            "control.limitations",
             "control.capability_audit",
             "control.capability_audit_batch",
             "control.capability_leads",
@@ -189,6 +231,45 @@ public struct ControlCapabilityProfile: Codable, Equatable {
         self.cachedBroadProfile = cachedBroadProfile
         self.recentBlockers = recentBlockers
         self.auditOpportunity = auditOpportunity
+        self.knownLimitations = knownLimitations
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        probeMode = try container.decode(String.self, forKey: .probeMode)
+        application = try container.decode(WarmPathApplicationIdentity.self, forKey: .application)
+        archetype = try container.decode(MacAppArchetype.self, forKey: .archetype)
+        classificationSource = try container.decode(String.self, forKey: .classificationSource)
+        targetSurface = try container.decode(ControlTargetSurface.self, forKey: .targetSurface)
+        localExecution = try container.decode(String.self, forKey: .localExecution)
+        foregroundRequirement = try container.decode(String.self, forKey: .foregroundRequirement)
+        providerHandoffRequired = try container.decode(Bool.self, forKey: .providerHandoffRequired)
+        recommendedProvider = try container.decodeIfPresent(AppControlProvider.self, forKey: .recommendedProvider)
+        nextAction = try container.decodeIfPresent(String.self, forKey: .nextAction)
+        taskID = try container.decodeIfPresent(String.self, forKey: .taskID)
+        targetFingerprint = try container.decodeIfPresent(String.self, forKey: .targetFingerprint)
+        manifestFound = try container.decode(Bool.self, forKey: .manifestFound)
+        routeContextCurrent = try container.decode(Bool.self, forKey: .routeContextCurrent)
+        freshMeasuredRoutes = try container.decode([ControlActionRoute].self, forKey: .freshMeasuredRoutes)
+        staleOrUnprovenRoutes = try container.decode([ControlActionRoute].self, forKey: .staleOrUnprovenRoutes)
+        callerSuppliedRoutes = try container.decode([ControlActionRoute].self, forKey: .callerSuppliedRoutes)
+        contractCapabilities = try container.decode([String].self, forKey: .contractCapabilities)
+        unsupportedCapabilities = try container.decode([String].self, forKey: .unsupportedCapabilities)
+        advertisedCapabilities = try container.decode([AppAdvertisedCapability].self, forKey: .advertisedCapabilities)
+        handoffProviders = try container.decode([String].self, forKey: .handoffProviders)
+        preferredProviders = try container.decode([AppControlProvider].self, forKey: .preferredProviders)
+        profileLayers = try container.decode([String].self, forKey: .profileLayers)
+        anchors = try container.decode([String].self, forKey: .anchors)
+        verificationMethods = try container.decode([String].self, forKey: .verificationMethods)
+        invalidatesOn = try container.decode([String].self, forKey: .invalidatesOn)
+        routeSelectionPolicy = try container.decode(String.self, forKey: .routeSelectionPolicy)
+        deepAuditAvailable = try container.decode(Bool.self, forKey: .deepAuditAvailable)
+        cachedBroadProfile = try container.decodeIfPresent(CapabilityProfileCacheSummary.self, forKey: .cachedBroadProfile)
+        recentBlockers = try container.decode([ControlBlockerObservation].self, forKey: .recentBlockers)
+        auditOpportunity = try container.decodeIfPresent(CapabilityAuditOpportunity.self, forKey: .auditOpportunity)
+        knownLimitations = try container.decodeIfPresent([MacControlLimitation].self, forKey: .knownLimitations)
+            ?? MacControlLimitationsLedger.current.entries
     }
 }
 
