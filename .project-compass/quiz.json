@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "sessions": [
+    {
+      "id": "mac-control-root-realignment-20260814",
+      "mode": "realignment",
+      "compass_id": "project",
+      "scope_kind": "root",
+      "status": "active",
+      "questions": [
+        {
+          "id": "mac-control-subsystem-model",
+          "category": "subsystem-model",
+          "prompt": "Should child Compasses follow guarded invocation, focus and display sessions, diagnostics and provider evidence, and distribution or agent contract?"
+        },
+        {
+          "id": "mac-control-control-plane",
+          "category": "control-plane-boundary",
+          "prompt": "Should native app control and CLI control have separate Compasses, or one invocation plane with provider-specific evidence?"
+        },
+        {
+          "id": "mac-control-verification-authority",
+          "category": "verification-boundary",
+          "prompt": "Which provider boundary is authoritative for user-visible verification, and which providers are evidence-only?"
+        }
+      ],
+      "answers": [],
+      "started_at": "2026-08-14T23:24:00Z",
+      "updated_at": "2026-08-14T23:24:00Z"
+    }
+  ],
+  "updated_at": "2026-08-14T23:24:00Z"
+}
