@@ -737,6 +737,14 @@ public enum TaskPlanValidator {
             if action.parameters["script"] != nil || action.parameters["jxa"] != nil {
                 errors.append("Step \(stepID) adapter actions cannot contain arbitrary script or JXA")
             }
+            if adapterID == "vscode", operation == "diagnostics.summary" {
+                if action.parameters["fixture_id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                    errors.append("Step \(stepID) VS Code diagnostics requires fixture_id")
+                }
+                for key in ["diagnostics", "messages", "problems", "snapshot_path"] where action.parameters[key] != nil {
+                    errors.append("Step \(stepID) VS Code diagnostics does not accept caller-supplied \(key)")
+                }
+            }
             let privateKeys = [
                 "body", "content", "document_text", "email", "message", "password",
                 "credential", "secret", "subject", "text", "title", "token"

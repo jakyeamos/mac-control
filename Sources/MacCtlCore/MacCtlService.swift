@@ -156,7 +156,7 @@ private struct CapabilityAuditExecution {
 public final class MacCtlService {
     private static let lifecycleReadOnlyMethods: Set<String> = [
         "doctor", "capabilities", "status", "keyboard.status", "keyboard.inspect",
-        "keyboard.freeze.status", "task.status", "adapter.capabilities", "control.status",
+        "keyboard.freeze.status", "task.status", "adapter.capabilities", "adapter.diagnostics", "control.status",
         "control.center.snapshot", "control.hands_off.status", "control.capabilities", "control.limitations", "route.list", "route.inspect",
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
@@ -223,6 +223,7 @@ public final class MacCtlService {
     private let taskCheckpointStore: TaskCheckpointStore
     private let taskRunner: TaskRunner
     private let adapterRegistry: AppAdapterRegistry
+    private let vscodeDiagnosticsReader: VSCodeDiagnosticsReading
     private let targetInspector: ControlTargetInspecting
     private let focusedElementInspector: FocusedElementInspecting
     private let accessibilityTreeInspector: AccessibilityTreeInspecting
@@ -300,6 +301,7 @@ public final class MacCtlService {
         externalApprovalStore: ExternalApprovalStore = ExternalApprovalStore(),
         taskCheckpointStore: TaskCheckpointStore = TaskCheckpointStore(),
         adapterRegistry: AppAdapterRegistry = AppAdapterRegistry(),
+        vscodeDiagnosticsReader: VSCodeDiagnosticsReading = FileVSCodeDiagnosticsReader(),
         taskActionExecutor: TaskActionExecuting? = nil,
         taskRunner: TaskRunner? = nil,
         targetInspector: ControlTargetInspecting? = nil,
@@ -354,6 +356,8 @@ public final class MacCtlService {
         self.externalApprovalStore = externalApprovalStore
         self.taskCheckpointStore = taskCheckpointStore
         self.adapterRegistry = adapterRegistry
+        let resolvedVSCodeDiagnosticsReader = vscodeDiagnosticsReader
+        self.vscodeDiagnosticsReader = resolvedVSCodeDiagnosticsReader
         let defaultAccessibilityController = AccessibilityController()
         self.warmPathStore = warmPathStore
         self.capabilityProfileStore = capabilityProfileStore
@@ -463,7 +467,8 @@ public final class MacCtlService {
             ?? AppScopedShortcutKeyboardDispatcher(
                 keyboard: keyboardAccessController,
                 leases: keyboardDriveStore,
-                foregroundApplication: resolvedForegroundApplication
+                foregroundApplication: resolvedForegroundApplication,
+                focusedElementInspector: resolvedFocusedElementInspector
             )
         self.shortcutEngine = shortcutEngine ?? ShortcutEngine(
             store: shortcutBindingStore,
@@ -509,14 +514,45 @@ public final class MacCtlService {
             keyboardAccessController: keyboardAccessController,
             semanticActionRouter: resolvedSemanticActionRouter,
             adapterRegistry: adapterRegistry,
-            foregroundApplication: resolvedForegroundApplication
+            foregroundApplication: resolvedForegroundApplication,
+            vscodeDiagnosticsReader: resolvedVSCodeDiagnosticsReader
         )
         self.taskRunner = taskRunner ?? TaskRunner(
             checkpointStore: taskCheckpointStore,
             approvalStore: taskApprovalStore,
             actionExecutor: resolvedTaskExecutor,
-            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, resolvedApplicationTargetResolver, resolvedNativeWindowController, nativeWindowDisplayProvider, adapterRegistry] step in
+            targetRevalidator: { [resolvedTargetInspector, resolvedForegroundApplication, resolvedApplicationResolver, resolvedApplicationTargetResolver, resolvedNativeWindowController, nativeWindowDisplayProvider, adapterRegistry, resolvedVSCodeDiagnosticsReader] step in
                 let target = step.target
+                if step.action.kind == .adapter,
+                   step.action.parameters["adapter_id"]?.stringValue == "vscode",
+                   step.action.parameters["operation"]?.stringValue == "diagnostics.summary" {
+                    guard let fixtureID = step.action.parameters["fixture_id"]?.stringValue,
+                          !fixtureID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let fixtureTarget = try resolvedVSCodeDiagnosticsReader.target(fixtureID: fixtureID)
+                    guard let application = appController.runningApplication(
+                        bundleID: fixtureTarget.bundleID,
+                        processID: fixtureTarget.processID
+                    ) else {
+                        throw ControlTargetInspectionError.targetChanged
+                    }
+                    let snapshot = ControlTargetSnapshot(
+                        application: application,
+                        focusedElement: nil,
+                        fingerprint: ControlTargetFingerprints.make(
+                            application: application,
+                            focus: nil,
+                            window: AccessibilityWindowState(visible: true, modal: false)
+                        ),
+                        windowVisible: true,
+                        modal: false,
+                        focusReadable: false,
+                        hung: false
+                    )
+                    try MacCtlService.validateTaskTarget(snapshot: snapshot, target: target)
+                    return snapshot
+                }
                 var requestedApplication = target?.application ?? target?.bundleID
                 if requestedApplication == nil,
                    [.launchApp, .activateWindow].contains(step.action.kind) {
@@ -874,6 +910,8 @@ public final class MacCtlService {
                         source: "macctld"
                     )]
                 )
+            case "adapter.diagnostics":
+                return try adapterDiagnostics(request)
             case "control.status":
                 return try controlStatus(request)
             case "control.center.snapshot":
@@ -1816,6 +1854,55 @@ public final class MacCtlService {
                 kind: "keyboard_input",
                 message: "Raw non-printable keyboard shortcuts ran under a live lease and per-key focus checks",
                 source: "macctld"
+            )]
+        )
+    }
+
+    private func adapterDiagnostics(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let adapterID = try requiredString(request, key: "adapter_id")
+        let operation = try requiredString(request, key: "operation")
+        guard adapterID == "vscode", operation == "diagnostics.summary" else {
+            throw AppAdapterError.unsupportedOperation(adapterID: adapterID, operation: operation)
+        }
+        let fixtureID = try requiredString(request, key: "fixture_id")
+        let target = try vscodeDiagnosticsReader.target(fixtureID: fixtureID)
+        guard let application = appController.runningApplication(
+            bundleID: target.bundleID,
+            processID: target.processID
+        ) else {
+            throw VSCodeDiagnosticsError.identityMismatch
+        }
+        let maxAge: TimeInterval
+        if let rawMaxAge = request.params["max_age_seconds"] {
+            guard let requestedMaxAge = rawMaxAge.doubleValue else {
+                throw VSCodeDiagnosticsError.invalidMaxAge
+            }
+            maxAge = requestedMaxAge
+        } else {
+            maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
+        }
+        let observation = try vscodeDiagnosticsReader.read(
+            fixtureID: fixtureID,
+            application: application,
+            maxAge: maxAge
+        )
+        return try success(
+            request,
+            result: [
+                "adapter_id": .string(adapterID),
+                "operation": .string(operation),
+                "route": .string(AppAdapterRoute.native.rawValue),
+                "observation": try JSONValue.fromEncodable(observation)
+            ],
+            evidence: [Evidence(
+                kind: "vscode_diagnostics",
+                message: "VS Code extension-owned diagnostics were read without OS keyboard input",
+                source: "macctld",
+                metadata: [
+                    "fixture_id": .string(fixtureID),
+                    "process_id": .number(Double(target.processID)),
+                    "provider": .string("vscode.languages.getDiagnostics")
+                ]
             )]
         )
     }
@@ -6490,7 +6577,7 @@ public final class MacCtlService {
                 "route.list", "route.inspect", "route.benchmark", "route.register",
                 "receipts.trace.begin", "receipts.trace.complete", "receipts.trace",
                 "accessibility.tree", "accessibility.audit", "ideal-state.audit", "task.prepare", "task.run", "task.status",
-                "task.resume", "task.cancel", "adapter.capabilities",
+                "task.resume", "task.cancel", "adapter.capabilities", "adapter.diagnostics",
                 "action.resolve", "action.run",
                 "shortcut.audit", "shortcut.propose", "shortcut.inspect", "shortcut.setup", "shortcut.run", "shortcut.remove"
             ],
@@ -6507,6 +6594,7 @@ public final class MacCtlService {
                 "background workflows require one named macOS app target and preserve foreground focus",
                 "background click, type, replace-only search, and scroll require unique AX selectors; search verifies AXValue and scroll requires observed structural change",
                 "background typed adapters require an explicit background_safe manifest declaration; global mouse, desktop, browser content, and foreground paths are rejected",
+                "VS Code diagnostics use an exact disposable fixture process and an extension-owned getDiagnostics snapshot; they never fall back to OS keyboard input",
                 "Full Keyboard Access is explicit, AppKit-verified, and never enabled at daemon startup",
                 "direct keyboard navigation requires one short-lived, user-confirmed lease with per-key focus checks",
                 "physical keyboard suppression is opt-in, session-scoped, bounded by lease expiry, and leaves mouse emergency release available",
@@ -7817,6 +7905,25 @@ public final class MacCtlService {
                 code = .taskBlocked
             }
             details["failure_class"] = .string(code.rawValue)
+        case let error as VSCodeDiagnosticsError:
+            switch error {
+            case .invalidFixtureID, .invalidMaxAge:
+                status = .failed
+                code = .invalidRequest
+                details["retryable"] = .bool(false)
+            case .fixtureDescriptorMissing, .fixtureNotReady, .snapshotMissing,
+                    .invalidSnapshot, .identityMismatch, .staleSnapshot:
+                status = .blocked
+                code = .taskBlocked
+                details["retryable"] = .bool(true)
+            }
+            details["failure_class"] = .string("vscode_diagnostics_blocked")
+            evidence = [Evidence(
+                kind: "vscode_diagnostics",
+                message: error.localizedDescription,
+                source: "macctld",
+                metadata: details
+            )]
         case let error as TaskControlError:
             switch error {
             case .invalidPlan(let errors):
@@ -8009,6 +8116,14 @@ public final class MacCtlService {
                 evidence = [Evidence(
                     kind: "keyboard_focus_guard",
                     message: "Foreground state could not be read; keyboard input was blocked",
+                    source: "macctld"
+                )]
+            case .focusedTargetUnavailable:
+                status = .blocked
+                code = .keyboardFocusUnavailable
+                evidence = [Evidence(
+                    kind: "keyboard_focus_guard",
+                    message: "The focused target could not be proven; keyboard input was blocked",
                     source: "macctld"
                 )]
             case .appScopeMismatch(let expected, let actual):

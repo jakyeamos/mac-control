@@ -106,6 +106,13 @@ provider-specific provenance: Mac Control routing is `mac_control_attested`,
 while browser completion is `orchestrator_declared` until a browser-owned
 attestation interface exists.
 
+The VS Code Problems route is a native adapter boundary rather than a keyboard
+workflow. A disposable same-bundle fixture identifies one workspace, profile,
+extension, window title, bundle, and PID. Its extension writes only a fresh,
+redacted diagnostics summary sourced from `vscode.languages.getDiagnostics`.
+The daemon verifies the exact identity and digest before returning the summary;
+it never uses the fixture as proof of frontmost/focus or visual acceptance.
+
 Focus routing is background-first and foreground-on-demand. Agent-facing CLI
 requests default to `automatic`: the daemon selects a verified background route
 when the exact workflow, task, or app-open operation is eligible, otherwise it

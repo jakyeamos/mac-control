@@ -1,0 +1,30 @@
+{
+  "name": "macctl-vscode-problems-fixture",
+  "displayName": "Mac Control VS Code Problems Fixture",
+  "description": "Disposable extension-owned diagnostics fixture for Mac Control.",
+  "version": "0.0.1",
+  "publisher": "macctl",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Mac Control VS Code Fixture",
+      "properties": {
+        "macctl.fixtureId": {
+          "type": "string",
+          "description": "Exact disposable fixture identity."
+        },
+        "macctl.expectedDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the deterministic Problems-panel fixture diagnostics."
+        }
+      }
+    }
+  }
+}

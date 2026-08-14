@@ -95,6 +95,29 @@ app-scoped or unattended workflows. Prefer the separate
 `keyboard freeze acquire|status|release` commands when the freeze permission
 itself is the requested capability.
 
+VS Code Problems data has a native, read-only route and must not be collected
+by global keyboard input:
+
+```sh
+swift run macctl adapter diagnostics --adapter-id vscode \
+  --fixture-id <fixture-id> --json
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> create <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> launch <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> status <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> cleanup <fixture-id>
+```
+
+The fixture launch is bounded and records an exact disposable process,
+workspace, profile, extension, bundle, and window identity. `status` reports
+`visual_acceptance=unverified`, `frontmost_proof=not_claimed`, and
+`focus_proof=not_claimed` until a live Mac Control observation proves them.
+The adapter reads an extension-owned `vscode.languages.getDiagnostics`
+snapshot and returns counts/digests only; it is the preferred semantic route,
+is background-safe, and never falls back to OS keyboard injection. An invalid
+or stale snapshot, identity mismatch, or unproven frontmost/focus condition is
+typed blocked evidence. Do not relaunch or replay a possibly dispatched input
+operation blindly.
+
 Verified semantic control uses the same lease and can inspect or route a
 visible action: `swift run macctl control status --json` and
 `swift run macctl control perform activate --lease-token <token> --title

@@ -1256,10 +1256,30 @@ struct CLI {
     }
 
     private func runAdapter(_ args: [String]) throws -> Int32 {
-        guard args.first == "capabilities" else {
-            throw CLIError.usage("Usage: macctl adapter capabilities [--json]")
+        guard let subcommand = args.first else {
+            throw CLIError.usage("Usage: macctl adapter capabilities|diagnostics")
         }
-        return render(sendOrLocal(method: "adapter.capabilities", params: [:], localFallback: true))
+        switch subcommand {
+        case "capabilities":
+            return render(sendOrLocal(method: "adapter.capabilities", params: [:], localFallback: true))
+        case "diagnostics":
+            let adapterID = try requiredOption("--adapter-id", from: args)
+            let fixtureID = try requiredOption("--fixture-id", from: args)
+            var params: [String: JSONValue] = [
+                "adapter_id": .string(adapterID),
+                "operation": .string("diagnostics.summary"),
+                "fixture_id": .string(fixtureID)
+            ]
+            if let rawMaxAge = try optionalOption("--max-age-seconds", from: args) {
+                guard let maxAge = Double(rawMaxAge), maxAge.isFinite, maxAge > 0, maxAge <= 60 else {
+                    throw CLIError.usage("--max-age-seconds must be greater than zero and no more than 60")
+                }
+                params["max_age_seconds"] = .number(maxAge)
+            }
+            return render(sendOrLocal(method: "adapter.diagnostics", params: params, localFallback: true))
+        default:
+            throw CLIError.usage("Usage: macctl adapter capabilities|diagnostics")
+        }
     }
 
     private func runKeyboardFreeze(_ args: [String]) throws -> Int32 {
@@ -1736,6 +1756,7 @@ struct CLI {
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
         macctl task status|cancel <task-id>
         macctl adapter capabilities [--json]
+        macctl adapter diagnostics --adapter-id vscode --fixture-id <id> [--max-age-seconds <seconds>] [--json]
         macctl daemon install|remove|restart|status [--allow-legacy-idle-snapshot]
         macctl logs [--json]
         macctl install [--allow-legacy-idle-snapshot]

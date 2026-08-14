@@ -210,15 +210,18 @@ public final class AppScopedShortcutKeyboardDispatcher: ShortcutKeyboardDispatch
     private let keyboard: KeyboardAccessController
     private let leases: KeyboardDriveStore
     private let foregroundApplication: () -> AppInfo?
+    private let focusedElementInspector: FocusedElementInspecting
 
     public init(
         keyboard: KeyboardAccessController,
         leases: KeyboardDriveStore,
-        foregroundApplication: @escaping () -> AppInfo?
+        foregroundApplication: @escaping () -> AppInfo?,
+        focusedElementInspector: FocusedElementInspecting
     ) {
         self.keyboard = keyboard
         self.leases = leases
         self.foregroundApplication = foregroundApplication
+        self.focusedElementInspector = focusedElementInspector
     }
 
     public func dispatch(chord: String, application: AppInfo) throws {
@@ -242,20 +245,51 @@ public final class AppScopedShortcutKeyboardDispatcher: ShortcutKeyboardDispatch
             targetApplication: application,
             leaseExpiresAt: lease.expiresAt,
             interKeyDelay: 0,
-            beforeEach: { [foregroundApplication] _ in
+            beforeEach: { [foregroundApplication, focusedElementInspector] _ in
                 guard let foreground = foregroundApplication(),
-                      Self.sameApplication(application, foreground) else {
+                      exactKeyboardApplicationIdentityMatches(application, foreground) else {
                     throw KeyboardControlError.appScopeMismatch(
                         expected: application.bundleID ?? application.name,
                         actual: foregroundApplication()?.bundleID ?? foregroundApplication()?.name ?? "none"
                     )
                 }
+                guard let pid = application.processID else {
+                    throw KeyboardControlError.foregroundUnavailable
+                }
+                do {
+                    let focused = try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+                    guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                        throw KeyboardControlError.focusedTargetUnavailable
+                    }
+                } catch AccessibilityControllerError.permissionDenied {
+                    throw KeyboardControlError.permissionDenied("Accessibility")
+                } catch {
+                    throw KeyboardControlError.focusedTargetUnavailable
+                }
+            },
+            afterEach: { [foregroundApplication, focusedElementInspector, application] _ in
+                guard let foreground = foregroundApplication(),
+                      exactKeyboardApplicationIdentityMatches(application, foreground) else {
+                    throw KeyboardControlError.appScopeMismatch(
+                        expected: application.bundleID ?? application.name,
+                        actual: foregroundApplication()?.bundleID ?? foregroundApplication()?.name ?? "none"
+                    )
+                }
+                guard let pid = application.processID else {
+                    throw KeyboardControlError.foregroundUnavailable
+                }
+                do {
+                    let focused = try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+                    guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                        throw KeyboardControlError.focusedTargetUnavailable
+                    }
+                } catch AccessibilityControllerError.permissionDenied {
+                    throw KeyboardControlError.permissionDenied("Accessibility")
+                } catch {
+                    throw KeyboardControlError.focusedTargetUnavailable
+                }
             }
         )
     }
 
-    private static func sameApplication(_ lhs: AppInfo, _ rhs: AppInfo) -> Bool {
-        if let lhsID = lhs.bundleID, let rhsID = rhs.bundleID { return lhsID == rhsID }
-        return lhs.path == rhs.path
-    }
 }

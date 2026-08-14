@@ -74,6 +74,12 @@ public enum MacCtlPaths {
         applicationSupportDirectory.appendingPathComponent("limitation-proposals", isDirectory: true)
     }
 
+    /// Disposable, owner-only VS Code diagnostics fixture state. The fixture
+    /// descriptor and snapshot never prove foreground, focus, or visual acceptance.
+    public static var vscodeFixturesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("vscode-fixtures", isDirectory: true)
+    }
+
     public static var signingIdentityURL: URL {
         applicationSupportDirectory.appendingPathComponent("signing-identity.json")
     }
@@ -127,7 +133,8 @@ public enum MacCtlPaths {
             capabilityProfilesDirectory,
             capabilityAuditBatchesDirectory,
             shortcutBindingsDirectory,
-            limitationProposalsDirectory
+            limitationProposalsDirectory,
+            vscodeFixturesDirectory
         ]
         for directory in directories {
             try FileManager.default.createDirectory(

@@ -28,4 +28,10 @@ tests and a single-display run remain source evidence, not multi-monitor proof.
 
 The acceptance claim must distinguish source tests, local daemon evidence, and
 manual GUI/device evidence. No synthetic receipt, guessed permission, or
-unverified public claim satisfies this definition.
+unverified public claim satisfies this definition. For VS Code Problems work,
+source tests may prove snapshot validation and fixture identity only; a native
+adapter receipt may prove redacted semantic diagnostics were read; neither
+proves that the Problems panel was visually observed or accepted. That claim
+requires a live observation of the exact disposable VS Code target with
+frontmost and focused proof. If that observation is unavailable, leave the
+typed blocker and keep visual acceptance partial.

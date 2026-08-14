@@ -35,6 +35,14 @@ REQUIRED_FILES = (
     "skills/mac-control/SKILL.md",
     "skills/mac-control/agents/openai.yaml",
     "skills/mac-control/references/routing.md",
+    "Sources/MacCtlCore/VSCodeDiagnostics.swift",
+    "Tests/MacCtlCoreTests/VSCodeDiagnosticsTests.swift",
+    "Tests/BenchmarkTests/test_vscode_fixture.py",
+    "Tests/BenchmarkTests/test_vscode_diagnostics_fixture.py",
+    "scripts/vscode_fixture.py",
+    "scripts/vscode_diagnostics_fixture.py",
+    "fixtures/vscode-problems-extension/package.json",
+    "fixtures/vscode-problems-extension/extension.js",
 )
 
 
@@ -133,6 +141,10 @@ def _errors_for_mac_control_skill() -> list[str]:
         "mac-control-task-manifest/v4",
         "Every task also declares shortcut acceleration",
         "keyboard_focus_changed",
+        "vscode.languages.getDiagnostics",
+        "visual_acceptance=unverified",
+        "frontmost_proof=not_claimed",
+        "focus_proof=not_claimed",
         "lease_released",
         "result.verification.state",
         "task-owned unique-bundle fixture",
@@ -141,7 +153,12 @@ def _errors_for_mac_control_skill() -> list[str]:
     missing = [marker for marker in required_skill_markers if marker not in skill]
     if missing:
         errors.append(f"Mac Control skill missing markers: {', '.join(missing)}")
-    for marker in ("Positive and negative examples", "Ambiguous cases", "Evidence basis"):
+    for marker in (
+        "Positive and negative examples",
+        "Ambiguous cases",
+        "Evidence basis",
+        "vscode_diagnostics_blocked",
+    ):
         if marker not in routing:
             errors.append(f"Mac Control routing reference missing marker: {marker}")
     for marker in ('display_name: "Mac Control"', "$mac-control"):

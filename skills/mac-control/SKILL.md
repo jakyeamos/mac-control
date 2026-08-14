@@ -178,6 +178,37 @@ Do not reinterpret these routes as multiple macOS first responders: Full Keyboar
 global pointer input, activation, visual/coordinate targeting, and ambiguous controls still
 require the foreground path.
 
+### VS Code Problems: prefer the native diagnostics route
+
+When the task needs semantic Problems data, use the native adapter instead of opening
+the panel with keyboard input:
+
+```sh
+macctl adapter diagnostics --adapter-id vscode --fixture-id <fixture-id> --json
+```
+
+The fixture extension owns a fresh snapshot from `vscode.languages.getDiagnostics` and the
+adapter returns only redacted severity/source/code/position summaries, counts, digests, and
+exact fixture identity. It is read-only and `background_safe`; it does not authorize or fall
+back to OS keyboard input. Use the dedicated disposable diagnostics harness when semantic
+fixture evidence is needed:
+
+```sh
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> create <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> launch <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> status <fixture-id>
+python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> cleanup <fixture-id>
+```
+
+The harness identifies the exact bundle, PID, application path, workspace, profile,
+extension, and unique window title, but `status` deliberately reports
+`visual_acceptance=unverified`, `frontmost_proof=not_claimed`, and
+`focus_proof=not_claimed`. A semantic snapshot is not visual Problems-panel acceptance.
+If a foreground handoff is still required, make it explicit: prepare -> target -> reverify
+exact identity/frontmost/focus -> perform the minimum approved input -> verify -> optionally
+restore the prior app/window. If any proof is missing or ambiguous, stop with the typed
+blocker and do not retry blindly.
+
 For a read-only Full Keyboard Access status check, use the direct preference read:
 
 ```sh
@@ -668,8 +699,10 @@ app-scoped action or a declared task plan, not by replaying a split sequence.
   bodies, passwords, tokens, private input, or inherited environment values to the notice
   routes. Source opening is allowed only through the registered Codex opener; if unavailable,
   show the `codex://` reference without attempting to open it.
-- Keep `keyboard_focus_changed` fail-closed. Reassert the target through an atomic action;
-  never weaken foreground verification.
+- Keep `keyboard_focus_changed` fail-closed. Global keyboard input requires the exact
+  process/PID and application path, frontmost proof, and focused-target proof immediately
+  before dispatch and immediately after every focus-changing action; never weaken the
+  frontmost requirement.
 - Use app-scoped leases by default. Use a session lease only for an intentional cross-app
   workflow whose foreground changes are part of the plan.
 - Keep hands off the shared keyboard and trackpad during synthetic input and tell the user

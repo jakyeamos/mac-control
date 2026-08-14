@@ -1945,6 +1945,7 @@ final class MacCtlCoreTests: XCTestCase {
             permissionContext: "test",
             keyboardAccessController: controller,
             keyboardDriveStore: KeyboardDriveStore(),
+            focusedElementInspector: ApplicationBoundFocusedElementInspector(),
             foregroundApplication: { foreground },
             resolveApplication: { _ in foreground },
             hasPostEventAccess: { true }
@@ -1989,6 +1990,7 @@ final class MacCtlCoreTests: XCTestCase {
             permissionContext: "test",
             keyboardAccessController: controller,
             keyboardDriveStore: KeyboardDriveStore(),
+            focusedElementInspector: ApplicationBoundFocusedElementInspector(),
             foregroundApplication: { foreground },
             resolveApplication: { _ in foreground },
             hasPostEventAccess: { true }
@@ -2009,6 +2011,57 @@ final class MacCtlCoreTests: XCTestCase {
         ))
         XCTAssertEqual(switched.status, .succeeded)
         XCTAssertEqual(sender.keys, ["tab", "tab"])
+    }
+
+    func testGlobalKeyboardIdentityRequiresExactProcessBundlePathAndFocusedTarget() {
+        let application = testApp(name: "Chrome", processID: 42)
+        let matching = testApp(name: "Chrome", processID: 42)
+        XCTAssertTrue(exactKeyboardApplicationIdentityMatches(application, matching))
+
+        let wrongProcess = AppInfo(
+            name: application.name,
+            bundleID: application.bundleID,
+            path: application.path,
+            isRunning: true,
+            processID: 43
+        )
+        XCTAssertFalse(exactKeyboardApplicationIdentityMatches(application, wrongProcess))
+
+        let wrongPath = AppInfo(
+            name: application.name,
+            bundleID: application.bundleID,
+            path: "/Applications/Chrome Copy.app",
+            isRunning: true,
+            processID: application.processID
+        )
+        XCTAssertFalse(exactKeyboardApplicationIdentityMatches(application, wrongPath))
+
+        let focused = FocusedElementSnapshot(
+            targetApplication: matching,
+            role: "AXButton",
+            subrole: "AXPushButton",
+            identifier: "fixture",
+            title: "Fixture"
+        )
+        XCTAssertTrue(exactKeyboardFocusedTargetMatches(application, focused))
+
+        let focusedOtherProcess = FocusedElementSnapshot(
+            targetApplication: wrongProcess,
+            role: focused.role,
+            subrole: focused.subrole,
+            identifier: focused.identifier,
+            title: focused.title
+        )
+        XCTAssertFalse(exactKeyboardFocusedTargetMatches(application, focusedOtherProcess))
+
+        let noProcess = AppInfo(
+            name: application.name,
+            bundleID: application.bundleID,
+            path: application.path,
+            isRunning: true,
+            processID: nil
+        )
+        XCTAssertFalse(exactKeyboardApplicationIdentityMatches(application, noProcess))
     }
 
     func testKeyboardServiceRedactsRawInputTokensAndAXValuesFromReceipts() throws {
@@ -2768,7 +2821,10 @@ final class MacCtlCoreTests: XCTestCase {
                 preferenceStore: TestKeyboardPreferenceStore(enabled: true)
             ),
             keyboardDriveStore: KeyboardDriveStore(),
-            focusedElementInspector: SequencedFocusedElementInspector([before, after, before, after]),
+            focusedElementInspector: SequencedFocusedElementInspector([
+                before, after, before, after,
+                before, after, before, after
+            ]),
             foregroundApplication: { app },
             resolveApplication: { _ in app },
             hasPostEventAccess: { true },
@@ -2929,7 +2985,10 @@ final class MacCtlCoreTests: XCTestCase {
                 eventSender: RecordingKeyboardEventSender(),
                 preferenceStore: TestKeyboardPreferenceStore(enabled: true)
             ),
-            focusedElementInspector: SequencedFocusedElementInspector([before, after, before, after]),
+            focusedElementInspector: SequencedFocusedElementInspector([
+                before, after, before, after,
+                before, after, before, after
+            ]),
             foregroundApplication: { app },
             resolveApplication: { _ in app },
             activateApplication: { _ in
@@ -3125,7 +3184,10 @@ final class MacCtlCoreTests: XCTestCase {
                 eventSender: RecordingKeyboardEventSender(),
                 preferenceStore: TestKeyboardPreferenceStore(enabled: true)
             ),
-            focusedElementInspector: SequencedFocusedElementInspector([before, after, before, after]),
+            focusedElementInspector: SequencedFocusedElementInspector([
+                before, after, before, after,
+                before, after, before, after
+            ]),
             foregroundApplication: { app },
             resolveApplication: { _ in app },
             activateApplication: { _ in
@@ -7873,6 +7935,18 @@ private final class TestFocusedElementInspector: FocusedElementInspecting {
             throw failure
         }
         return try XCTUnwrap(value)
+    }
+}
+
+private final class ApplicationBoundFocusedElementInspector: FocusedElementInspecting {
+    func focusedElementSnapshot(pid: pid_t, application: AppInfo) throws -> FocusedElementSnapshot {
+        FocusedElementSnapshot(
+            targetApplication: application,
+            role: "AXButton",
+            subrole: "AXPushButton",
+            identifier: "focused",
+            title: "Focused"
+        )
     }
 }
 

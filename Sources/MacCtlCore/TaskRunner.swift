@@ -160,17 +160,20 @@ public struct TaskActionExecutionReport: Codable, Equatable {
     public let route: String
     public let adapterID: String?
     public let targetFingerprint: String?
+    public let observation: AppAdapterObservation?
     public let sideEffectUncertain: Bool
 
     public init(
         route: String,
         adapterID: String? = nil,
         targetFingerprint: String? = nil,
+        observation: AppAdapterObservation? = nil,
         sideEffectUncertain: Bool = false
     ) {
         self.route = route
         self.adapterID = adapterID
         self.targetFingerprint = targetFingerprint
+        self.observation = observation
         self.sideEffectUncertain = sideEffectUncertain
     }
 }
@@ -944,6 +947,8 @@ public final class TaskRunner {
             case .targetUnavailable: return "target_unavailable"
             case .operationFailed: return "adapter_operation_failed"
             }
+        case is VSCodeDiagnosticsError:
+            return "vscode_diagnostics_blocked"
         case let error as ControlTargetInspectionError:
             switch error {
             case .applicationUnavailable: return "target_unavailable"
@@ -1002,6 +1007,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let keyboardAccessController: KeyboardAccessController
     private let semanticActionRouter: SemanticActionRouter
     private let adapterRegistry: AppAdapterRegistry
+    private let vscodeDiagnosticsReader: VSCodeDiagnosticsReading
     private let typedAppleScriptExecutor: TypedAppleScriptExecuting
     private let focusSessionExecutor: FocusSessionActionExecuting
     private let foregroundApplication: () -> AppInfo?
@@ -1031,6 +1037,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         semanticActionRouter: SemanticActionRouter,
         adapterRegistry: AppAdapterRegistry,
         foregroundApplication: @escaping () -> AppInfo?,
+        vscodeDiagnosticsReader: VSCodeDiagnosticsReading = FileVSCodeDiagnosticsReader(),
         typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor(),
         focusSessionExecutor: FocusSessionActionExecuting? = nil,
         searchFieldResolver: SearchFieldResolving? = nil,
@@ -1057,6 +1064,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.keyboardAccessController = keyboardAccessController
         self.semanticActionRouter = semanticActionRouter
         self.adapterRegistry = adapterRegistry
+        self.vscodeDiagnosticsReader = vscodeDiagnosticsReader
         self.typedAppleScriptExecutor = typedAppleScriptExecutor
         self.focusSessionExecutor = focusSessionExecutor
             ?? SystemFocusSessionActionExecutor(accessibilityController: accessibilityController)
@@ -1258,7 +1266,9 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 throw TaskActionExecutionError.unsupported("unsupported_type_recovery_route")
             }
             _ = try context.revalidateBeforeAction(includeTarget: true)
+            try requireGlobalKeyboardTarget(application: application)
             try inputController.type(text)
+            try requireGlobalKeyboardTarget(application: application)
             return report(route: "keyboard", application: application)
         case .search:
             return try executeSearch(action, context: context)
@@ -1376,6 +1386,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 throw TaskControlError.leaseRequired
             }
             _ = leaseToken
+            try requireGlobalKeyboardTarget(application: application)
             let result = try keyboardAccessController.sendRaw(
                 keys: [key],
                 targetApplication: application,
@@ -1383,6 +1394,10 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                 interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
                 beforeEach: { [context] _ in
                     _ = try context.revalidateBeforeAction(includeTarget: true)
+                    try self.requireGlobalKeyboardTarget(application: application)
+                },
+                afterEach: { [self, application] _ in
+                    try self.requireGlobalKeyboardTarget(application: application)
                 }
             )
             return TaskActionExecutionReport(
@@ -1505,6 +1520,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             throw TaskControlError.leaseRequired
         }
         _ = try context.revalidateBeforeAction(includeTarget: true)
+        try requireGlobalKeyboardTarget(application: application)
 
         do {
             try searchFieldResolver.requireUniqueSearchField(pid: pid, selector: selector)
@@ -1568,9 +1584,17 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
                     interKeyDelay: action.parameters["inter_key_ms"]?.doubleValue ?? 0,
                     beforeEach: { [context, application] _ in
                         _ = try context.revalidateBeforeAction(includeTarget: true)
+                        try self.requireGlobalKeyboardTarget(application: application)
                         let currentFocus = try self.readSearchFocus(application: application)
                         guard SearchActionContract.matches(selector: selector, focus: currentFocus) else {
                             throw TaskActionExecutionError.uncertain("search_focus_changed_before_clear")
+                        }
+                    },
+                    afterEach: { [self, application] _ in
+                        try self.requireGlobalKeyboardTarget(application: application)
+                        let currentFocus = try self.readSearchFocus(application: application)
+                        guard SearchActionContract.matches(selector: selector, focus: currentFocus) else {
+                            throw TaskActionExecutionError.uncertain("search_focus_changed_after_clear")
                         }
                     }
                 )
@@ -1588,12 +1612,14 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         guard SearchActionContract.matches(selector: selector, focus: currentFocus) else {
             throw TaskActionExecutionError.uncertain("search_focus_changed_before_type")
         }
+        try requireGlobalKeyboardTarget(application: application)
         do {
             try searchTextTyper.type(query)
         } catch {
             throw TaskActionExecutionError.uncertain("search_query_dispatch")
         }
         _ = try context.revalidateBeforeAction(includeTarget: true)
+        try requireGlobalKeyboardTarget(application: application)
         let finalFocus: FocusedElementSnapshot
         do {
             finalFocus = try readSearchFocus(application: application)
@@ -1611,13 +1637,48 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             throw TaskActionExecutionError.blocked("foreground_unavailable")
         }
         do {
-            return try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+            let focused = try focusedElementInspector.focusedElementSnapshot(pid: pid, application: application)
+            guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                throw TaskActionExecutionError.blocked("keyboard_focus_target_mismatch")
+            }
+            return focused
         } catch AccessibilityControllerError.permissionDenied {
             throw TaskActionExecutionError.permissionMissing("Accessibility")
+        } catch let error as TaskActionExecutionError {
+            throw error
         } catch AccessibilityControllerError.unreadableFocus {
             throw TaskActionExecutionError.blocked("focus_unreadable")
         } catch {
             throw TaskActionExecutionError.blocked("focus_observation_failed")
+        }
+    }
+
+    /// Global keyboard events have no target readback. Prove the exact
+    /// process is still frontmost and that its focused AX element is readable
+    /// immediately around every event. A missing or changing proof blocks;
+    /// it never falls back to an unscoped event or a blind retry.
+    private func requireGlobalKeyboardTarget(application: AppInfo) throws {
+        guard let expectedPID = application.processID,
+              let foreground = foregroundApplication(),
+              exactKeyboardApplicationIdentityMatches(application, foreground) else {
+            throw TaskActionExecutionError.blocked("keyboard_target_not_frontmost")
+        }
+        do {
+            let focused = try focusedElementInspector.focusedElementSnapshot(
+                pid: expectedPID,
+                application: application
+            )
+            guard exactKeyboardFocusedTargetMatches(application, focused) else {
+                throw TaskActionExecutionError.blocked("keyboard_focus_target_mismatch")
+            }
+        } catch AccessibilityControllerError.permissionDenied {
+            throw TaskActionExecutionError.permissionMissing("Accessibility")
+        } catch AccessibilityControllerError.unreadableFocus {
+            throw TaskActionExecutionError.blocked("keyboard_focus_unreadable")
+        } catch AccessibilityControllerError.applicationNotRunning {
+            throw TaskActionExecutionError.blocked("keyboard_target_not_running")
+        } catch {
+            throw TaskActionExecutionError.blocked("keyboard_focus_unavailable")
         }
     }
 
@@ -1740,6 +1801,44 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         let requestedRoute = try adapterRecoveryRoute(context, operation: operation)
         guard let manifest = adapterRegistry.manifest(adapterID: adapterID) else {
             throw AppAdapterError.unsupportedAdapter(adapterID)
+        }
+        if adapterID == "vscode", operationName == "diagnostics.summary" {
+            guard requestedRoute == nil || requestedRoute == .native else {
+                throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")
+            }
+            let fixtureID = try requiredParameter(action, key: "fixture_id")
+            let target = try vscodeDiagnosticsReader.target(fixtureID: fixtureID)
+            guard let application = appController.runningApplication(
+                bundleID: target.bundleID,
+                processID: target.processID
+            ) else {
+                throw VSCodeDiagnosticsError.identityMismatch
+            }
+            guard manifest.supportedBundleIdentifiers.contains(application.bundleID ?? "") else {
+                throw VSCodeDiagnosticsError.identityMismatch
+            }
+            let maxAge: TimeInterval
+            if let rawMaxAge = action.parameters["max_age_seconds"] {
+                guard let requestedMaxAge = rawMaxAge.doubleValue else {
+                    throw VSCodeDiagnosticsError.invalidMaxAge
+                }
+                maxAge = requestedMaxAge
+            } else {
+                maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
+            }
+            let observation = try vscodeDiagnosticsReader.read(
+                fixtureID: fixtureID,
+                application: application,
+                maxAge: maxAge
+            )
+            return AppAdapterActionResult(
+                adapterID: adapterID,
+                operation: operationName,
+                route: .native,
+                mutating: false,
+                targetFingerprint: ControlTargetFingerprints.make(application: application, focus: nil),
+                observation: observation
+            ).asTaskReport()
         }
         let applicationName = action.parameters["app"]?.stringValue
             ?? context.target?.application
@@ -2106,7 +2205,8 @@ private extension AppAdapterActionResult {
         TaskActionExecutionReport(
             route: route.rawValue,
             adapterID: adapterID,
-            targetFingerprint: targetFingerprint
+            targetFingerprint: targetFingerprint,
+            observation: observation
         )
     }
 }
