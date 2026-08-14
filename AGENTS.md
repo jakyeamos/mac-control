@@ -75,4 +75,8 @@ Read this router before repository work.
 - Preserve unrelated dirty work and use a disposable worktree for risky changes.
 - Keep credentials, secrets, deployments, merges, and destructive operations behind explicit approval.
 - Treat missing live GUI/device evidence as `blocked`, never as a reason to weaken a gate.
+- Treat source, packaged build, installed artifact, running process, and daemon
+  health as separate evidence layers. Read `installed.runtime_parity` before
+  claiming the installed daemon is current; rebuilding, installing, and
+  restarting remain separate lifecycle operations.
 - Validate behavior and record the evidence needed for the task handoff.

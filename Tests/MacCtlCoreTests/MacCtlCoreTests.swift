@@ -7373,7 +7373,13 @@ final class MacCtlCoreTests: XCTestCase {
             daemonError: nil,
             keyboardAccessStatus: keyboardStatus,
             taskCapabilities: taskCapabilities,
-            checkpointStoreStatus: checkpointStatus
+            checkpointStoreStatus: checkpointStatus,
+            installedRuntimeParity: InstalledRuntimeParityStatus(
+                state: "current",
+                message: "fixture parity current",
+                sourceRevision: String(repeating: "a", count: 40),
+                processID: 501
+            )
         )
         let report = ReleaseGate(maximumEvidenceAge: 100, now: { Date(timeIntervalSince1970: 10_000) })
             .evaluate(snapshot: snapshot)

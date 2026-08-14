@@ -21,10 +21,15 @@ swift test
 ~/.local/bin/macctl release check --json
 ```
 
-`release check` is read-only. It fails closed when launchd identity, daemon
-permissions, socket ownership, receipt storage, approval safety, Mac GUI
+`release check` is read-only. It fails closed when build/install/runtime parity,
+launchd identity, daemon permissions, socket ownership, receipt storage, approval safety, Mac GUI
 smokes are missing. It does not launch a workflow or alter a device to
 manufacture evidence.
+
+The `installed.runtime_parity` dimension reads the owner-only install and
+process manifests, checks the recorded PID against the active LaunchAgent, and
+hashes the installed executable. Rebuild, reinstall, and restart are distinct
+recoveries; the gate never performs any of them.
 
 The authorization-notice dimension additionally requires fresh source and installed-daemon
 evidence for the four `control.authorization.*` routes, safe-field redaction and limits,

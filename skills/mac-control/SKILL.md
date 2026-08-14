@@ -734,3 +734,10 @@ proves that outcomes, capability discovery,
   bounded batching, and daemon-executed route provenance are exposed. It does not prove that
   live Finder, browser, task-control, or menu-bar safety-item workflows have been exercised; those
   remain separate user-controlled evidence dimensions.
+
+Inspect `installed.runtime_parity` in that report before trusting daemon health
+as current-version evidence. `install_stale` requires a reviewed reinstall;
+`restart_required` means the installed artifact is newer than the active
+process; `not_running` means the PID/executable proof failed; and
+`unverifiable` means source or manifest provenance is insufficient. None of
+these read-only diagnoses authorizes rebuilding, installation, or restart.

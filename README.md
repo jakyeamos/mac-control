@@ -105,10 +105,18 @@ Useful read-only commands include:
 ```
 
 `macctl release check --json` is the Tier-1 machine-readable gate. It checks
-the packaged launchd identity, live daemon permissions, owner-only transport,
+the packaged launchd identity, installed/runtime artifact parity, live daemon permissions, owner-only transport,
 receipt storage/retention, fresh Mac GUI smoke receipts, and approval/fail-closed
 evidence. It does not run workflows as a side effect; missing live evidence is
 reported as `blocked`.
+
+`macctl install` writes an owner-only build/install identity manifest, and the
+daemon writes a separate owner-only process identity at startup. This lets the
+release gate and Pronto distinguish an unrebuilt package, an out-of-date
+installation, and an installed daemon that still needs a restart. Daemon health
+alone is never version parity. Set `MACCTL_SOURCE_REVISION` to the exact Git
+revision when installing a package outside its source checkout; an unavailable
+revision remains `unverifiable`.
 
 Release-relevant receipts are also projected into a bounded hidden archive
 under the receipt directory. The archive keeps only the newest proof for each
