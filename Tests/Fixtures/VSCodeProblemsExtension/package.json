@@ -1,0 +1,13 @@
+{
+  "name": "problems-fixture",
+  "displayName": "Mac Control Problems Fixture",
+  "publisher": "macctl",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js"
+}
