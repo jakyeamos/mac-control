@@ -163,6 +163,34 @@ def bundle_id_from_app(app_path: Path) -> str:
     return value if isinstance(value, str) and value else DEFAULT_BUNDLE_ID
 
 
+def app_executable_path(app_path: Path) -> Path | None:
+    """Return the bundle-declared VS Code executable, if it is safe and present."""
+    executable_names: list[str] = []
+    info_path = app_path / "Contents/Info.plist"
+    try:
+        import plistlib
+
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        declared = info.get("CFBundleExecutable")
+        if isinstance(declared, str) and declared and Path(declared).name == declared:
+            executable_names.append(declared)
+    except (OSError, ValueError, KeyError):
+        pass
+
+    # Older VS Code builds used Electron; current builds commonly use Code.
+    for fallback in ("Electron", "Code"):
+        if fallback not in executable_names:
+            executable_names.append(fallback)
+
+    executable_root = (app_path / "Contents/MacOS").resolve()
+    for name in executable_names:
+        candidate = (executable_root / name).resolve()
+        if executable_root in candidate.parents and candidate.is_file():
+            return candidate
+    return None
+
+
 def find_vscode_app(explicit: str | None) -> Path:
     candidates = []
     if explicit:
@@ -178,9 +206,12 @@ def find_vscode_app(explicit: str | None) -> Path:
         ]
     )
     for candidate in candidates:
-        if (candidate / "Contents/MacOS/Electron").is_file():
+        if app_executable_path(candidate) is not None:
             return candidate.resolve()
-    raise FixtureError("vscode_unavailable", "a Visual Studio Code app with Contents/MacOS/Electron was not found")
+    raise FixtureError(
+        "vscode_unavailable",
+        "a Visual Studio Code app with a bundle-declared Contents/MacOS executable was not found",
+    )
 
 
 def command_line(process_id: int) -> str | None:
@@ -194,6 +225,30 @@ def command_line(process_id: int) -> str | None:
         return None
     value = result.stdout.strip()
     return value or None
+
+
+def exact_process_id(descriptor_value: dict[str, Any]) -> int | None:
+    """Find the unique main process matching the fixture command-line identity."""
+    result = subprocess.run(
+        ["ps", "-ax", "-o", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    matches: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if not parts:
+            continue
+        try:
+            process_id = int(parts[0])
+        except ValueError:
+            continue
+        if process_is_exact(process_id, descriptor_value):
+            matches.append(process_id)
+    return matches[0] if len(matches) == 1 else None
 
 
 def process_is_exact(process_id: int | None, descriptor_value: dict[str, Any]) -> bool:
@@ -363,14 +418,16 @@ def launch_fixture(root: Path, fixture_id: str, app_path: str | None, wait_secon
         )
 
     app = find_vscode_app(app_path)
+    executable = app_executable_path(app)
+    if executable is None:
+        raise FixtureError("vscode_unavailable", "the selected VS Code bundle has no safe executable")
     bundle_id = bundle_id_from_app(app)
     if bundle_id not in {"com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"}:
         raise FixtureError("identity_mismatch", f"unsupported VS Code bundle identity: {bundle_id}")
     extension = Path(str(value["extension_path"])).resolve()
     workspace = Path(str(value["workspace_path"])).resolve()
     profile = Path(str(value["profile_path"])).resolve()
-    command = [
-        str(app / "Contents/MacOS/Electron"),
+    args = [
         "--new-window",
         f"--user-data-dir={profile}",
         f"--extensions-dir={directory / 'extensions'}",
@@ -395,35 +452,40 @@ def launch_fixture(root: Path, fixture_id: str, app_path: str | None, wait_secon
     env["MACCTL_VSCODE_FIXTURE_ROOT"] = str(root.expanduser().resolve())
     env["MACCTL_VSCODE_BUNDLE_ID"] = bundle_id
     try:
-        process = subprocess.Popen(command, cwd=str(directory), env=env)
+        process = subprocess.Popen(
+            ["open", "-n", "-a", str(app), "--args", *args],
+            cwd=str(directory),
+            env=env,
+        )
     except OSError as error:
         failed = dict(updated)
         failed["state"] = "blocked"
         failed["last_error"] = "vscode_launch_failed"
         write_json(descriptor_path(directory), failed)
         raise FixtureError("vscode_launch_failed", f"could not launch the isolated VS Code process: {error}") from error
-    updated["pid"] = process.pid
     write_json(descriptor_path(directory), updated | {"state": "launching"})
 
     deadline = time.monotonic() + max(0.5, min(wait_seconds, 120))
     while time.monotonic() < deadline:
         current = read_json(descriptor_path(directory))
-        exact = process_is_exact(process.pid, current)
+        exact_pid = exact_process_id(current)
+        exact = exact_pid is not None
         if exact and snapshot_ready(directory, fixture_id, bundle_id):
             ready = dict(current)
+            ready["pid"] = exact_pid
             ready["state"] = "ready"
             ready.pop("last_error", None)
             write_json(descriptor_path(directory), ready)
             return status_fixture(root, fixture_id)
-        if process.poll() is not None and not exact:
-            failed = dict(current)
-            failed["state"] = "blocked"
-            failed["last_error"] = "fixture_not_ready"
-            write_json(descriptor_path(directory), failed)
-            raise FixtureError("fixture_not_ready", "VS Code exited before its exact process and diagnostics snapshot were ready")
         time.sleep(0.25)
 
     failed = read_json(descriptor_path(directory))
+    # `open -n` returns before the app finishes starting. Preserve a uniquely
+    # matched exact PID on timeout so marker-bound cleanup can still terminate
+    # the disposable process without guessing from the launcher PID.
+    exact_pid = exact_process_id(failed)
+    if exact_pid is not None:
+        failed["pid"] = exact_pid
     failed["state"] = "blocked"
     failed["last_error"] = "fixture_not_ready"
     write_json(descriptor_path(directory), failed)

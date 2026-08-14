@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -20,6 +21,22 @@ class VSCodeFixtureTests(unittest.TestCase):
         self.assertTrue(fixture.is_valid_fixture_id("problems_fixture-1"))
         for value in ("../escape", "_leading", "-leading", "UPPER", "a/b", ""):
             self.assertFalse(fixture.is_valid_fixture_id(value))
+
+    def test_find_vscode_app_accepts_bundle_declared_code_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Visual Studio Code.app"
+            contents = app / "Contents"
+            executable = contents / "MacOS" / "Code"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"fixture executable")
+            with (contents / "Info.plist").open("wb") as stream:
+                plistlib.dump(
+                    {"CFBundleExecutable": "Code", "CFBundleIdentifier": fixture.DEFAULT_BUNDLE_ID},
+                    stream,
+                )
+
+            self.assertEqual(fixture.find_vscode_app(str(app)), app.resolve())
+            self.assertEqual(fixture.app_executable_path(app), executable.resolve())
 
     def test_snapshot_ready_accepts_redacted_fresh_positive_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
