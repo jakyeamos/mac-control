@@ -375,6 +375,40 @@ Exit gate:
 - Release eligibility and capability coverage are visible to the agent and to
   maintainers.
 
+## Backlog
+
+These items are intentionally unsequenced and do not expand the active Phase 1
+scope. Promote them only after their stated entry conditions are satisfied.
+
+### Phase 999.1 — Authenticated remote bridge (BACKLOG)
+
+**Goal:** Evaluate remote-agent and multi-device access through a separately
+deployed, explicitly authenticated bridge layered over Mac Control's owner-only
+local control plane.
+
+**Boundary:** Do not add a network listener to the Mac Control daemon or weaken
+the owner-only Unix-socket release gate. A future bridge must preserve local
+approval, audit, verification, and recovery semantics across the remote boundary.
+
+**Promote when:** A concrete remote workflow justifies the additional attack
+surface and there is an approved threat model covering authentication,
+authorization, transport security, replay protection, revocation, and failure
+recovery.
+
+### Phase 999.2 — Expand representative benchmark breadth (BACKLOG)
+
+**Goal:** Expand matched end-to-end benchmark coverage across representative app
+archetypes, task types, and provider fallbacks while retaining verified success
+and safety outcomes alongside latency.
+
+**Boundary:** Do not delay Phase 1 capability freshness and task-specific
+verification merely to add more timing samples, and do not launch dormant apps
+solely to improve coverage counts.
+
+**Promote when:** The Phase 1 exit gate is satisfied and the additional corpus
+targets a named evidence gap needed for Phase 2 warm-path, reliability, or
+provider-comparison decisions.
+
 ## Execution rules
 
 - Phase 0 is closed; Phase 1 is the only active phase.

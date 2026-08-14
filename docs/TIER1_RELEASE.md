@@ -29,8 +29,8 @@ manufacture evidence.
 The authorization-notice dimension additionally requires fresh source and installed-daemon
 evidence for the four `control.authorization.*` routes, safe-field redaction and limits,
 expiry/deduplication/bind/resolve behavior, owner-only transport peer capture, provenance
-downgrades on missing or mismatched identity, Control Center attention presentation, and
-notification deduplication. This is explanatory context only: the native macOS Allow/Deny
+downgrades on missing or mismatched identity. Authorization notices are CLI-only; general
+attention delivery belongs to the independent attention provider. This is explanatory context only: the native macOS Allow/Deny
 decision remains user-controlled, and an external unannounced dialog cannot be attributed by
 Mac Control in v1.
 
@@ -38,7 +38,7 @@ The release report also includes `agent.contract`. That check requires the
 provider-neutral outcome surface, capability discovery, bounded control batch,
 and daemon-executed route-benchmark provenance to be present in the live daemon
 capability report. Passing it proves contract exposure only; it does not replace
-the separate live GUI, task-control, keyboard, or menu-bar control-center evidence
+the separate live GUI, task-control, keyboard, or transient safety-item evidence
 dimensions below.
 
 `live.shortcut-control` is a separate gate. It requires owner-only binding
@@ -89,25 +89,23 @@ permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome
 and Notes workflows. Missing GUI permissions, capture, input, window discovery,
 or verification produces a blocked result.
 
-Menu-bar control-center approve/deny/expiry behavior and Caps Lock double-tap activation
-must be exercised by a user in the GUI session using the built-in
-`approval.smoke` workflow. That workflow waits for 0.2 seconds and performs no
-external input or account change, but is classified as sensitive to exercise
-the approval boundary. The release gate requires fresh receipts for:
+The menu-bar safety item must be exercised in the GUI session for visible active authority,
+Stop & Release, lifecycle drain, degraded health, and hidden-idle behavior. It never exposes
+approval or authorization state, and Caps Lock no longer opens it.
+
+The legacy `approval.smoke` workflow remains in the backend during its separate removal. The
+current installed release gate still expects the former Control Center approval receipts, so it
+must remain blocked until that gate is migrated or removed with the approval backend. Do not
+manufacture substitute GUI evidence. Backend diagnostics remain available through:
 
 ```sh
 ~/.local/bin/macctl workflow prepare approval.smoke --json
 ~/.local/bin/macctl workflow run approval.smoke --json
 ```
 
-The first command must be followed by a mouse-driven control-center approval and
-then a run with the returned token. A second prepare is denied in the control
-center. A third remains pending until its 300-second token expires and then gets
-an expiry attempt from the control center or daemon CLI. The tokenless run must
-be blocked. Approve and deny receipts identify `control_center` as their source;
-the expiry receipt may identify the control center or CLI because expiry is a
-backend state transition. Caps Lock opens the control center only while an
-approval is pending and never approves an operation.
+Exercise any remaining backend lifecycle only through its explicit CLI. The safety item is not
+an approval source and cannot satisfy receipts that require `control_center` provenance. The
+tokenless run must remain blocked while that backend exists.
 
 ## Keyboard-first evidence
 
@@ -291,6 +289,11 @@ allowlisted application-adapter manifests. A release candidate must show:
   redacted checkpoint;
 - fresh lease, permission, target, timeout, cancellation, and action-budget
   revalidation at each dispatch boundary;
+- for exact foreground key input, a launch-bound instance plus opaque window
+  binding, PID-specific AppKit and AX actuation that grants no authority,
+  exclusive lease ownership, independent frontmost-PID and AX
+  focused-window proof, exact-window postcondition readback, and an indeterminate
+  single-dispatch result for every post-dispatch race;
 - explicit fresh authority and a new approval for resume after interruption;
 - adapter capability and Automation-permission diagnostics, including an
   unsupported-operation block; and

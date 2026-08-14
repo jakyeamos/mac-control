@@ -2,11 +2,30 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "mac-control"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-11",
+  "last_reviewed": "2026-08-13",
   "surfaces": [
+    {
+      "id": "matrix-maintenance",
+      "scope": "local",
+      "path": ".agents/change-surface-matrix.json",
+      "owner": "repository-owner",
+      "condition": "A material feature, functionality, behavior, CLI/API, workflow, data, integration, security/privacy, or quality/release change is added or changed.",
+      "operations": ["add", "change", "remove"],
+      "validation": [
+        "Update this matrix in the same change with affected surfaces, contracts, documentation, tests, evidence, owners, and projections.",
+        "For a purely internal refactor or isolated fix with no matrix impact, record a reviewed no-impact reason in the same change record; omission is not an implicit no-impact decision."
+      ],
+      "status": "applicable"
+    },
     {"id": "swift-control-plane", "scope": "local", "path": "Sources/, Tests/, and scripts/", "owner": "repository-owner", "condition": "CLI, daemon, authority, action, or verification behavior changes", "operations": ["add", "change", "remove"], "validation": ["swift build", "swift test", "python3 scripts/check_environment_contract.py"], "status": "applicable"},
+    {"id": "transient-safety-status-item", "scope": "local", "path": "Sources/MacCtlCore/ApprovalHUD.swift, Sources/MacCtlCore/ControlCenter.swift, Sources/MacCtlDaemon/main.swift, Tests/MacCtlCoreTests/ControlCenterTests.swift, README.md, AGENTS.md, .agents/context/, and skills/mac-control/SKILL.md", "owner": "repository-owner", "condition": "Menu-bar visibility, active-authority safety controls, health/lifecycle presentation, attention ownership, or Accessibility identifiers change", "operations": ["change", "remove"], "validation": ["swift test --filter ControlCenterTests", "swift test", "direct installed GUI verification of hidden idle, visible active authority, Stop & Release, lifecycle drain, and degraded health"], "status": "applicable"},
     {"id": "installed-control-surface", "scope": "external", "path": "installed macctl, daemon, and projected mac-control skill", "owner": "installation-owner", "condition": "public command, protocol, install, lifecycle, or skill contract changes", "operations": ["add", "change", "remove"], "validation": ["python3 -m unittest discover -s Tests/SkillTests", "macctl release check --json"], "status": "applicable"},
     {"id": "ideal-state-consumers", "scope": "external", "path": ".mac-control/ideal-state.json, Quality Runner semantic source grounding, Pronto maturity display, and skills/mac-control/", "owner": "Mac Control, Quality Runner, and Pronto integration owners", "condition": "Ideal-state manifest schema, semantic claim, provider boundary, source-reference, score, or user-facing disposition changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter IdealStateTests", "uv run pytest -q tests/test_mac_control.py in Quality Runner", "Pronto mac_control_maturity tests and readback"], "status": "applicable"}
   ],
-  "unresolved_surfaces": []
+  "unresolved_surfaces": [],
+  "operation_evidence": {
+    "add": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift"]},
+    "change": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/MacCtlCoreTests.swift"]},
+    "remove": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ControlCenterTests.swift"]}
+  }
 }

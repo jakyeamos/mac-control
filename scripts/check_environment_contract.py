@@ -135,6 +135,8 @@ def _errors_for_mac_control_skill() -> list[str]:
         "keyboard_focus_changed",
         "lease_released",
         "result.verification.state",
+        "task-owned unique-bundle fixture",
+        "awaiting_manual_approval_or_startup",
     )
     missing = [marker for marker in required_skill_markers if marker not in skill]
     if missing:

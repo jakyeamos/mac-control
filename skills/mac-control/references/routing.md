@@ -12,6 +12,7 @@ task.
 | A browser DOM connector can identify and verify the page element | Browser DOM | Keep semantic web actions in the DOM. |
 | An ideal-state manifest claims web content through native Accessibility | Reject the manifest claim and use a browser connector | A native route observing browser chrome does not prove semantic control of rendered page content. |
 | A native app exposes a declared typed Mac Control adapter | Mac Control adapter | Use the narrow declared operation and its verification. |
+| One safe button press is uniquely addressable inside an exact non-frontmost native window and has a verifiable desired state | `action resolve` then one-shot `action run` | Preserve unrelated foreground focus while binding PID, instance, window, control, and postcondition; fail closed without replay. |
 | A task has a fresh measured candidate for this app/version/target | The eligible manifest candidate | Rank complete-action latency, p95 latency, then recoveries after all gates pass. |
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
@@ -38,6 +39,9 @@ task.
   for that visible focus transition.
 - Activate a known Save button in a native app: use semantic Accessibility with the button's
   stable role and title before sequential Tab navigation.
+- Press one identifier-addressable control in a known background window: use the action-intent
+  front door only when the exact PID/instance/window tuple and a same-window desired-state
+  selector are available; consume the short-lived resolution once and do not fall back.
 - Search a repeated native list when the redacted Accessibility tree exposes one unique
   `AXTextField`/`AXSearchField`: use the atomic `search` task/action and verify
   `search_field_focused`; selecting or opening a result is a separate declared step.
@@ -106,13 +110,19 @@ task.
 - If the user must remain hands-off across multiple actions or providers, start one explicit
   bounded `control hands-off begin --confirm` session before the run. Pass its opaque
   `session_id` to each native action or batch, heartbeat before the advertised interval, and
-  end it after the final verification. `Hands Off` is a persistent user cue; `Focusing` and
-  `Focused` without that session are only transient one-shot notices. Expiry, Stop & Release,
-  or shutdown clears the session.
+  end it after the final verification. `Hands Off` keeps the transient safety item visible for
+  the bounded session. One-shot focus changes are not presented there; use the independent
+  attention provider when a cooperative announcement is needed. Expiry, Stop & Release, or
+  shutdown clears the session.
 - `control.batch` is deliberately not a universal action ladder. It rejects semantic scroll,
   stops on the first unverified step, and always reports completed count and lease release.
 - Full Keyboard Access or a required TCC grant is missing: report `blocked` and the exact user
   action. Do not silently enable or bypass it.
+- A same-product VS Code test would collide with existing user windows: use the repository's
+  marker-bound unique-bundle fixture with isolated profile/extensions/workspace. Continue only
+  when fixture status is `ready`. If macOS reports `awaiting_manual_approval_or_startup`, require
+  the user's native first-open decision. If it reports `stopped_before_ready`, relaunch before
+  that user review; never approve it for them or fall back to another Code process.
 
 ## App archetypes and capability boundaries
 

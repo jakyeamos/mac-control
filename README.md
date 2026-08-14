@@ -18,6 +18,8 @@ swift test
 The built binaries are under `.build/`:
 
 ```sh
+swift run macctl --version
+swift run macctl version --json
 swift run macctl doctor --json
 swift run macctl capabilities --json
 swift run macctl app list --json
@@ -91,6 +93,7 @@ Privacy & Security settings.
 Useful read-only commands include:
 
 ```sh
+~/.local/bin/macctl --version
 ~/.local/bin/macctl doctor --json
 ~/.local/bin/macctl capabilities --json
 ~/.local/bin/macctl status --json
@@ -107,6 +110,14 @@ receipt storage/retention, fresh Mac GUI smoke receipts, and approval/fail-close
 evidence. It does not run workflows as a side effect; missing live evidence is
 reported as `blocked`.
 
+Release-relevant receipts are also projected into a bounded hidden archive
+under the receipt directory. The archive keeps only the newest proof for each
+required release dimension, so rolling diagnostic retention cannot evict the
+last valid release proof. Receipt and archive publication use a cross-process
+owner-only lock plus a `0600` temporary file, durable flush, and atomic rename;
+`release check` reads the union while ordinary receipt listing remains the
+newest 1,000 diagnostic records.
+
 Receipts are schema-versioned JSON records in
 `~/Library/Application Support/macctl/receipts/`. The daemon retains the
 newest 1,000 records, writes the directory with mode `0700` and files with
@@ -120,6 +131,30 @@ without retaining raw selector labels or application paths. Version 3 adds the
 requested focus policy, effective focus policy, route-selection reason, and any
 background-unavailable reason so an automatic foreground fallback is
 explainable without retaining user content.
+
+Version 4 adds joined cross-provider trace metadata for browser handoffs:
+opaque trace/span IDs, provider and provenance, digests of provider observation
+identifiers, foreground preservation, and millisecond timing fields. A trace
+contains a Mac Control-attested handoff observation and, after completion, an
+`orchestrator_declared` browser observation. It does not represent browser-owned
+attestation until the browser provider exposes such a receipt.
+
+Web-content handoffs include a short-lived, one-completion credential with
+idempotent retry for the identical completion.
+Keep that credential in memory and submit the bounded completion object only on
+stdin; never put it in arguments, shell history, environment variables, or a
+file. The CLI rejects trailing arguments and stdin payloads larger than 8 KiB.
+Mac Control persists only credential and bounded-completion digests and rejects
+raw URL, title, DOM, or page-content fields:
+
+```sh
+~/.local/bin/macctl receipts trace <trace-id> --json
+browser_completion_json | ~/.local/bin/macctl receipts trace-complete --stdin --json
+```
+
+The trace view reports `mac_routing_ms`, `handoff_to_completion_ms`, `total_ms`,
+and `focus_interruption_count`. These measure the orchestration boundary, not
+browser action latency alone.
 
 ## Authorization notices
 
@@ -143,19 +178,21 @@ source reference. Raw commands, arguments, prompts, passwords, tokens, private i
 environment values are rejected or omitted. `bind` records a process correlation after launch;
 it does not grant access or operate the native macOS prompt.
 
-The Control Center raises an attention state and may issue one deduplicated local notification
-when notification permission is already available. It shows the declared source beside the
-daemon-observed peer executable/signing identity and labels provenance as `ATTESTED`, `DECLARED`,
-or `UNVERIFIED`. `ATTESTED` means only that the declared helper correlated with the local socket
-peer; it is not a safety verdict or approval. There is deliberately no Allow/Deny control in
-Mac Control. A source can open only through a registered Codex opener; otherwise the reference
-is informational. An unannounced external dialog remains unverified in v1.
+Inspect notices with `control authorization list --json`. It reports the declared source beside
+the daemon-observed peer executable/signing identity and labels provenance as `ATTESTED`,
+`DECLARED`, or `UNVERIFIED`. `ATTESTED` means only that the declared helper correlated with the
+local socket peer; it is not a safety verdict or approval. The menu-bar safety item does not
+present authorization notices or open source references. General attention delivery belongs to
+the independent attention provider. An unannounced external dialog remains unverified in v1.
 
-The native Control Center publishes stable Accessibility identifiers for semantic inspection:
-`macctl.control-center.status`, `macctl.approval.window`, `macctl.control-center.health`, and
-`macctl.approval.count`. Exact approval buttons append the immutable operation ID to
-`macctl.approval.approve.` or `macctl.approval.deny.`. The operation ID still binds the private
-token lookup; the Accessibility identifier exposes no token.
+The transient native safety item publishes stable Accessibility identifiers for semantic
+inspection: `macctl.control-safety.status`, `macctl.control-safety.window`, and
+`macctl.control-safety.health`. Active checkpointed tasks also publish `macctl.task.progress`,
+`macctl.task.progress.count`, and one redacted `macctl.task.progress.<step-id>` row per step.
+Rows show only plan-derived labels and the states `Pending`, `Running`, `Verified`, or `Stopped`;
+targets, selectors, inputs, and output stay out of the snapshot. The item disappears when active
+authority ends; use CLI status and receipts for completed task history. It remains hidden for
+idle, pending-approval, authorization-notice, and one-shot focus states.
 
 ## Safety boundary
 
@@ -220,17 +257,14 @@ the process arguments:
 secret-producing-command | ~/.local/bin/macctl workflow prepare my.workflow --ephemeral-stdin
 ```
 
-The stdin body must be a JSON object whose values are strings. The menu-bar
-control center commits the visible approval without executing the plan. Run the
-exact prepared workflow afterward with its approval token; the token is consumed
-at first dispatch, and ephemeral input is never returned by the daemon or
-written to its log.
+The stdin body must be a JSON object whose values are strings. The transient menu-bar safety
+item does not present or commit approvals. While the legacy approval backend remains during its
+separate removal, use its explicit CLI lifecycle; the token is consumed at first dispatch, and
+ephemeral input is never returned by the daemon or written to its log.
 
-When a foreground-bound test or action is about to move the active app, the menu-bar pill turns
-light blue and says `Focusing`; once the handoff is observed it says `Focused` and names the
-target in its tooltip and accessibility label. Those are brief one-shot notices. For an agent run
-that spans multiple native actions or a Computer Use handoff, explicitly start one bounded
-hands-off session so the pill can truthfully cover the entire run:
+The menu-bar item does not announce one-shot focus changes. For an agent run that spans multiple
+native actions or a Computer Use handoff, explicitly start one bounded hands-off session so the
+safety item can truthfully cover the entire run:
 
 ```sh
 ~/.local/bin/macctl control hands-off begin --provider hybrid \
@@ -242,19 +276,16 @@ hands-off session so the pill can truthfully cover the entire run:
 ```
 
 Pass the returned opaque session ID to each native action or batch, and heartbeat before the
-reported interval. While active, the pill says `Hands Off` and the Control Center explicitly tells
+reported interval. While active, the pill says `Hands Off` and the safety popover explicitly tells
 the user not to use the keyboard or trackpad; expiry, Stop & Release, or daemon shutdown clears it.
 The session is caller-owned and never inferred from an individual action. `Frozen` remains the
 higher-salience state when physical keyboard suppression is active.
 
-The built-in `approval.smoke` workflow is the release-evidence path for this
-boundary. It only waits for 0.2 seconds, performs no external input, and is
-classified as sensitive solely so the approval lifecycle can be exercised
-without changing an app, device, account, or document. The Tier-1 gate accepts
-fresh control-center approve and deny receipts, a fresh expiry receipt from the
-control center or daemon CLI, and a direct fail-closed run without a token.
-Expiry is a backend state transition; the pending approval must remain untouched
-until the token expires.
+The legacy `approval.smoke` workflow remains a backend release-evidence path while approval
+removal is completed separately. It does not use the safety item. The existing installed release
+gate still expects its former Control Center receipts and therefore remains blocked until that
+gate is migrated or removed with the approval backend; source tests for the safety item do not
+substitute for that live evidence.
 
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
@@ -669,6 +700,15 @@ assert connector health, tab identity, or DOM verification; the receiving
 browser provider must refresh and verify those facts.
 The CLI resolves this branch locally, so a pre-v5 daemon cannot silently ignore
 the new field and route the request through foreground Mac control.
+When a current daemon is available, the same local branch opens an owner-only
+joined trace without sending the native mutation to the daemon. The handoff
+returns the trace context needed for browser execution; after DOM readback, the
+orchestrator submits one bounded completion observation. Identical completion
+retries are idempotent, mismatched replays fail closed, and expired credentials
+cannot complete the trace.
+At this boundary the common `Chrome` CLI alias resolves to the installed
+`Google Chrome` application identity; browser-provider tab and DOM identity
+still require fresh verification by the receiving provider.
 
 App overlays may declare an `advertisedCapabilities` list backed by a public
 in-app accessibility, menu, or help disclosure. Discord currently declares
@@ -743,6 +783,15 @@ until task-specific evidence resolves the ambiguity. A role-only
 `AXScrollArea` that exposes no directional AX scroll action is also kept as a
 candidate; an incidental `AXScrollToVisible` action on a descendant does not
 promote semantic scrolling.
+
+When a normal fast probe observes an already-running native app whose broad
+profile is missing or stale, it may schedule that same bounded read-only audit
+on a serial utility queue after the response path. `auditOpportunity` reports
+`scheduled`, `in_progress`, `satisfied`, `not_observed`, or `not_applicable`.
+This opportunity never launches an app, activates it, dispatches input, handles
+`web_content`, or turns audit evidence into action authority. Duplicate work for
+the same app/version/provider context is coalesced, and a later normal probe may
+retry if the app closes before observation.
 A batch holds one bounded app lease, revalidates
 every step, stops on an unverified step, and releases the lease. Scroll is
 intentionally kept on `control perform` so a provider handoff remains explicit.
@@ -768,6 +817,159 @@ without reading AX values or private content:
 ~/.local/bin/macctl accessibility tree --app "System Settings" --json
 ~/.local/bin/macctl accessibility audit --app "System Settings" \
   --manifest ./accessibility-manifest.json --json
+```
+
+When more than one GUI process has the same app identity, discover the live
+instances and bind inspection to one process before reading its windows or
+Accessibility tree:
+
+```sh
+~/.local/bin/macctl app instances --app "Code" --json
+~/.local/bin/macctl window list --app "Code" \
+  --process-id 12345 --instance-ref "$INSTANCE_REF" --json
+~/.local/bin/macctl accessibility tree --app "Code" \
+  --process-id 12345 --instance-ref "$INSTANCE_REF" \
+  --window-ref "$WINDOW_REF" --json
+```
+
+`process_id`, `instance_ref`, and `window_ref` are conjunctive. A missing,
+restarted, reused, or ambiguous target fails closed and never redirects to
+another process or its focused window. Discovery is read-only: it does not
+activate, raise, close, move, or otherwise mutate any window. Window references
+are opaque, title-free Accessibility identity digests; refresh the catalog if a
+window changes identity.
+
+### Exact zero-focus action intents
+
+For one safe semantic button press in a non-frontmost native window, use the
+agent action front door. It is deliberately separate from app-level
+`control perform` and from foreground keyboard tasks:
+
+```sh
+~/.local/bin/macctl action resolve --intent-stdin --json <<'JSON'
+{
+  "schema_version": 1,
+  "action": "press",
+  "focus_policy": "background",
+  "foreground_budget": 0,
+  "risk": "safe",
+  "verification_timeout": 1,
+  "target": {
+    "application": "com.example.fixture",
+    "process_id": 12345,
+    "instance_ref": "INSTANCE_REF",
+    "window_ref": "WINDOW_REF",
+    "selector": {"role": "AXButton", "identifier": "run-action"}
+  },
+  "desired_state": {
+    "selector": {
+      "role": "AXStaticText",
+      "identifier": "action-status",
+      "contains_text": "Completed"
+    },
+    "exists": true
+  }
+}
+JSON
+~/.local/bin/macctl action run action_RESOLUTION_ID --json
+```
+
+Resolve reads fresh process, window, control, foreground, and desired-state
+identity, then returns an opaque one-shot resolution that expires within 30
+seconds. Run consumes it before dispatch, re-resolves the same exact target,
+performs one window-scoped `AXPress`, and reports success only when fresh
+Accessibility readback observes the desired state and the unrelated foreground
+PID has not changed. The surface supports no activation, key or pointer input,
+arbitrary AX action, sensitive/destructive risk, persistent AX handle, replay,
+or broader fallback. Duplicate controls, stale or missing identity, PID reuse,
+window events, focus theft, and unverifiable state all fail closed.
+An AX server can return a non-success status after accepting a press. Mac Control
+never retries that indeterminate dispatch: it reports
+`indeterminate_but_verified` only when the declared desired state is observed;
+otherwise the consumed resolution ends as `dispatch_indeterminate`.
+
+App-level activation and AX window raising still do not independently prove
+foreground input ownership, so `control perform` remains unsupported for an
+exact target. Use the action front door only for its narrow background press
+contract.
+
+Exact keyboard mutation is a separate approved foreground `task.run` key step.
+Its target must include all three conjunctive fields: `process_id`, the
+launch-bound `instance_ref`, and the opaque `window_ref`. The daemon re-resolves
+the instance, acquires the exclusive task keyboard lease, requests activation
+through the exact `NSRunningApplication` PID, and raises only AX objects created
+for that PID. Neither activation mechanism is treated as proof. Input remains blocked until both
+NSWorkspace reports that exact PID as frontmost and AX reports the requested
+window digest as that process's focused window. The step must be `sensitive`,
+use strict single-attempt recovery, and declare an exact-window
+`element_exists` postcondition. It receives the distinct `exact_foreground`
+input route. Missing or changed identity blocks before input; any detected race
+after input is indeterminate and is never retried. Click, type, scroll, adapter,
+background, and application-level fallbacks are not permitted.
+Postcondition observation reuses the lease-bound application PID and resolves
+the selector only inside the bound `window_ref`; it never re-resolves the app
+name or widens to another process or window. `element_exists` is existential:
+one or more matching descendants inside that unique window pass. Ambiguous
+window identity, disappearance, or a bounded search that ends without finding
+a match still fail closed. Mutation selectors continue to require uniqueness.
+The read-only postcondition oracle polls within the declared step timeout so
+asynchronously published Accessibility state can settle. Polling never
+redispatches the action, and every observation retains the exact instance,
+window, foreground, and lease checks.
+
+For same-product acceptance tests, create a task-owned VS Code fixture with a
+different bundle identity instead of targeting an existing `Code` process:
+
+```sh
+FIXTURE_ROOT=/private/tmp/macctl-vscode-fixture-quality-lens-c1
+python3 scripts/vscode_fixture.py build \
+  --root "$FIXTURE_ROOT" --fixture-id quality-lens-c1
+python3 scripts/vscode_fixture.py launch \
+  --root "$FIXTURE_ROOT" \
+  --workspace "$PWD/Tests/Fixtures/VSCodeProblemsWorkspace" \
+  --extension "$PWD/Tests/Fixtures/VSCodeProblemsExtension"
+python3 scripts/vscode_fixture.py status --root "$FIXTURE_ROOT"
+```
+
+The builder requires one valid local code-signing identity by default and rewrites
+only the copied outer bundle identifier. It preserves the source product name
+because Electron uses `CFBundleName` to locate its unchanged helper-app names;
+the fixture app filename and bundle identifier provide the unique identity. It
+then signs the copied Electron closure
+inside-out, including Mach-O libraries below framework `Libraries` directories
+that deprecated `codesign --deep` discovery can miss. Before launch it verifies
+every copied code object and requires one Team ID across the closure, preventing
+a Hardened Runtime abort from a source-signed library such as `libffmpeg.dylib`.
+The legacy `--repair-invalid-nested-signatures` option remains accepted but is no
+longer required; closure repair is unconditional and never changes the source app.
+Cross-filesystem copies require `--allow-full-copy` so a large storage expansion
+is never implicit. `--ad-hoc-sign` is a local probe, not equivalent release
+evidence.
+
+If a stopped, marker-owned fixture was created by the older deep-signing path,
+repair it in place with the same signing identity before relaunching:
+
+```sh
+python3 scripts/vscode_fixture.py repair-signatures --root "$FIXTURE_ROOT"
+```
+
+Repair fails closed if the fixture is running, an unrecorded fixture process
+exists, or the resolved signing identity differs from the marker-bound original.
+
+The first launch of a modified, non-notarized fixture may stop at macOS code
+evaluation. `status` reports `awaiting_manual_approval_or_startup` while that
+launch is live, or `stopped_before_ready` with
+`next_action=relaunch_and_review_native_approval` if it exits first. No exact
+input is allowed in either state. The user must review and approve the native
+first-open dialog themselves; an agent must never click it, weaken Gatekeeper,
+or redirect to an existing Code window. Continue only after `status` reports
+`ready`, then discover the unique bundle ID with `app instances`, bind its PID,
+`instance_ref`, and `window_ref`, and use the normal exact foreground
+`task.run` contract. Stop and remove only the marked fixture when finished:
+
+```sh
+python3 scripts/vscode_fixture.py stop --root "$FIXTURE_ROOT"
+python3 scripts/vscode_fixture.py clean --root "$FIXTURE_ROOT"
 ```
 
 ### Mac Control ideal-state audits
@@ -875,12 +1077,98 @@ behavior, daemon receipts prove lease/input/redaction events, and the manual
  GUI run proves the current Mac actually responded. Browser DOM automation is
  outside `mac-control`.
 
+## Native window placement
+
+Mac Control includes a Rectangle-independent native baseline for placing the
+focused window on an explicitly selected display. List live Core Graphics
+display IDs and the named layouts before mutating anything:
+
+```sh
+~/.local/bin/macctl window displays --json
+~/.local/bin/macctl window list --app "TextEdit" --json
+~/.local/bin/macctl window inspect --app "TextEdit" --json
+~/.local/bin/macctl window place --app "TextEdit" --window focused \
+  --display-id 42 --layout right-half --confirm --json
+~/.local/bin/macctl window restore --restore-token "$RESTORE_TOKEN" --confirm --json
+```
+
+Layouts are `maximize`, `center`, horizontal and vertical halves, horizontal
+thirds and two-thirds, and four quarters. Coordinates are not accepted from
+the caller. The daemon activates the named app, binds the currently focused
+window by a redacted Accessibility identity digest, resolves the display again,
+dispatches position and size once, then reads the exact window frame and
+destination display back. A missing display, ambiguous window identity,
+unsupported/full-screen window, focus/process change, or unavailable readback
+fails closed without replay.
+
+Successful placement returns a five-minute, single-use restore token bound to
+the same process, window identity, original frame, and original display. Restore
+fails rather than redirecting if the process has relaunched or the original
+display disconnected. Rectangle, Loop, and other window managers are not
+required and are not invoked by this surface.
+
 ## Checkpointed task control
 
 For multi-step work, use `task.*` with a structured plan. A task plan names
 typed actions, target identity, preconditions, postconditions, risk,
 approval reason, timeout, and its declared recovery policy. It is not free-form
 task text and it cannot invoke arbitrary shell commands or AppleScript/JXA:
+
+The bounded showcase composer previews the exact synthetic research-session
+target without claiming that its effects are executable. It returns the same
+ordered targets, effects, rollback notes, verification requirements, and
+approval digest for the same supported request, connected display ID, and
+named layout. List the current display IDs and allowlisted layouts first:
+
+```sh
+~/.local/bin/macctl task displays --json
+```
+
+Display IDs are explicit plan-bound targets; screen order and `NSScreen.main`
+are not selectors. A display that disconnects before arrangement blocks that
+step instead of falling back to another screen. `balanced` gives both windows
+equal width, while `brief-primary` gives the brief sixty percent of the usable
+width. The same display can therefore carry independent named plans:
+
+```sh
+~/.local/bin/macctl task compose focus-session \
+  --display-id 42 --layout balanced \
+  --request "Prepare my research session" --json
+```
+
+The preview reports `executable=false` and names its remaining implementation
+gaps because it is a claim-bound concept surface, not installed proof. The
+source build can also emit the exact executable candidate for inspection:
+
+```sh
+~/.local/bin/macctl task compose focus-session \
+  --display-id 42 --layout balanced \
+  --request "Prepare my research session" --plan --json
+```
+
+That candidate uses three product-owned allowlisted operations. They accept no
+caller-provided path, content, application, script, or frame. Each step is
+strict and passes only after an independent post-dispatch check confirms the
+fixture document in its expected app or reads both window frames back. A live
+`AXDocument` URL is authoritative; when an app omits it, the observer requires
+exact in-memory digest equality with the product-owned public fixture filename,
+in addition to the fixture-content digest and visible focused window. Treat
+the candidate as source-only until the exact packaged daemon passes the live
+positive, partial-failure, and stale-state paths.
+
+The source verification contract produces one plan-bound record for the brief,
+one for the scratchpad, and one for the two-window layout. It accepts only
+post-dispatch fixture and Accessibility observations; action return values are
+not a verification source. Receipts retain bundle IDs, fixture/window digests,
+and bounded frames, never document contents, visible titles, or file paths.
+Because app-open completion can precede Accessibility window publication, the
+observer polls that read-only postcondition for at most two seconds; it never
+redispatches the open operation during that wait.
+Verification and layout resolve the unique matching fixture across every
+visible window in the expected app, so repeated demos do not depend on which
+window happens to be focused. The layout observer separately resolves the
+approved display ID from the live connected set and verifies the approved
+layout name, so display enumeration changes cannot redirect the arrangement.
 
 ```sh
 cat plan.json | ~/.local/bin/macctl task prepare --plan-stdin --json
@@ -918,6 +1206,14 @@ system-wide virtual HID device, and it does not create multiple macOS first
 responders or make task execution parallel. Private text is supplied through
 owner-only stdin and is used in memory only.
 
+An exact process/window key step is a narrow foreground task route. Put
+`process_id`, `instance_ref`, and `window_ref` in every input
+step's `target`; do not mix exact and application-level inputs. Exact plans
+support key actions only, require `risk: "sensitive"`, a non-empty
+`approval_reason`, `recovery: {"mode":"strict","max_attempts":1}`, and at
+least one Accessibility-addressed `element_exists` postcondition. The returned
+input channel reports `exact_foreground` plus the bound opaque references.
+
 Checkpoints are separate from receipts, atomic, owner-only, retention-bounded,
 and redacted. They contain task and step identity, hashes, route, attempt
 counts, timestamps, lifecycle state, and redacted verification status; they do
@@ -931,6 +1227,12 @@ sensitive result becomes `indeterminate` and is never retried automatically.
 After interruption or daemon restart, automatic resume is disabled. Supply the
 original plan again, obtain a fresh lease and permission/target validation,
 prepare and approve the remaining checkpointed plan, then call `task.resume`.
+The service preflight validates that approval against the remaining plan while
+the runner separately verifies the original full-plan digest and current
+checkpoint index. `task.run` is only for a newly prepared task and must not be
+used to continue a partial checkpoint.
+An `expired` checkpoint is terminal because its plan-wide deadline has elapsed;
+start a versioned new task identity rather than resetting that deadline.
 No fallback route is invented after an action may already have caused an
 external side effect. `task.status` and `task.cancel` remain available without
 input authority; cancellation is cooperative and is checked before each
@@ -977,15 +1279,12 @@ The approval-evidence path is:
 ~/.local/bin/macctl workflow prepare approval.smoke --json
 ```
 
-Use the menu-bar control center to approve one prepared plan and deny a second.
-Approval only commits authority; run the approved workflow separately with its
-token. For expiry, leave a third approval untouched until its 300-second token
-expires, then attempt Approve from the control center or run
-`macctl approval approve <token>` and confirm the result is `approval_expired`.
-Finally run
+The safety item does not expose this pending plan. While the legacy backend remains, its state
+can be exercised only through the explicit CLI. For expiry, leave an approval untouched until
+its 300-second token expires, then run `macctl approval approve <token>` and confirm the result
+is `approval_expired`. Finally run
 `~/.local/bin/macctl workflow run approval.smoke --json` without a token; it
-must be blocked. Double-tapping Caps Lock opens the control center only while an
-approval is pending; it never approves a plan or changes the Caps Lock state.
+must be blocked. Caps Lock no longer opens Mac Control UI.
 
 The project does not modify AIOS or career-ops. Career Ops can invoke this
 standalone control plane when a local macOS interaction is required.

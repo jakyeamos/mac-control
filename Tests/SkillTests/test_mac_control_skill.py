@@ -69,6 +69,15 @@ class MacControlSkillTests(unittest.TestCase):
             "browser connector select the tab and read back",
             "Tab-group title",
             "menu item's enabled state as the postcondition",
+            "task-owned unique-bundle fixture",
+            "awaiting_manual_approval_or_startup",
+            "Never click that approval",
+            "`action resolve --intent-stdin`",
+            "`action run`",
+            "`foreground_budget=0`",
+            "`indeterminate_but_verified`",
+            "`dispatch_indeterminate`",
+            "Never replay the resolution",
         ):
             self.assertIn(marker, text)
 
@@ -124,6 +133,8 @@ class MacControlSkillTests(unittest.TestCase):
             "classify it as contextual",
             "focused `Tab-group title`",
             "menu state unchanged",
+            "marker-bound unique-bundle fixture",
+            "`action resolve` then one-shot `action run`",
         ):
             self.assertIn(marker, text)
 
