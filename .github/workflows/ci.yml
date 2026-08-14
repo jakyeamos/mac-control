@@ -1,0 +1,58 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-control-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-gates:
+    name: Swift, contracts, and coverage
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Record toolchain
+        run: |
+          swift --version
+          python3 --version
+          xcodebuild -version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Test with Swift coverage
+        run: swift test --enable-code-coverage
+
+      - name: Test benchmark accounting
+        run: python3 -m unittest discover -s Tests/BenchmarkTests
+
+      - name: Test distributable skill contract
+        run: python3 -m unittest discover -s Tests/SkillTests
+
+      - name: Check repository environment contract
+        run: python3 scripts/check_environment_contract.py
+
+      - name: Export and enforce coverage
+        run: ./scripts/test-with-coverage.sh
+
+      - name: Clarify live release boundary
+        if: always()
+        run: |
+          echo "CI validates source, tests, contracts, and coverage only." >> "$GITHUB_STEP_SUMMARY"
+          echo "TCC permissions, the installed LaunchAgent identity, and live GUI/device release evidence remain owner-controlled local gates." >> "$GITHUB_STEP_SUMMARY"
