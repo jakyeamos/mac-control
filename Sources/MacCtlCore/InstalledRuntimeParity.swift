@@ -147,9 +147,6 @@ public enum InstalledRuntimeParity {
               validDigest(install.installedArtifactSHA256) else {
             return .init(state: "unverifiable", message: "Installed build identity is missing or invalid")
         }
-        guard install.builtArtifactSHA256 == install.installedArtifactSHA256 else {
-            return .init(state: "install_stale", message: "Installed daemon differs from the packaged build", sourceRevision: install.sourceRevision)
-        }
         guard let processData = try? Data(contentsOf: processManifestURL),
               let process = try? JSONCodec.decode(InstalledRuntimeProcessManifest.self, from: processData),
               process.schemaVersion == processSchema,
@@ -167,7 +164,12 @@ public enum InstalledRuntimeParity {
         guard (try? artifactSHA256(at: expectedExecutable)) == install.installedArtifactSHA256 else {
             return .init(state: "install_stale", message: "Live installed daemon differs from its recorded identity", sourceRevision: install.sourceRevision, processID: process.processID)
         }
-        return .init(state: "current", message: "Packaged, installed, and running daemon identities match", sourceRevision: install.sourceRevision, processID: process.processID)
+        return .init(
+            state: "current",
+            message: "Packaged provenance is recorded and installed and running daemon identities match",
+            sourceRevision: install.sourceRevision,
+            processID: process.processID
+        )
     }
 
     private static func validDigest(_ value: String) -> Bool {

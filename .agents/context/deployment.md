@@ -29,6 +29,10 @@ Installation publishes `~/.local/share/macctl/runtime-parity-install.json`
 after codesigning and replacing the daemon bundle. Daemon startup publishes
 `~/Library/Application Support/macctl/runtime-parity-process.json`; shutdown
 removes only the manifest owned by that PID. Both are atomic owner-only files.
+The install manifest records both pre-signing package provenance and the
+post-signing installed digest. Because signing changes executable bytes, live
+parity requires the process and installed executable to match the post-signing
+digest; it does not require that digest to equal the pre-signing digest.
 The repository's `.pronto/installed-runtime-parity.json` binds these manifests
 to the installed executable. A changed install with an older active process is
 `restart_required`; missing source provenance is `unverifiable`. When installing

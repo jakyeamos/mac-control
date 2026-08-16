@@ -11,7 +11,7 @@ final class InstalledRuntimeParityTests: XCTestCase {
         return url
     }
 
-    func testCurrentRequiresPackagedInstalledAndRunningDigestsToMatch() throws {
+    func testCurrentRequiresInstalledAndRunningDigestsToMatch() throws {
         let root = try temporaryDirectory()
         let executable = root.appendingPathComponent("macctld")
         let installURL = root.appendingPathComponent("install.json")
@@ -40,6 +40,41 @@ final class InstalledRuntimeParityTests: XCTestCase {
             processProbe: { $0 == 42 }
         )
         XCTAssertEqual(status.state, "current")
+    }
+
+    func testCurrentAllowsCodeSigningToChangeInstalledArtifactDigest() throws {
+        let root = try temporaryDirectory()
+        let executable = root.appendingPathComponent("macctld")
+        let installURL = root.appendingPathComponent("install.json")
+        let processURL = root.appendingPathComponent("process.json")
+        try Data("signed-daemon".utf8).write(to: executable)
+        let installedDigest = try InstalledRuntimeParity.artifactSHA256(at: executable)
+        let packagedExecutable = root.appendingPathComponent("unsigned-macctld")
+        try Data("unsigned-daemon".utf8).write(to: packagedExecutable)
+        let packagedDigest = try InstalledRuntimeParity.artifactSHA256(at: packagedExecutable)
+        let revision = String(repeating: "e", count: 40)
+        try JSONCodec.encode(InstalledRuntimeBuildManifest(
+            sourceRevision: revision,
+            builtArtifactSHA256: packagedDigest,
+            installedArtifactSHA256: installedDigest
+        )).write(to: installURL)
+        try JSONCodec.encode(InstalledRuntimeProcessManifest(
+            sourceRevision: revision,
+            runningArtifactSHA256: installedDigest,
+            processID: 42
+        )).write(to: processURL)
+
+        let status = InstalledRuntimeParity.evaluate(
+            installManifestURL: installURL,
+            processManifestURL: processURL,
+            expectedExecutable: executable,
+            expectedProcessID: 42,
+            processProbe: { $0 == 42 }
+        )
+
+        XCTAssertEqual(status.state, "current")
+        XCTAssertEqual(status.sourceRevision, revision)
+        XCTAssertEqual(status.processID, 42)
     }
 
     func testOldRunningDigestRequiresRestart() throws {

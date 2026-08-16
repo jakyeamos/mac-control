@@ -118,6 +118,11 @@ alone is never version parity. Set `MACCTL_SOURCE_REVISION` to the exact Git
 revision when installing a package outside its source checkout; an unavailable
 revision remains `unverifiable`.
 
+The manifest retains both the pre-signing packaged digest and the installed
+signed digest. Code signing is expected to change the executable bytes, so the
+live parity gate binds the running process and on-disk executable to the signed
+installed digest while retaining the packaged digest as install provenance.
+
 Release-relevant receipts are also projected into a bounded hidden archive
 under the receipt directory. The archive keeps only the newest proof for each
 required release dimension, so rolling diagnostic retention cannot evict the
