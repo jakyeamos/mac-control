@@ -56,6 +56,15 @@ performance evidence. Do not prefer universal AX scrolling, Command-K, serial Ta
 or visual fallback merely to improve a static score; live route evidence must select and
 measure the provider-natural action.
 
+When a local sibling provider needs the same human decision before its own sensitive plan, it may
+use Mac Control's `approval.external.prepare`, `approval.external.status`, and
+`approval.external.consume` daemon methods. Accept only bounded provider identity, provider
+instance, plan ID, exact SHA-256 plan digest, summary, and risk. Review pending records through
+the owner-only `macctl approval list|approve|deny` lifecycle; never return or forward the private
+approval token to the sibling provider. Consumption must repeat the exact binding and is
+single-use. Denial, expiry, mismatch, and replay are terminal. The transient menu-bar safety item
+does not present approvals, and an unavailable broker does not authorize the provider action.
+
 Visual and coordinate candidates require explicit task-manifest opt-in. Only a declared
 fallback may run after a pre-action target-not-found result. Stop on ambiguity, possible side
 effects, action failure, or failed verification. Read [references/routing.md](references/routing.md)

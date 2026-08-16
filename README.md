@@ -287,7 +287,7 @@ gate still expects its former Control Center receipts and therefore remains bloc
 gate is migrated or removed with the approval backend; source tests for the safety item do not
 substitute for that live evidence.
 
-Local providers may route the same human decision through the menu-bar control
+Local providers may route the same human decision through the owner-only approval
 plane with `approval.external.prepare`, `approval.external.status`, and
 `approval.external.consume`. The daemon accepts only bounded provider identity,
 summary, risk, expiry, and an exact SHA-256 plan digest. Its private `mce_`

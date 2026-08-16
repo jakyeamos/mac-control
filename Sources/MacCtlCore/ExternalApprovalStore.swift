@@ -55,7 +55,7 @@ public struct ExternalApprovalRequest: Codable, Equatable {
 
 /// Session-only broker for plans owned and executed by another local provider.
 /// The provider receives an operation identifier and decision state, never the
-/// private control-center token used by the menu-bar UI.
+/// private approval token used by the owner-only review lifecycle.
 public final class ExternalApprovalStore {
     private struct Entry {
         let record: ApprovalRecord

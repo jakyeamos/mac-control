@@ -52,6 +52,11 @@ Read this router before repository work.
   or task-history view. It stays hidden while idle and appears only for active execution,
   hands-off or keyboard-freeze authority, daemon lifecycle drain, or degraded health. General
   attention and focus-change announcements belong to the independent attention provider.
+- A local provider may prepare a bounded external approval through
+  `approval.external.prepare`, poll only by operation ID, and consume only the exact
+  provider-instance, plan, and SHA-256 digest binding. Human review remains on the owner-only
+  `macctl approval list|approve|deny` lifecycle; never expose the private approval token to the
+  provider or reintroduce an approval queue into the transient safety item.
 - Use documented commands and repository-local quality gates.
 - Preserve unrelated dirty work and use a disposable worktree for risky changes.
 - Keep credentials, secrets, deployments, merges, and destructive operations behind explicit approval.

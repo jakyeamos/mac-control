@@ -50,6 +50,16 @@ Inspect authorization notices with `control authorization list --json`; the tran
 item does not present them. No authorization-notice command approves or denies the native macOS
 dialog. General user attention belongs to the independent attention provider.
 
+An owner-local sibling provider can submit a bounded sensitive-plan decision through the daemon
+methods `approval.external.prepare`, `approval.external.status`, and
+`approval.external.consume`. Prepare accepts only provider identity, provider instance, plan ID,
+an exact SHA-256 plan digest, a bounded summary, and risk. The provider receives an operation ID
+and decision state, never the private approval token. Review pending decisions with
+`macctl approval list`, then use `macctl approval approve <token>` or
+`macctl approval deny <token>` through the normal owner-only CLI. Consume must repeat the exact
+provider-instance, plan, and digest binding; denial, expiry, mismatch, and replay are terminal.
+The transient safety item does not present this queue.
+
 Keyboard diagnostics and control use the daemon-authoritative surface:
 `swift run macctl keyboard status --json`, `keyboard setup --json`,
 `keyboard enable --confirm --json`, `keyboard inspect --json`, and the

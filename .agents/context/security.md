@@ -56,6 +56,13 @@ never a safety or approval decision. `resolve` records completion and never oper
 Allow/Deny control. Inspect authorization context through the owner-only CLI; the transient
 safety item does not display it or open a source.
 
+External provider approvals are separately session-only and accept only a bounded provider,
+provider instance, plan ID, exact SHA-256 plan digest, summary, risk, and expiry. The provider
+receives only an operation ID and state. The private approval token stays inside Mac Control's
+owner-only review path, and consumption repeats the exact binding before one successful use.
+Denial, expiry, mismatch, and replay fail closed. These records never authorize browser
+execution by themselves and are not presented by the transient menu-bar safety item.
+
 Warm-path manifests are owner-only, app/task/version/target scoped, and retain
 only route metrics, permission names, freshness, and verification metadata.
 Unmeasured or stale candidates are not eligible. Accessibility tree and audit

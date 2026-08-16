@@ -71,6 +71,14 @@ are the durable evidence boundary. TCC permissions, launchd, and the Aqua
 session remain user-controlled external systems; unsupported providers are not
 silently substituted into this boundary.
 
+Local sibling providers may use `approval.external.prepare -> status -> consume`
+for the same human-decision boundary without receiving Mac Control's private
+approval token. The daemon retains a session-only record bound to the exact
+provider, provider instance, plan ID, and SHA-256 plan digest. Human review uses
+the existing owner-only `macctl approval list|approve|deny` lifecycle; denial,
+expiry, binding mismatch, and replay fail closed. The transient menu-bar safety
+item remains outside this queue.
+
 Credential and permission prompts use a separate explanatory boundary:
 `control.authorization.prepare -> bind -> list -> resolve`. Authorization notices are
 short-lived, bounded, owner-only records and are never workflow approval tokens. The daemon
