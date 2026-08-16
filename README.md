@@ -1390,6 +1390,13 @@ python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> status <fixt
 python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> cleanup <fixture-id>
 ```
 
+`launch` reads the bundle-declared executable and uses `open -n` with the
+isolated profile and extension directory, so an already-running VS Code
+process is not silently reused. Keep the fixture root and ID short enough for
+VS Code's local IPC socket path; if startup reports an `EINVAL` socket-path
+failure, retry only with a shorter disposable root/ID after inspecting the
+typed failure; never relaunch an ambiguous process.
+
 The fixture records the exact bundle, PID, application path, workspace,
 profile, extension, and unique window title. Its status deliberately reports
 `visual_acceptance=unverified`, `frontmost_proof=not_claimed`, and

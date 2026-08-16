@@ -107,6 +107,13 @@ python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> status <fixt
 python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> cleanup <fixture-id>
 ```
 
+The diagnostics launcher reads `CFBundleExecutable` (supporting current `Code`
+and older `Electron` bundles) and invokes `open -n` with the isolated profile so
+it cannot silently attach to an existing same-bundle VS Code process. Keep the
+fixture root and ID short enough for VS Code's local IPC socket path; an
+`EINVAL` socket-path failure is a typed blocked result and must be addressed by
+choosing a shorter disposable root/ID, not by blind relaunch.
+
 The fixture launch is bounded and records an exact disposable process,
 workspace, profile, extension, bundle, and window identity. `status` reports
 `visual_acceptance=unverified`, `frontmost_proof=not_claimed`, and
