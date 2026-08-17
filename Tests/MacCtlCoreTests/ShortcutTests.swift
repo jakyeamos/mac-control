@@ -389,15 +389,14 @@ final class ShortcutTests: XCTestCase {
             name: "Shortcut test",
             summary: "Validate exact shortcut command authority",
             steps: [step],
-            totalTimeout: 10,
-            maxActions: 1
+            totalTimeout: 10
         )
         let result = TaskPlanValidator.validate(plan)
         XCTAssertTrue(result.valid, result.errors.joined(separator: ", "))
         XCTAssertEqual(result.risk, .sensitive)
     }
 
-    func testApprovalTokenIsBoundToExactBindingOperation() throws {
+    func testShortcutOperationsRunDirectlyWithoutNativeApprovalTokens() throws {
         let directory = temporaryDirectory("shortcut-approval")
         let menu = FakeMenuController(path: ["View", "Sidebar"], checked: false)
         let app = runningApp()
@@ -431,47 +430,18 @@ final class ShortcutTests: XCTestCase {
             method: "shortcut.setup",
             params: ["id": .string(binding.id)]
         ))
-        XCTAssertEqual(prepared.status, .prepared)
-        let token = try XCTUnwrap(
-            prepared.result.objectValue?["approval"]?.objectValue?["token"]?.stringValue
-        )
-        let approved = service.localReadOnlyHandle(RequestEnvelope(
-            method: "approval.approve",
-            params: ["token": .string(token)]
-        ))
-        XCTAssertEqual(approved.status, .succeeded)
+        XCTAssertEqual(prepared.status, .succeeded)
+        XCTAssertTrue(service.pendingApprovalRecords().isEmpty)
 
-        let mismatch = service.localReadOnlyHandle(RequestEnvelope(
-            method: "shortcut.run",
-            params: ["id": .string(binding.id), "approval_token": .string(token)]
-        ))
-        XCTAssertEqual(mismatch.status, .blocked)
-        XCTAssertEqual(mismatch.error?.code, MacCtlErrorCode.taskApprovalMismatch.rawValue)
-        XCTAssertEqual(menu.activationCount, 0)
-
-        let preparedRun = service.localReadOnlyHandle(RequestEnvelope(
+        let run = service.localReadOnlyHandle(RequestEnvelope(
             method: "shortcut.run",
             params: [
                 "id": .string(binding.id),
                 "route": .string(ShortcutRunRoute.accessibility.rawValue)
             ]
         ))
-        let runToken = try XCTUnwrap(
-            preparedRun.result.objectValue?["approval"]?.objectValue?["token"]?.stringValue
-        )
-        XCTAssertEqual(service.localReadOnlyHandle(RequestEnvelope(
-            method: "approval.approve",
-            params: ["token": .string(runToken)]
-        )).status, .succeeded)
-        let run = service.localReadOnlyHandle(RequestEnvelope(
-            method: "shortcut.run",
-            params: [
-                "id": .string(binding.id),
-                "route": .string(ShortcutRunRoute.accessibility.rawValue),
-                "approval_token": .string(runToken)
-            ]
-        ))
         XCTAssertEqual(run.status, .succeeded)
+        XCTAssertEqual(menu.activationCount, 1)
         let receipt = try XCTUnwrap(try receiptStore.list().first {
             $0.method == "shortcut.run" && $0.status == .succeeded
         })

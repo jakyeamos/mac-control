@@ -475,8 +475,7 @@ public final class ShortcutEngine {
                 approvalReason: "Validate shortcut command authority",
                 recovery: TaskRecoveryPolicy(mode: "strict", maxAttempts: 1)
             )],
-            totalTimeout: 30,
-            maxActions: 1
+            totalTimeout: 30
         ))
         guard validation.valid else {
             throw ShortcutError.invalidTarget(validation.errors.joined(separator: "; "))

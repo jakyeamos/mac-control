@@ -7,7 +7,8 @@ A change is complete only when:
 2. `swift build`, `swift test`, and
    `python3 scripts/check_environment_contract.py` pass from the intended
    checkout; run coverage when the change affects measured behavior.
-3. Approval, redaction, transport, and fail-closed boundaries remain intact.
+3. Agent-policy interruption, daemon execution enforcement, redaction,
+   transport, and fail-closed boundaries remain intact.
 4. Required receipts, status/reason fields, and provenance are present for
    observable behavior.
    Cross-provider browser handoffs additionally require a joined trace with

@@ -519,9 +519,12 @@ public enum RiskLevel: String, Codable, Equatable, CaseIterable {
     case reversible
     case sensitive
 
-    public var requiresApproval: Bool {
+    public var crossesHumanBoundary: Bool {
         self == .sensitive
     }
+
+    @available(*, deprecated, message: "Mac Control does not create approval authority; use crossesHumanBoundary for agent-policy metadata")
+    public var requiresApproval: Bool { crossesHumanBoundary }
 }
 
 public enum SurfaceKind: String, Codable, Equatable, CaseIterable {

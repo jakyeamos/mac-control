@@ -136,7 +136,7 @@ public final class WorkflowExecutor {
 
         let runID = UUID().uuidString
         let initialForeground = workflow.focusPolicy == .background
-            ? appController.foregroundApplication()
+            ? foregroundApplication()
             : nil
         var evidence: [Evidence] = []
         var result: [String: JSONValue] = [:]
@@ -161,10 +161,10 @@ public final class WorkflowExecutor {
             }
         }
 
-        if workflow.recipe == "approval-smoke" {
+        if workflow.recipe == "execution-smoke" {
             evidence.append(Evidence(
-                kind: "approval_probe",
-                message: "Completed a no-input approval probe without changing an external surface",
+                kind: "execution_probe",
+                message: "Completed a no-input execution probe without changing an external surface",
                 source: "macctl"
             ))
         }
@@ -180,7 +180,7 @@ public final class WorkflowExecutor {
 
         if workflow.focusPolicy == .background {
             try ensureFocusPreserved(initialForeground)
-            let finalForeground = appController.foregroundApplication()
+            let finalForeground = foregroundApplication()
             evidence.append(Evidence(
                 kind: "focus_guard",
                 message: "Foreground application was preserved for the background workflow",
