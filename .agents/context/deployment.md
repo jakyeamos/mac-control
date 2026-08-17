@@ -12,10 +12,9 @@ swift run macctl install
 ```
 
 Install, LaunchAgent install, restart, and removal are guarded by the daemon's
-atomic lifecycle drain. Let pending legacy approvals expire or deny them through
-the documented compatibility lifecycle, finish or stop active execution, and
-retry if the command returns `daemon_lifecycle_blocked`. Do not persist legacy
-approval or current lease authority across a restart. For the first migration
+atomic lifecycle drain. Clear or deny pending approvals, finish or stop active
+execution, and retry if the command returns `daemon_lifecycle_blocked`. Do not
+persist approval or lease authority across a restart. For the first migration
 from a daemon without this method only, confirm the control center is idle and
 pass `--allow-legacy-idle-snapshot`; remove the flag after the new daemon has
 started.

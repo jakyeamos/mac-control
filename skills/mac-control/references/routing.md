@@ -69,7 +69,7 @@ documentation, and test change.
 - A v3 repository manifest says all eight criteria are true: report eight legacy declarations,
   score `0/8`, and migrate each task to typed v4 semantic claims with source grounding.
 - Move focus to the next control in System Settings: use atomic `macctl control perform
-  next-control --app "System Settings" --json`; there is no mature direct interface
+  next-control --app "System Settings" --confirm --json`; there is no mature direct interface
   for that visible focus transition.
 - Activate a known Save button in a native app: use semantic Accessibility with the button's
   stable role and title before sequential Tab navigation.
@@ -142,7 +142,7 @@ documentation, and test change.
   call `get_app_state`, perform a fresh unique-element lookup, call `sky.scroll`, then
   re-read and verify the viewport. If the target is ambiguous, stop instead.
 - If the user must remain hands-off across multiple actions or providers, start one explicit
-  `control hands-off begin` session for the caller-declared duration before the run. Pass its opaque
+  bounded `control hands-off begin --confirm` session before the run. Pass its opaque
   `session_id` to each native action or batch, heartbeat before the advertised interval, and
   end it after the final verification. `Hands Off` keeps the transient safety item visible for
   the bounded session. One-shot focus changes are not presented there; use the independent
@@ -217,7 +217,7 @@ only when every measured sample reaches `verification.state == passed`:
 macctl route benchmark --app "System Settings" \
   --task focus-next-control --target-fingerprint "settings-pane" \
   --action next-control --route keyboard \
-  --verification-oracle "focus changed" --samples 5 --warmups 1 --json
+  --verification-oracle "focus changed" --samples 5 --warmups 1 --confirm --json
 ```
 
 The response reports `foreground_fast_path_samples` so activation avoidance is observable;
@@ -250,7 +250,7 @@ macctl route benchmark --app "Chrome" \
   --task scroll-main --target-fingerprint "scroll-v1" \
   --action scroll --route scroll --role AXScrollArea --identifier main-scroll \
   --direction down --amount 1 --reset-direction up --reset-amount 1 \
-  --verification-oracle "viewport changed" --samples 5 --warmups 1 --json
+  --verification-oracle "viewport changed" --samples 5 --warmups 1 --confirm --json
 ```
 
 The reset direction must be the exact opposite of the measured direction when more than one

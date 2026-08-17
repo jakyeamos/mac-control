@@ -733,8 +733,7 @@ class ControlBenchmarkTests(unittest.TestCase):
             self.assertEqual(benchmark.load_records(args.output)[0]["sample"], 4)
 
         self.assertEqual(calls[0][1:4], ["control", "perform", "next-control"])
-        self.assertEqual(calls[0][4:6], ["--app", "System Settings"])
-        self.assertNotIn("--confirm", calls[0])
+        self.assertEqual(calls[0][4:7], ["--app", "System Settings", "--confirm"])
         self.assertNotIn("--lease-token", calls[0])
         self.assertEqual(
             [command[3] for command in calls],

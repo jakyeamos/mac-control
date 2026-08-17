@@ -2,14 +2,13 @@
 
 Expected safety outcomes are explicit:
 
-- `blocked`: a required permission, exact target, live receipt, or Aqua session is
+- `blocked`: a required permission, approval, live receipt, or Aqua session is
   unavailable. Preserve the reason and obtain the missing user-controlled
   evidence before retrying.
 - `unknown`: the daemon or socket cannot establish authoritative state. Do not
   infer permission or successful execution from a CLI fallback.
-- legacy `approval_expired` or `approval_denied`: let the compatibility record
-  drain or expire; never recover, reuse, or mutate its token. New task,
-  workflow, and shortcut execution does not create approval records.
+- `approval_expired` or `approval_denied`: create a new plan; never reuse or
+  mutate an old token.
 - foreground/focus mismatch: stop the workflow, record verification failure,
   and investigate the named-app or focus policy rather than retrying global
   input.

@@ -20,10 +20,10 @@ public enum ActionRiskClassifier {
         switch action.kind {
         case .launchApp, .activateWindow, .waitFor, .capture, .ocr, .assert:
             inferred = .safe
-        case .click, .key, .search, .scroll:
-            inferred = .reversible
-        case .command, .adapter:
+        case .click, .key, .search, .command, .adapter:
             inferred = .sensitive
+        case .scroll:
+            inferred = .reversible
         case .type:
             inferred = .sensitive
         }
@@ -122,9 +122,8 @@ public final class WorkflowRegistry {
                 errors.append("Suppressed physical keyboard input action \(index) requires keyboard_freeze_required=true")
             }
             if ActionRiskClassifier.classify(action) == .sensitive,
-               action.parameters["boundary_reason"]?.stringValue == nil,
                action.parameters["approval_reason"]?.stringValue == nil {
-                errors.append("Sensitive action \(index) must declare boundary_reason")
+                errors.append("Sensitive action \(index) must declare approval_reason")
             }
         }
         if workflow.focusPolicy == .background {
@@ -292,10 +291,10 @@ public final class WorkflowRegistry {
             )
         }
 
-        let directExecutionSmokeWorkflow = WorkflowSpec(
-            id: "execution.smoke",
-            name: "Direct Execution Smoke",
-            summary: "Exercise direct agent execution without external input or account changes",
+        let approvalSmokeWorkflow = WorkflowSpec(
+            id: "approval.smoke",
+            name: "Approval Control-Plane Smoke",
+            summary: "Exercise approval, denial, expiry, and fail-closed behavior without external input or account changes",
             surface: .macDesktop,
             actions: [
                 ActionSpec(
@@ -303,14 +302,14 @@ public final class WorkflowRegistry {
                     surface: .macDesktop,
                     parameters: [
                         "seconds": .number(0.2),
-                        "boundary_reason": .string("Tier-1 direct-execution smoke; no external input or account change")
+                        "approval_reason": .string("Tier-1 approval-control smoke; no external input or account change")
                     ],
                     risk: .sensitive
                 )
             ],
-            recipe: "execution-smoke"
+            recipe: "approval-smoke"
         )
 
-        return safeOpenWorkflows + [directExecutionSmokeWorkflow]
+        return safeOpenWorkflows + [approvalSmokeWorkflow]
     }
 }

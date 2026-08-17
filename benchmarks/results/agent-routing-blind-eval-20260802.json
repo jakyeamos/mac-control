@@ -46,7 +46,7 @@
       "focus-next-control": {
         "runnerPasses": 3,
         "judgePasses": 3,
-        "selectedRoute": "macctl control perform next-control --app System Settings --json"
+        "selectedRoute": "macctl control perform next-control --app System Settings --confirm --json"
       },
       "full-keyboard-access-status": {
         "runnerPasses": 3,
@@ -56,7 +56,7 @@
       "known-save-button": {
         "runnerPasses": 3,
         "judgePasses": 3,
-        "selectedRoute": "macctl control perform activate --app TextEdit --role AXButton --title Save --json"
+        "selectedRoute": "macctl control perform activate --app TextEdit --confirm --role AXButton --title Save --json"
       }
     },
     "duplicateSkillLoads": 0,

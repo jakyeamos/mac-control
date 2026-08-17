@@ -4,13 +4,13 @@ import XCTest
 @testable import MacCtlCore
 
 final class SearchActionTests: XCTestCase {
-    func testSearchContractIsCodableStructuralReversibleAndInputBound() throws {
+    func testSearchContractIsCodableStructuralSensitiveAndAuthorityBound() throws {
         let action = searchAction()
         let decoded = try JSONCodec.decode(ActionSpec.self, from: JSONCodec.encode(action))
 
         XCTAssertEqual(decoded, action)
         XCTAssertEqual(action.kind, .search)
-        XCTAssertEqual(ActionRiskClassifier.classify(action), .reversible)
+        XCTAssertEqual(ActionRiskClassifier.classify(action), .sensitive)
         XCTAssertTrue(
             TaskPlan(
                 id: "search-contract",
@@ -267,9 +267,11 @@ final class SearchActionTests: XCTestCase {
             actionExecutor: executor
         )
         let inputs = ["query": "checkpoint-secret"]
-        _ = try runner.prepare(plan: plan, ephemeralInputs: inputs)
+        let prepared = try runner.prepare(plan: plan, ephemeralInputs: inputs)
+        _ = try approvals.approve(token: prepared.approval.token)
         let status = try runner.run(
             plan: plan,
+            approvalToken: prepared.approval.token,
             ephemeralInputs: inputs,
             authority: TaskExecutionAuthority(
                 leaseToken: "task-lease",
@@ -312,9 +314,11 @@ final class SearchActionTests: XCTestCase {
             actionExecutor: executor
         )
         let inputs = ["query": "result-query"]
-        _ = try runner.prepare(plan: plan, ephemeralInputs: inputs)
+        let prepared = try runner.prepare(plan: plan, ephemeralInputs: inputs)
+        _ = try approvals.approve(token: prepared.approval.token)
         let status = try runner.run(
             plan: plan,
+            approvalToken: prepared.approval.token,
             ephemeralInputs: inputs,
             authority: TaskExecutionAuthority(
                 leaseToken: "task-lease",
@@ -345,7 +349,7 @@ final class SearchActionTests: XCTestCase {
 
         let validation = WorkflowRegistry().validate(workflow)
         XCTAssertTrue(validation.valid, validation.errors.joined(separator: "; "))
-        XCTAssertEqual(validation.risk, .reversible)
+        XCTAssertEqual(validation.risk, .sensitive)
 
         let report = try harness.workflowExecutor.execute(
             workflow,

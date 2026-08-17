@@ -50,7 +50,7 @@ final class AutomaticFocusPolicyTests: XCTestCase {
         XCTAssertEqual(background.selectionReason, "explicit_background")
     }
 
-    func testTaskPlanKeepsRequestedAutomaticPolicyWhileExecutionUsesBackground() throws {
+    func testTaskApprovalRemainsBoundToAutomaticWhileExecutionUsesBackground() throws {
         let directory = URL(
             fileURLWithPath: "/private/tmp/macctl-automatic-task-\(UUID().uuidString)"
         )
@@ -65,7 +65,7 @@ final class AutomaticFocusPolicyTests: XCTestCase {
         let plan = TaskPlan(
             id: "automatic.background.execution",
             name: "Automatic background execution",
-            summary: "Keep requested policy separate from route selection",
+            summary: "Keep approval authority separate from route selection",
             focusPolicy: .automatic,
             steps: [TaskStep(
                 id: "wait",
@@ -78,10 +78,13 @@ final class AutomaticFocusPolicyTests: XCTestCase {
         )
 
         let prepared = try runner.prepare(plan: plan)
+        XCTAssertEqual(prepared.approval.focusPolicy, .automatic)
         XCTAssertEqual(prepared.planDigest, TaskPlan.digest(plan))
+        _ = try approvals.approve(token: prepared.approval.token)
 
         let completed = try runner.run(
             plan: plan,
+            approvalToken: prepared.approval.token,
             effectiveFocusPolicy: .background
         )
 
@@ -144,16 +147,24 @@ final class AutomaticFocusPolicyTests: XCTestCase {
 
         let prepared = service.handle(RequestEnvelope(
             method: "workflow.prepare",
-            params: ["workflow": .string("execution.smoke")]
+            params: ["workflow": .string("approval.smoke")]
         ))
         XCTAssertEqual(prepared.status, .prepared)
-        XCTAssertEqual(prepared.result["focus_policy"]?.stringValue, "automatic")
-        XCTAssertEqual(prepared.result["risk"]?.stringValue, RiskLevel.sensitive.rawValue)
-        XCTAssertNil(prepared.result["approval"])
+        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
+        XCTAssertEqual(approval["focusPolicy"]?.stringValue, "automatic")
+        let token = try XCTUnwrap(approval["token"]?.stringValue)
+
+        XCTAssertEqual(service.handle(RequestEnvelope(
+            method: "approval.approve",
+            params: ["token": .string(token)]
+        )).status, .succeeded)
 
         let executed = service.handle(RequestEnvelope(
             method: "workflow.run",
-            params: ["workflow": .string("execution.smoke")]
+            params: [
+                "workflow": .string("approval.smoke"),
+                "approval_token": .string(token)
+            ]
         ))
 
         XCTAssertEqual(executed.status, .succeeded)
