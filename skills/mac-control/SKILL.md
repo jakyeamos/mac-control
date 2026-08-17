@@ -59,8 +59,18 @@ measure the provider-natural action.
 Visual and coordinate candidates require explicit task-manifest opt-in. Only a declared
 fallback may run after a pre-action target-not-found result. Stop on ambiguity, possible side
 effects, action failure, or failed verification. Read [references/routing.md](references/routing.md)
-when the route is ambiguous, the task spans applications, or the action carries approval or
+when the route is ambiguous, the task spans applications, or the action carries boundary or
 private-input risk.
+
+Mac Control is an execution extension, not a second permission system. Apply the same agent
+policy used for Computer Use and browser control: proceed from the user's task request for
+routine visible reversible actions, and use Codex's conversational ask-user surface only at a
+meaningful human boundary such as private-data access, destructive or irreversible change,
+send/submit/purchase/share, credentials, security or permission changes, scope expansion, or a
+materially ambiguous target. Do not call `approval.*` for new task, workflow, or shortcut work,
+and never recover a stale approval token. The daemon must still enforce exact targets and plan
+digests, state revalidation, caller-declared finite deadlines, cancellation, postconditions, replay resistance,
+and redacted receipts.
 
 Before declaring browser chrome blocked because the tab strip or its context menu is not
 addressable, inspect the running browser's ordinary application menus with `macctl shortcut
@@ -127,6 +137,7 @@ Resolve the installed command and inspect the live control plane before input:
 
 ```sh
 command -v macctl
+macctl --version
 macctl --help
 macctl doctor --json
 macctl capabilities --json
@@ -139,6 +150,47 @@ Access prerequisite is `blocked`; follow the returned recovery instructions. Do 
 Full Keyboard Access, change TCC permissions, or install persistent components without the
 user's authority.
 
+For the bounded showcase target, preview the product-owned synthetic research-session plan
+before attempting any live action:
+
+```sh
+macctl task compose focus-session \
+  --request "Prepare my research session" --json
+```
+
+Require `status=ready`, `executable=true`, the three ordered effects, their rollback and
+verification notes, an empty `blocked_by`, and a stable `plan_digest`. Pass the exact plan from
+`task compose focus-session --plan --json` to `task.prepare`, then `task.run` without an
+approval token. Source output remains planning evidence until the installed daemon completes
+the live path.
+
+Use `task compose focus-session --plan --json` to inspect the exact executable candidate.
+Accept it only when its three actions are the allowlisted `document.open-focus-brief`,
+`document.open-focus-scratchpad`, and `workspace.arrange-focus-session` operations; no path,
+content, application override, script, or frame may be caller-provided. Each step must have a
+strict `focus_session_verified` postcondition. Do not run or describe the candidate as live
+until the exact installed daemon passes the positive, partial-failure, and stale-state paths.
+
+The three effects are opening the bounded brief, opening its bounded scratchpad, and arranging
+both windows. Verification must come from post-dispatch fixture digests and Accessibility
+window observations tied to the exact plan digest. Prefer exact `AXDocument` URL equality; when
+an app omits that attribute, require exact in-memory digest equality with the product-owned public
+fixture filename as well as the content digest and visible focused window. Never treat an action
+return value as proof, and never retain visible window titles, file paths, or document contents
+in the receipt.
+Allow at most two seconds of read-only polling for Accessibility window publication after an
+open completes. Never redispatch the open operation inside that observer wait; each declared
+effect is dispatched once unless the exact plan explicitly declares deterministic recovery.
+For verification and layout, resolve the unique matching public fixture across all visible
+windows in the expected app. Never assume the fixture is whichever window is focused.
+
+When a task checkpoint is partial, resubmit the original full plan to `task resume` without an
+approval token. Require the service to establish a fresh run-scoped lease and revalidate the full
+plan digest, remaining steps, checkpoint index, exact targets, permissions, and deadline. Do not
+use `task run` to continue a blocked or paused checkpoint.
+Treat an `expired` checkpoint as terminal and require a versioned new task identity; never reset
+the original plan-wide deadline.
+
 ## Execute the smallest verified action
 
 For one visible action, use the atomic app-scoped form. It activates the target, waits for
@@ -149,14 +201,14 @@ permission, focus, and post-action verification checks:
 
 ```sh
 macctl control perform next-control \
-  --app "System Settings" --confirm --json
+  --app "System Settings" --json
 ```
 
 For a known control, provide stable semantic identity rather than coordinates:
 
 ```sh
 macctl control perform activate \
-  --app "TextEdit" --confirm --role AXButton --title "Save" --json
+  --app "TextEdit" --role AXButton --title "Save" --json
 ```
 
 Pass `--focus-policy automatic|foreground|background` (or `--background`) when
@@ -172,7 +224,7 @@ optional `background_unavailable_reason`. A successful foreground action reports
 never a successful action. Direct `control.perform` and `control.batch` reject
 explicit `background` with an `action_unavailable`/`background_unsupported` handoff to
 `task.run` (`recommended_surface=task.run`,
-`next_action=submit_named_background_task_plan`), because only a named approved task plan currently binds
+`next_action=submit_named_background_task_plan`), because only a named exact task plan currently binds
 process-directed background authority, expiry, target identity, and the
 unrelated foreground oracle. Automatic direct control therefore resolves to
 foreground immediately; use an automatic or explicit-background named task to
@@ -198,7 +250,7 @@ typed `context-menu` action and require menu labels when they are known:
 
 ```sh
 macctl control perform context-menu \
-  --app "Google Chrome" --confirm --role AXButton --identifier tab-group \
+  --app "Google Chrome" --role AXButton --identifier tab-group \
   --window-title "Project - Google Chrome" \
   --expected-menu-items "Add tab to new group" --json
 ```
@@ -316,7 +368,7 @@ client-side activation and lease setup:
 
 ```sh
 printf '%s\n' '[{"action":"next-control"},{"action":"activate"}]' | \
-  macctl control batch --app "System Settings" --actions-stdin --confirm --json
+  macctl control batch --app "System Settings" --actions-stdin --json
 ```
 
 `control.batch` accepts at most 32 actions, owns one ephemeral app lease, revalidates the
@@ -433,23 +485,28 @@ app-scoped action or a declared task plan, not by replaying a split sequence.
   `keyboard freeze acquire|status|release` surface; the legacy suppression flag is only a
   compatibility alias and is reported as `keyboard_freeze` evidence.
 - Never send credentials, private text, or bare printable input through raw keyboard
-  sequences. Use the approval-gated workflow or task path.
+  sequences. Use the structured ephemeral-input workflow or task path after applying the
+  calling agent's normal human-boundary policy.
 - Keep browser DOM automation on a mature browser route. Use Mac Control for browser chrome,
   OS-level dialogs, shortcuts, or controls outside the DOM.
 - The menu-bar Control Center visibly announces foreground movement: a light-blue `Focusing`
   state precedes a one-shot foreground handoff and `Focused` identifies that transient target
   notice. For a run spanning native actions or a provider handoff, explicitly start the bounded
-  `control hands-off begin --confirm` session, pass its opaque `session_id` to every action or
+  `control hands-off begin` session, pass its opaque `session_id` to every action or
   batch, heartbeat before the returned interval, and end it when the run is complete. The
   persistent `Hands Off` pill/popover is the user-facing hands-off guarantee; it says to keep the
   keyboard and trackpad untouched and clears on end, expiry, Stop & Release, or shutdown. A
   session is never inferred from one action, and the action still needs its normal foreground and
   postcondition checks. Physical keyboard `Frozen` remains higher-salience than focus.
 - When inspecting Mac Control's own native Control Center, prefer its published Accessibility
-  identifiers: `macctl.control-center.status`, `macctl.approval.window`,
-  `macctl.control-center.health`, and `macctl.approval.count`. Exact approval and denial controls
-  use `macctl.approval.approve.<operation-id>` and `macctl.approval.deny.<operation-id>`; confirm
-  the operation ID against the prepared task and never treat the identifier as approval authority.
+  identifiers: `macctl.control-center.status` and `macctl.control-center.health`. For a
+  checkpointed task, inspect
+  `macctl.task.progress`, `macctl.task.progress.count`, and the redacted
+  `macctl.task.progress.<step-id>` rows. Treat only `Verified` rows as completed; `Stopped`
+  preserves the current failed or cancelled step while earlier verified rows remain visible for
+  60 seconds. New task, workflow, and shortcut execution must not create a native approval card.
+  Treat any old approval row as legacy compatibility state and let it drain or expire without
+  recovering its token.
 - Never manufacture a successful receipt or substitute build/test evidence for a live GUI
   result.
 

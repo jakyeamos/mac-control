@@ -124,9 +124,9 @@ public struct TaskPredicate: Codable, Equatable {
     }
 }
 
-/// Adaptive recovery is deliberately declared in the plan.  The runner still
-/// caps attempts by risk, so a plan cannot turn a sensitive action into a
-/// retry loop.
+/// Recovery is deliberately declared in the plan. Sensitive actions still
+/// stop after any uncertain outcome, while deterministic failures may follow
+/// the caller's explicit finite retry policy until the task deadline.
 public struct TaskRecoveryPolicy: Codable, Equatable {
     public let mode: String
     public let alternateRoutes: [String]
@@ -199,7 +199,20 @@ public struct TaskStep: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, action, target, preconditions, postconditions, risk, approvalReason, timeout, recovery
+        case id, action, target, preconditions, postconditions, risk, boundaryReason, timeout, recovery
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(action, forKey: .action)
+        try container.encodeIfPresent(target, forKey: .target)
+        try container.encode(preconditions, forKey: .preconditions)
+        try container.encode(postconditions, forKey: .postconditions)
+        try container.encode(risk, forKey: .risk)
+        try container.encodeIfPresent(approvalReason, forKey: .boundaryReason)
+        try container.encode(timeout, forKey: .timeout)
+        try container.encode(recovery, forKey: .recovery)
     }
 
     public init(from decoder: Decoder) throws {
@@ -212,7 +225,9 @@ public struct TaskStep: Codable, Equatable {
         risk = try container.decodeIfPresent(RiskLevel.self, forKey: TaskCodingKey(stringValue: "risk")!)
             ?? action.risk
             ?? ActionRiskClassifier.classify(action)
-        approvalReason = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "approvalReason")!)
+        approvalReason = try (container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "boundaryReason")!)
+            ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "boundary_reason")!)
+            ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "approvalReason")!)
             ?? container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "approval_reason")!))
         timeout = try container.decodeIfPresent(TimeInterval.self, forKey: TaskCodingKey(stringValue: "timeout")!) ?? 30
         recovery = try container.decodeIfPresent(TaskRecoveryPolicy.self, forKey: TaskCodingKey(stringValue: "recovery")!) ?? .adaptive
@@ -228,7 +243,6 @@ public struct TaskPlan: Codable, Equatable {
     public let keyboardFreezeRequired: Bool
     public let steps: [TaskStep]
     public let totalTimeout: TimeInterval
-    public let maxActions: Int
     public let recipe: String?
 
     public init(
@@ -240,7 +254,6 @@ public struct TaskPlan: Codable, Equatable {
         keyboardFreezeRequired: Bool = false,
         steps: [TaskStep],
         totalTimeout: TimeInterval = 300,
-        maxActions: Int = 128,
         recipe: String? = nil
     ) {
         self.id = id
@@ -251,12 +264,11 @@ public struct TaskPlan: Codable, Equatable {
         self.keyboardFreezeRequired = keyboardFreezeRequired
         self.steps = steps
         self.totalTimeout = totalTimeout
-        self.maxActions = maxActions
         self.recipe = recipe
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, summary, surface, focusPolicy, keyboardFreezeRequired, steps, totalTimeout, maxActions, recipe
+        case id, name, summary, surface, focusPolicy, keyboardFreezeRequired, steps, totalTimeout, recipe
     }
 
     public init(from decoder: Decoder) throws {
@@ -279,9 +291,6 @@ public struct TaskPlan: Codable, Equatable {
         totalTimeout = try (container.decodeIfPresent(TimeInterval.self, forKey: TaskCodingKey(stringValue: "totalTimeout")!)
             ?? container.decodeIfPresent(TimeInterval.self, forKey: TaskCodingKey(stringValue: "total_timeout")!))
             ?? 300
-        maxActions = try (container.decodeIfPresent(Int.self, forKey: TaskCodingKey(stringValue: "maxActions")!)
-            ?? container.decodeIfPresent(Int.self, forKey: TaskCodingKey(stringValue: "max_actions")!))
-            ?? TaskPlanValidator.maximumActions
         recipe = try container.decodeIfPresent(String.self, forKey: TaskCodingKey(stringValue: "recipe")!)
     }
 
@@ -331,7 +340,6 @@ public struct TaskPlan: Codable, Equatable {
             keyboardFreezeRequired: keyboardFreezeRequired,
             steps: Array(steps.dropFirst(max(0, stepIndex))),
             totalTimeout: totalTimeout,
-            maxActions: maxActions,
             recipe: recipe
         )
     }
@@ -346,7 +354,6 @@ public struct TaskPlan: Codable, Equatable {
             keyboardFreezeRequired: keyboardFreezeRequired,
             steps: steps,
             totalTimeout: totalTimeout,
-            maxActions: maxActions,
             recipe: recipe
         )
     }
@@ -407,10 +414,6 @@ public struct TaskPlanValidation: Codable, Equatable {
 }
 
 public enum TaskPlanValidator {
-    public static let maximumSteps = 64
-    public static let maximumTotalTimeout: TimeInterval = 300
-    public static let maximumActions = 128
-
     public static func validate(
         _ plan: TaskPlan,
         adapterRegistry: AppAdapterRegistry? = nil
@@ -428,14 +431,8 @@ public enum TaskPlanValidator {
         if plan.steps.isEmpty {
             errors.append("Task must contain at least one step")
         }
-        if plan.steps.count > maximumSteps {
-            errors.append("Task contains more than \(maximumSteps) steps")
-        }
-        if !(0.001...maximumTotalTimeout).contains(plan.totalTimeout) {
-            errors.append("Task total timeout must be between 0.001 and \(Int(maximumTotalTimeout)) seconds")
-        }
-        if !(1...maximumActions).contains(plan.maxActions) {
-            errors.append("Task action budget must be between 1 and \(maximumActions)")
+        if !plan.totalTimeout.isFinite || plan.totalTimeout <= 0 {
+            errors.append("Task total timeout must be a positive finite duration")
         }
         var ids = Set<String>()
         for (index, step) in plan.steps.enumerated() {
@@ -448,13 +445,13 @@ public enum TaskPlanValidator {
             if step.action.surface != plan.surface {
                 errors.append("Step \(trimmedID) targets \(step.action.surface.rawValue), not \(plan.surface.rawValue)")
             }
-            if !(0.05...30).contains(step.timeout) {
-                errors.append("Step \(trimmedID) timeout must be between 0.05 and 30 seconds")
+            if !step.timeout.isFinite || step.timeout <= 0 {
+                errors.append("Step \(trimmedID) timeout must be a positive finite duration")
             }
             if step.risk == .sensitive {
                 let reason = step.approvalReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if reason.isEmpty {
-                    errors.append("Sensitive step \(trimmedID) must declare approval_reason")
+                    errors.append("Sensitive step \(trimmedID) must declare boundary_reason")
                 }
             }
             if step.action.parameters["physical_input_mode"]?.stringValue?.lowercased() == "suppressed",
@@ -707,18 +704,17 @@ public enum TaskPlanValidator {
         }
     }
 
-    public static func maximumAttempts(
+    public static func attemptLimit(
         for risk: RiskLevel,
         recovery: TaskRecoveryPolicy
     ) -> Int {
-        let cap: Int
-        switch risk {
-        case .safe: cap = 3
-        case .reversible: cap = 2
-        case .sensitive: cap = 1
+        if let requested = recovery.maxAttempts {
+            return max(1, requested)
         }
-        guard let requested = recovery.maxAttempts else { return cap }
-        return min(cap, max(1, requested))
+        if risk == .sensitive {
+            return 1
+        }
+        return recovery.permitsAlternateRoute ? recovery.alternateRoutes.count + 1 : 1
     }
 
     private static func rank(_ risk: RiskLevel) -> Int {
@@ -894,34 +890,30 @@ public struct TaskPreparedReport: Codable, Equatable {
     public let taskID: String
     public let planDigest: String
     public let state: TaskLifecycleState
-    public let approval: ApprovalRecord
+    public let risk: RiskLevel
 
-    public init(taskID: String, planDigest: String, state: TaskLifecycleState, approval: ApprovalRecord) {
+    public init(
+        taskID: String,
+        planDigest: String,
+        state: TaskLifecycleState,
+        risk: RiskLevel
+    ) {
         self.taskID = taskID
         self.planDigest = planDigest
         self.state = state
-        self.approval = approval
+        self.risk = risk
     }
 }
 
 public struct TaskCapabilityReport: Codable, Equatable {
     public let methods: [String]
-    public let maximumSteps: Int
-    public let maximumTaskTimeout: TimeInterval
-    public let maximumActions: Int
     public let automaticResume: Bool
 
     public init(
         methods: [String] = ["task.prepare", "task.run", "task.status", "task.resume", "task.cancel"],
-        maximumSteps: Int = TaskPlanValidator.maximumSteps,
-        maximumTaskTimeout: TimeInterval = TaskPlanValidator.maximumTotalTimeout,
-        maximumActions: Int = TaskPlanValidator.maximumActions,
         automaticResume: Bool = false
     ) {
         self.methods = methods
-        self.maximumSteps = maximumSteps
-        self.maximumTaskTimeout = maximumTaskTimeout
-        self.maximumActions = maximumActions
         self.automaticResume = automaticResume
     }
 }
@@ -936,7 +928,6 @@ public enum TaskControlError: Error, LocalizedError, Equatable {
     case leaseExpired
     case cancelled
     case timedOut
-    case actionBudgetExceeded
     case preconditionFailed(String)
     case postconditionFailed(String)
     case indeterminate(String)
@@ -954,7 +945,6 @@ public enum TaskControlError: Error, LocalizedError, Equatable {
         case .leaseExpired: return "The task control lease expired"
         case .cancelled: return "Task was cancelled"
         case .timedOut: return "Task exceeded its timeout"
-        case .actionBudgetExceeded: return "Task exceeded its action budget"
         case .preconditionFailed(let message): return "Task precondition failed: \(message)"
         case .postconditionFailed(let message): return "Task postcondition failed: \(message)"
         case .indeterminate(let message): return "Task outcome is indeterminate: \(message)"

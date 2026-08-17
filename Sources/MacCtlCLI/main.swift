@@ -20,6 +20,8 @@ struct CLI {
         let commandArguments = Array(filtered.dropFirst())
         do {
             switch command {
+            case "version", "--version", "-V":
+                return renderVersion()
             case "doctor", "status":
                 return render(sendOrLocal(method: command, params: [:], localFallback: false))
             case "capabilities":
@@ -123,13 +125,10 @@ struct CLI {
             return render(sendOrLocal(method: "workflow.prepare", params: params, localFallback: false))
         case "run":
             guard let workflow = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl workflow run <workflow> [--focus-policy automatic|foreground|background] [--approval-token <token>] [--ephemeral-stdin]")
+                throw CLIError.usage("Usage: macctl workflow run <workflow> [--focus-policy automatic|foreground|background] [--ephemeral-stdin]")
             }
             var params: [String: JSONValue] = ["workflow": .string(workflow)]
             try addFocusPolicy(from: args, to: &params)
-            if let tokenIndex = args.firstIndex(of: "--approval-token"), args.indices.contains(tokenIndex + 1) {
-                params["approval_token"] = .string(args[tokenIndex + 1])
-            }
             try addEphemeralInputs(from: args, to: &params)
             return render(sendOrLocal(method: "workflow.run", params: params, localFallback: false))
         default:
@@ -267,8 +266,7 @@ struct CLI {
                 "target_fingerprint": .string(try requiredOption("--target-fingerprint", from: args)),
                 "route": .string(try requiredOption("--route", from: args)),
                 "verification_oracle": .string(try requiredOption("--verification-oracle", from: args)),
-                "action": .string(try requiredOption("--action", from: args)),
-                "confirm": .bool(args.contains("--confirm"))
+                "action": .string(try requiredOption("--action", from: args))
             ]
             let optionalNumbers: [(String, String)] = [
                 ("--samples", "samples"),
@@ -357,9 +355,6 @@ struct CLI {
             if !selector.isEmpty {
                 params["selector"] = .object(selector)
             }
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("route benchmark requires --confirm")
-            }
             return render(sendOrLocal(method: "route.benchmark", params: params, localFallback: false))
         case "register":
             var params: [String: JSONValue] = [
@@ -370,8 +365,7 @@ struct CLI {
                 "verification_oracle": .string(try requiredOption("--verification-oracle", from: args)),
                 "latency_ms": .number(try requiredDoubleOption("--latency-ms", from: args)),
                 "p95_latency_ms": .number(try requiredDoubleOption("--p95-ms", from: args)),
-                "verification_rate": .number(try requiredDoubleOption("--verification-rate", from: args)),
-                "confirm": .bool(args.contains("--confirm"))
+                "verification_rate": .number(try requiredDoubleOption("--verification-rate", from: args))
             ]
             let optionalNumbers: [(String, String)] = [
                 ("--recoveries", "recoveries"),
@@ -404,9 +398,6 @@ struct CLI {
             }
             if args.contains("--visual-coordinate-opt-in") {
                 params["visual_coordinate_opt_in"] = .bool(true)
-            }
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("route register requires --confirm")
             }
             return render(sendOrLocal(method: "route.register", params: params, localFallback: false))
         default:
@@ -507,12 +498,9 @@ struct CLI {
         case "setup":
             return render(sendOrLocal(method: "keyboard.setup", params: [:], localFallback: true))
         case "enable":
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("Usage: macctl keyboard enable --confirm [--json]")
-            }
             return render(sendOrLocal(
                 method: "keyboard.enable",
-                params: ["confirm": .bool(true)],
+                params: [:],
                 localFallback: false
             ))
         case "inspect":
@@ -652,19 +640,15 @@ struct CLI {
             return render(sendOrLocal(method: "control.capability_audit_batch", params: params, localFallback: false))
         case "batch":
             let application = try requiredOption("--app", from: args)
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("control batch requires --confirm")
-            }
             guard args.contains("--actions-stdin") else {
                 throw CLIError.usage("control batch requires --actions-stdin")
             }
             var params = try controlBatchParameters(from: args)
             params["app"] = .string(application)
-            params["confirm"] = .bool(true)
             return render(sendControlRequest(method: "control.batch", params: params))
         case "perform":
             guard let action = args.dropFirst().first else {
-                throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [selector options]")
+                throw CLIError.usage("Usage: macctl control perform <action> (--lease-token <token> | --app <app>) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [selector options]")
             }
             var params: [String: JSONValue] = ["action": .string(action)]
             try addControlFocusPolicy(from: args, to: &params)
@@ -675,17 +659,10 @@ struct CLI {
                 throw CLIError.usage("Provide exactly one of --lease-token or --app")
             }
             if let leaseToken {
-                guard !args.contains("--confirm") else {
-                    throw CLIError.usage("--confirm is only valid with --app")
-                }
                 params["lease_token"] = .string(leaseToken)
             }
             if let application {
-                guard args.contains("--confirm") else {
-                    throw CLIError.usage("Atomic app control requires --confirm")
-                }
                 params["app"] = .string(application)
-                params["confirm"] = .bool(true)
             }
             if let task = try optionalOption("--task", from: args) {
                 params["task"] = .string(task)
@@ -701,7 +678,7 @@ struct CLI {
             }
             if action.lowercased() == "scroll" {
                 guard application != nil, leaseToken == nil else {
-                    throw CLIError.usage("Semantic scrolling requires --app <app> --confirm")
+                    throw CLIError.usage("Semantic scrolling requires --app <app>")
                 }
                 params["direction"] = .string(try requiredOption("--direction", from: args))
                 guard let amount = Int(try requiredOption("--amount", from: args)), amount > 0 else {
@@ -881,10 +858,7 @@ struct CLI {
         }
         switch action {
         case "begin":
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("Usage: macctl control hands-off begin --confirm [--provider mac_control|computer_use|hybrid] [--app <app>] [--task <id>] [--seconds N]")
-            }
-            var params: [String: JSONValue] = ["confirm": .bool(true)]
+            var params: [String: JSONValue] = [:]
             if let provider = try optionalOption("--provider", from: args) {
                 params["provider"] = .string(provider)
             }
@@ -956,9 +930,19 @@ struct CLI {
 
     private func runTask(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl task prepare|run|status|resume|cancel")
+            throw CLIError.usage("Usage: macctl task compose|prepare|run|status|resume|cancel")
         }
         switch subcommand {
+        case "compose":
+            guard args.dropFirst().first == "focus-session" else {
+                throw CLIError.usage("Usage: macctl task compose focus-session [--request <text>] [--plan] [--json]")
+            }
+            let request = try optionalOption("--request", from: args)
+                ?? FocusSessionPlanComposer.canonicalRequest
+            if args.contains("--plan") {
+                return renderValue(try FocusSessionPlanComposer.taskPlan(request: request))
+            }
+            return renderValue(try FocusSessionPlanComposer.compose(request: request))
         case "prepare":
             let params = try taskPlanParameters(from: args)
             if params["plan"] == nil {
@@ -966,13 +950,9 @@ struct CLI {
             }
             return render(sendOrLocal(method: "task.prepare", params: params, localFallback: false))
         case "run", "resume":
-            var params = try taskPlanParameters(from: args)
+            let params = try taskPlanParameters(from: args)
             if params["plan"] == nil {
-                throw CLIError.usage("Usage: macctl task \(subcommand) --plan-stdin --approval-token <token> [--lease-token <token>]")
-            }
-            params["approval_token"] = .string(try requiredOption("--approval-token", from: args))
-            if let lease = try optionalOption("--lease-token", from: args) {
-                params["lease_token"] = .string(lease)
+                throw CLIError.usage("Usage: macctl task \(subcommand) --plan-stdin [--json]")
             }
             return render(sendOrLocal(method: "task.\(subcommand)", params: params, localFallback: false))
         case "status", "cancel":
@@ -985,7 +965,7 @@ struct CLI {
                 localFallback: false
             ))
         default:
-            throw CLIError.usage("Usage: macctl task prepare|run|status|resume|cancel")
+            throw CLIError.usage("Usage: macctl task compose|prepare|run|status|resume|cancel")
         }
     }
 
@@ -1023,13 +1003,9 @@ struct CLI {
             guard scope == KeyboardLeaseScope.session.rawValue else {
                 throw CLIError.usage("Keyboard freeze is session-only; use --scope session")
             }
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("keyboard freeze acquire requires --confirm")
-            }
             var params: [String: JSONValue] = [
                 "scope": .string(scope),
-                "reason": .string(try requiredOption("--reason", from: args)),
-                "confirm": .bool(true)
+                "reason": .string(try requiredOption("--reason", from: args))
             ]
             if let seconds = try optionalOption("--seconds", from: args) {
                 guard let value = Double(seconds) else {
@@ -1065,8 +1041,7 @@ struct CLI {
                 throw CLIError.usage("--scope must be app or session")
             }
             var params: [String: JSONValue] = [
-                "scope": .string(scope.lowercased()),
-                "confirm": .bool(args.contains("--confirm"))
+                "scope": .string(scope.lowercased())
             ]
             if scope.lowercased() == KeyboardLeaseScope.app.rawValue {
                 guard let app = try optionalOption("--app", from: args) else {
@@ -1102,9 +1077,6 @@ struct CLI {
                     throw CLIError.usage("--navigation-mode requires --from-pass-through")
                 }
                 params["from_pass_through"] = .bool(true)
-            }
-            guard args.contains("--confirm") else {
-                throw CLIError.usage("Usage: macctl keyboard lease acquire --scope app|session [--seconds N] [--navigation-mode --from-pass-through] [--suppress-physical-keyboard --reason <text>] --confirm")
             }
             return render(sendOrLocal(
                 method: "keyboard.lease.acquire",
@@ -1208,12 +1180,9 @@ struct CLI {
             ))
         case "setup", "run", "remove":
             guard let id = args.dropFirst().first, !id.hasPrefix("--") else {
-                throw CLIError.usage("Usage: macctl shortcut \(subcommand) <id> [--approval-token <token>]")
+                throw CLIError.usage("Usage: macctl shortcut \(subcommand) <id> [--route accessibility|keyboard]")
             }
             var params: [String: JSONValue] = ["id": .string(id)]
-            if let token = try optionalOption("--approval-token", from: args) {
-                params["approval_token"] = .string(token)
-            }
             if let route = try optionalOption("--route", from: args) {
                 guard subcommand == "run", ["accessibility", "keyboard"].contains(route) else {
                     throw CLIError.usage("--route is supported only by shortcut run and must be accessibility or keyboard")
@@ -1339,24 +1308,33 @@ struct CLI {
         return 0
     }
 
+    private func renderVersion() -> Int32 {
+        if jsonOutput {
+            return renderValue(MacCtlVersionOutput(version: MacCtlVersion.current))
+        }
+        print("macctl \(MacCtlVersion.current)")
+        return 0
+    }
+
     private func printHelp() {
         print("""
         macctl — command-first macOS control plane
 
+        macctl version [--json]
+        macctl --version
         macctl doctor --json
         macctl capabilities --json
         macctl status --json
         macctl app list [--json]
         macctl app open <name-or-bundle-id> [--focus-policy automatic|foreground|background] [--background]
         macctl workflow list|validate|prepare|run <workflow> [--focus-policy automatic|foreground|background] [--background] [--ephemeral-stdin]
-        macctl approval list|approve|deny <token>
         macctl receipts list|status
         macctl release check [--json]
-        macctl keyboard status|setup|enable --confirm|inspect
-        macctl keyboard lease acquire --scope app --app "<name>" [--seconds N] --confirm
-        macctl keyboard lease acquire --scope session [--seconds N] [--suppress-physical-keyboard --reason <text>] --confirm
+        macctl keyboard status|setup|enable|inspect
+        macctl keyboard lease acquire --scope app --app "<name>" [--seconds N]
+        macctl keyboard lease acquire --scope session [--seconds N] [--suppress-physical-keyboard --reason <text>]
         macctl keyboard lease release <token>
-        macctl keyboard freeze acquire --scope session --seconds 30 --confirm --reason <text>
+        macctl keyboard freeze acquire --scope session --seconds 30 --reason <text>
         macctl keyboard freeze status
         macctl keyboard freeze release <token>
         macctl keyboard navigate <command> --lease-token <token> [--count N]
@@ -1366,34 +1344,35 @@ struct CLI {
         macctl control authorization bind <request-id> --process-id <pid>
         macctl control authorization list
         macctl control authorization resolve <request-id> --outcome completed|failed|cancelled|timeout|unknown
-        macctl control hands-off begin --confirm [--provider mac_control|computer_use|hybrid] [--app <app>] [--task <id>] [--seconds N]
+        macctl control hands-off begin [--provider mac_control|computer_use|hybrid] [--app <app>] [--task <id>] [--seconds N]
         macctl control hands-off heartbeat|end --session-id <id> [--seconds N]
         macctl control hands-off status
         macctl control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]
         macctl control capability-audit --app <app> [--max-nodes N] [--max-depth N]
         macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
         macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
-        macctl control batch --app <app> --actions-stdin --confirm [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>] [--hands-off-session-id <id>]
-        macctl control perform <action> (--lease-token <token> | --app <app> --confirm) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id>] [--hands-off-session-id <id>] [--route <route>] [selector options]
-        macctl control perform context-menu --app <app> --confirm --role <role> [--identifier <id>] [--title <title>] [--window-title <title> | --window-identifier <id>] [--expected-menu-items "Item A,Item B"]
-        macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] [--locator-digest <digest> --ancestor-digest <digest> --geometry-digest <digest>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use] --confirm
+        macctl control batch --app <app> --actions-stdin [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>] [--hands-off-session-id <id>]
+        macctl control perform <action> (--lease-token <token> | --app <app>) [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id>] [--hands-off-session-id <id>] [--route <route>] [selector options]
+        macctl control perform context-menu --app <app> --role <role> [--identifier <id>] [--title <title>] [--window-title <title> | --window-identifier <id>] [--expected-menu-items "Item A,Item B"]
+        macctl control perform scroll --app <app> --role AXScrollArea [--identifier <id>] [--locator-digest <digest> --ancestor-digest <digest> --geometry-digest <digest>] --direction up|down|left|right --amount N [--fallback input-scroll|computer-use]
         macctl shortcut audit [--app <app>]
         macctl shortcut propose --app <app> --menu-path "Menu->Submenu->Command" [--chord <chord>] [--postconditions-stdin]
         macctl shortcut propose --extension-id <id> --command-id <id> [--chord <chord>] --postconditions-stdin
         macctl shortcut inspect <id>
-        macctl shortcut setup|remove <id> [--approval-token <token>]
-        macctl shortcut run <id> [--route accessibility|keyboard] [--approval-token <token>]
+        macctl shortcut setup|remove <id>
+        macctl shortcut run <id> [--route accessibility|keyboard]
         macctl route list|inspect --app <app> --task <task>
-        macctl route benchmark --app <app> --task <task> --action <action> --route <route> --confirm
+        macctl route benchmark --app <app> --task <task> --action <action> --route <route>
         macctl route benchmark ... --action scroll --route scroll --direction up|down|left|right --amount N [--reset-direction <opposite> --reset-amount N]
-        macctl route register --app <app> --task <task> --latency-ms <ms> --p95-ms <ms> --verification-rate <0...1> --confirm
+        macctl route register --app <app> --task <task> --latency-ms <ms> --p95-ms <ms> --verification-rate <0...1>
         macctl accessibility tree --app <app>
         macctl accessibility audit --app <app> --manifest <path>
         macctl ideal-state validate --manifest <path> [--json]
         macctl ideal-state audit --app <app> --manifest <path> [--json]
+        macctl task compose focus-session [--request <text>] [--plan] [--json]
         macctl task prepare|run|status|resume|cancel
         macctl task prepare --plan-stdin [--json]
-        macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
+        macctl task run|resume --plan-stdin [--json]
         macctl task status|cancel <task-id>
         macctl adapter capabilities [--json]
         macctl daemon install|remove|restart|status [--allow-legacy-idle-snapshot]
@@ -1401,6 +1380,12 @@ struct CLI {
         macctl install [--allow-legacy-idle-snapshot]
         """)
     }
+}
+
+private struct MacCtlVersionOutput: Encodable {
+    let schemaVersion = "macctl-version/v1"
+    let name = "macctl"
+    let version: String
 }
 
 enum CLIError: Error, LocalizedError {

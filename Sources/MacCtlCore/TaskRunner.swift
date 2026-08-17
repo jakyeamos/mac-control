@@ -233,8 +233,7 @@ public final class TaskRunner {
 
     public func prepare(
         plan: TaskPlan,
-        ephemeralInputs: [String: String] = [:],
-        operationID: String = UUID().uuidString
+        ephemeralInputs: [String: String] = [:]
     ) throws -> TaskPreparedReport {
         try validate(plan)
         let digest = TaskPlan.digest(plan, ephemeralInputs: ephemeralInputs)
@@ -244,7 +243,8 @@ public final class TaskRunner {
                 throw TaskControlError.approvalMismatch
             }
             // An interruption cannot prove whether the current action was
-            // dispatched. Require explicit re-approval and fresh authority.
+            // dispatched. Preserve the indeterminate checkpoint and require
+            // fresh execution authority before a caller can resume.
             let interrupted = checkpointCopy(
                 running,
                 state: .indeterminate,
@@ -255,18 +255,10 @@ public final class TaskRunner {
             try saveCheckpoint(interrupted)
             existing = interrupted
         }
-        let approvalPlan: TaskPlan
-        if let existing, [.paused, .blocked, .indeterminate, .expired].contains(existing.state) {
-            approvalPlan = plan.remaining(from: existing.stepIndex)
-        } else {
-            approvalPlan = plan
+        if existing?.state == .expired {
+            throw TaskControlError.invalidState(.expired)
         }
-        let approval = approvalStore.prepare(
-            plan: approvalPlan,
-            ephemeralInputs: ephemeralInputs,
-            operationID: operationID
-        )
-        if existing == nil || ![.paused, .blocked, .indeterminate, .expired].contains(existing!.state) {
+        if existing == nil || ![.paused, .blocked, .indeterminate].contains(existing!.state) {
             let timestamp = now()
             let checkpoint = TaskCheckpoint(
                 taskID: plan.id,
@@ -282,9 +274,9 @@ public final class TaskRunner {
         }
         return TaskPreparedReport(
             taskID: plan.id,
-            planDigest: approval.planDigest,
-            state: existing.map { [.paused, .blocked, .indeterminate, .expired].contains($0.state) ? $0.state : .prepared } ?? .prepared,
-            approval: approval.record
+            planDigest: digest,
+            state: existing.map { [.paused, .blocked, .indeterminate].contains($0.state) ? $0.state : .prepared } ?? .prepared,
+            risk: TaskPlanValidator.validate(plan, adapterRegistry: adapterRegistry).risk
         )
     }
 
@@ -297,14 +289,12 @@ public final class TaskRunner {
 
     public func run(
         plan: TaskPlan,
-        approvalToken: String,
         ephemeralInputs: [String: String] = [:],
         authority: TaskExecutionAuthority? = nil,
         effectiveFocusPolicy: FocusPolicy? = nil
     ) throws -> TaskStatusReport {
         try execute(
             plan: plan,
-            approvalToken: approvalToken,
             ephemeralInputs: ephemeralInputs,
             authority: authority,
             effectiveFocusPolicy: effectiveFocusPolicy,
@@ -314,14 +304,12 @@ public final class TaskRunner {
 
     public func resume(
         plan: TaskPlan,
-        approvalToken: String,
         ephemeralInputs: [String: String] = [:],
         authority: TaskExecutionAuthority,
         effectiveFocusPolicy: FocusPolicy? = nil
     ) throws -> TaskStatusReport {
         try execute(
             plan: plan,
-            approvalToken: approvalToken,
             ephemeralInputs: ephemeralInputs,
             authority: authority,
             effectiveFocusPolicy: effectiveFocusPolicy,
@@ -358,7 +346,6 @@ public final class TaskRunner {
 
     private func execute(
         plan: TaskPlan,
-        approvalToken: String,
         ephemeralInputs: [String: String],
         authority: TaskExecutionAuthority?,
         effectiveFocusPolicy: FocusPolicy?,
@@ -380,7 +367,7 @@ public final class TaskRunner {
             throw TaskControlError.approvalMismatch
         }
         if resuming {
-            guard [.paused, .blocked, .indeterminate, .expired].contains(checkpoint.state) else {
+            guard [.paused, .blocked, .indeterminate].contains(checkpoint.state) else {
                 throw TaskControlError.invalidState(checkpoint.state)
             }
             guard authority?.fresh == true else { throw TaskControlError.leaseRequired }
@@ -390,26 +377,9 @@ public final class TaskRunner {
         if plan.requiresInputAuthority(using: adapterRegistry) {
             guard let authority, authority.fresh else { throw TaskControlError.leaseRequired }
         }
-        let approvalPlan = resuming ? plan.remaining(from: checkpoint.stepIndex) : plan
-        var approvalConsumed = false
-        let consumeApprovalAtDispatch = {
-            guard !approvalConsumed else { return }
-            do {
-                _ = try self.approvalStore.consume(
-                    token: approvalToken,
-                    plan: approvalPlan,
-                    ephemeralInputs: ephemeralInputs
-                )
-                approvalConsumed = true
-            } catch TaskApprovalStoreError.notFound {
-                throw TaskControlError.approvalRequired
-            } catch TaskApprovalStoreError.expired {
-                throw TaskControlError.leaseExpired
-            } catch TaskApprovalStoreError.mismatch {
-                throw TaskControlError.approvalMismatch
-            } catch TaskApprovalStoreError.alreadyUsed {
-                throw TaskControlError.approvalRequired
-            }
+        var actionDispatched = false
+        let markDispatch = {
+            actionDispatched = true
         }
 
         let startedAt = now()
@@ -434,11 +404,9 @@ public final class TaskRunner {
             var stepAttempts = 0
             var stepRoute: String?
             do {
-                try checkTaskBudget(
+                try checkTaskLiveness(
                     taskID: plan.id,
-                    deadline: deadline,
-                    actionsUsed: current.attempts,
-                    maxActions: plan.maxActions
+                    deadline: deadline
                 )
                 let context = TaskActionContext(
                     taskID: plan.id,
@@ -460,10 +428,9 @@ public final class TaskRunner {
                     context: context,
                     current: current,
                     deadline: deadline,
-                    maxActions: plan.maxActions,
                     attempts: &stepAttempts,
                     route: &stepRoute,
-                    consumeApprovalAtDispatch: consumeApprovalAtDispatch
+                    consumeApprovalAtDispatch: markDispatch
                 )
                 current = checkpointCopy(
                     current,
@@ -482,7 +449,7 @@ public final class TaskRunner {
                 )
                 try saveCheckpoint(current)
             } catch let error as TaskControlError {
-                if approvalConsumed {
+                if actionDispatched {
                     current = try persistFailure(
                         checkpoint: current,
                         step: step,
@@ -506,7 +473,7 @@ public final class TaskRunner {
                 throw error
             } catch {
                 let taskError = TaskControlError.blocked(errorCode(for: error))
-                if approvalConsumed {
+                if actionDispatched {
                     current = try persistFailure(
                         checkpoint: current,
                         step: step,
@@ -554,21 +521,18 @@ public final class TaskRunner {
         context: TaskActionContext,
         current: TaskCheckpoint,
         deadline: Date,
-        maxActions: Int,
         attempts: inout Int,
         route: inout String?,
         consumeApprovalAtDispatch: () throws -> Void
     ) throws -> StepResult {
-        let maximumAttempts = TaskPlanValidator.maximumAttempts(for: step.risk, recovery: step.recovery)
+        let maximumAttempts = TaskPlanValidator.attemptLimit(for: step.risk, recovery: step.recovery)
         var lastReport: TaskActionExecutionReport?
         attempts = 0
         route = nil
         while attempts < maximumAttempts {
-            try checkTaskBudget(
+            try checkTaskLiveness(
                 taskID: context.taskID,
-                deadline: minDate(deadline, context.deadline),
-                actionsUsed: current.attempts + attempts,
-                maxActions: maxActions
+                deadline: minDate(deadline, context.deadline)
             )
             let nextAttempt = attempts + 1
             let recoveryRoute = nextAttempt > 1 && step.recovery.permitsAlternateRoute
@@ -583,11 +547,9 @@ public final class TaskRunner {
                     failure: { TaskControlError.preconditionFailed(step.id) }
                 )
                 attempts = nextAttempt
-                try checkTaskBudget(
+                try checkTaskLiveness(
                     taskID: context.taskID,
-                    deadline: minDate(deadline, context.deadline),
-                    actionsUsed: current.attempts + attempts - 1,
-                    maxActions: maxActions
+                    deadline: minDate(deadline, context.deadline)
                 )
                 _ = try attemptContext.revalidateBeforeAction(
                     includeTarget: requiresTargetRevalidation(for: step.action)
@@ -731,15 +693,12 @@ public final class TaskRunner {
         }
     }
 
-    private func checkTaskBudget(
+    private func checkTaskLiveness(
         taskID: String,
-        deadline: Date,
-        actionsUsed: Int,
-        maxActions: Int
+        deadline: Date
     ) throws {
         guard !isCancelled(taskID) else { throw TaskControlError.cancelled }
         guard now() < deadline else { throw TaskControlError.timedOut }
-        guard actionsUsed < maxActions else { throw TaskControlError.actionBudgetExceeded }
     }
 
     private func persistFailure(
@@ -868,7 +827,6 @@ public final class TaskRunner {
             case .cancelled: return "task_cancelled"
             case .timedOut: return "task_timeout"
             case .leaseExpired, .leaseRequired: return "task_lease_expired"
-            case .actionBudgetExceeded: return "task_action_budget"
             case .preconditionFailed: return "task_precondition_failed"
             case .postconditionFailed: return "task_postcondition_failed"
             case .indeterminate: return "task_indeterminate"
@@ -954,6 +912,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
     private let semanticActionRouter: SemanticActionRouter
     private let adapterRegistry: AppAdapterRegistry
     private let typedAppleScriptExecutor: TypedAppleScriptExecuting
+    private let focusSessionExecutor: FocusSessionActionExecuting
     private let foregroundApplication: () -> AppInfo?
     private let searchFieldResolver: SearchFieldResolving
     private let focusedElementInspector: FocusedElementInspecting
@@ -980,6 +939,7 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         adapterRegistry: AppAdapterRegistry,
         foregroundApplication: @escaping () -> AppInfo?,
         typedAppleScriptExecutor: TypedAppleScriptExecuting = SystemTypedAppleScriptExecutor(),
+        focusSessionExecutor: FocusSessionActionExecuting? = nil,
         searchFieldResolver: SearchFieldResolving? = nil,
         focusedElementInspector: FocusedElementInspecting? = nil,
         searchTextTyper: SearchTextTyping? = nil,
@@ -1003,6 +963,8 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
         self.semanticActionRouter = semanticActionRouter
         self.adapterRegistry = adapterRegistry
         self.typedAppleScriptExecutor = typedAppleScriptExecutor
+        self.focusSessionExecutor = focusSessionExecutor
+            ?? SystemFocusSessionActionExecutor(accessibilityController: accessibilityController)
         self.foregroundApplication = foregroundApplication
         self.searchFieldResolver = searchFieldResolver ?? accessibilityController
         self.focusedElementInspector = focusedElementInspector ?? accessibilityController
@@ -1536,6 +1498,12 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             guard adapterRegistry.manifest(adapterID: adapterID) != nil else {
                 throw AppAdapterError.unsupportedAdapter(adapterID)
             }
+            if expected == "focus_session_verified",
+               let rawOperation = predicate.parameters["focus_session_effect"]?.stringValue,
+               let operation = FocusSessionExecutionOperation(rawValue: rawOperation) {
+                _ = try context.revalidateBeforeAction(includeTarget: true)
+                return try focusSessionExecutor.verify(operation)
+            }
             if expected == "supported" { return true }
             guard let application = foregroundApplication() else { return false }
             return adapterRegistry.adapterID(for: application) == adapterID
@@ -1578,6 +1546,34 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             _ = try context.requireAuthority()
         }
         switch operationName {
+        case FocusSessionExecutionOperation.openBrief.rawValue,
+             FocusSessionExecutionOperation.openScratchpad.rawValue,
+             FocusSessionExecutionOperation.arrangeWorkspace.rawValue:
+            guard let focusOperation = FocusSessionExecutionOperation(rawValue: operationName) else {
+                throw AppAdapterError.unsupportedOperation(adapterID: adapterID, operation: operationName)
+            }
+            guard requestedRoute == nil || requestedRoute == focusOperation.expectedRoute else {
+                throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")
+            }
+            _ = try context.revalidateBeforeAction(includeTarget: true)
+            let result = try focusSessionExecutor.execute(focusOperation)
+            return AppAdapterActionResult(
+                adapterID: adapterID,
+                operation: operationName,
+                route: result.route,
+                mutating: operation.mutating,
+                targetFingerprint: ControlTargetFingerprints.make(application: application, focus: nil),
+                observation: AppAdapterObservation(
+                    adapterID: adapterID,
+                    operation: operationName,
+                    application: application.name,
+                    state: "applied",
+                    fields: [
+                        "opened": .bool(focusOperation != .arrangeWorkspace),
+                        "layout_applied": .bool(focusOperation == .arrangeWorkspace)
+                    ]
+                )
+            ).asTaskReport()
         case "open":
             guard requestedRoute == nil || requestedRoute == .native else {
                 throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")

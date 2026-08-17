@@ -45,13 +45,13 @@ unavailable. No authorization-notice command approves or denies the native macOS
 
 Keyboard diagnostics and control use the daemon-authoritative surface:
 `swift run macctl keyboard status --json`, `keyboard setup --json`,
-`keyboard enable --confirm --json`, `keyboard inspect --json`, and the
+`keyboard enable --json`, `keyboard inspect --json`, and the
 short-lived `keyboard lease acquire|release`, `keyboard navigate`, and
-`keyboard send` commands. The input commands require a confirmed lease token;
-do not substitute them for the approval-gated workflow `key` or `type` path.
+`keyboard send` commands. The input commands require an execution lease token;
+do not substitute them for the structured workflow or task `key` and `type` path.
 `keyboard lease acquire --scope session --suppress-physical-keyboard` is an
 optional interactive mode that requires Accessibility and Input Monitoring;
-it also requires `--reason` and explicit confirmation, and must not be used for
+it also requires `--reason`, and must not be used for
 app-scoped or unattended workflows. Prefer the separate
 `keyboard freeze acquire|status|release` commands when the freeze permission
 itself is the requested capability.
@@ -90,7 +90,7 @@ plus the selection reason. Successful foreground actions include the boundary or
 remain foreground-bound; an explicit background request fails closed with
 `background_unsupported`, `failure_class=action_unavailable`,
 `recommended_surface=task.run`, and a named-task next action. Background
-execution belongs to an approved task plan so process-directed authority and
+execution belongs to an exact named task plan so process-directed authority and
 unrelated foreground preservation are checked together.
 Use `--target-surface web-content` on `control capabilities`, `control perform`,
 or `control batch` for rendered page content. Capabilities return the preferred
@@ -129,7 +129,7 @@ comparison, use provider-natural pointer/visual, scroll, or drag actions. Keep
 Tab/Shift-Tab results as separately labeled `interaction_mode=keyboard` evidence,
 not as the representative Computer Use lane.
 `control perform scroll --app <app> --role AXScrollArea --identifier <id>
---direction up|down|left|right --amount <n> --confirm --json` is the semantic
+--direction up|down|left|right --amount <n> --json` is the semantic
 scroll path. `accessibility tree` and `accessibility audit` are bounded,
 redacted diagnostics; their AX values, private text, screenshots, and OCR are
 excluded from responses persisted as receipts. When extending a paired scroll
@@ -144,7 +144,7 @@ stores only `foreground_oracle=foreground_unchanged` and the redacted
 Agent-facing control discovery and batching are available through:
 `control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]`,
 `control capability-audit-batch --all-applicable [--run-id <id>] [--max-apps <n>]`,
-and `control batch --app <app> --actions-stdin --confirm`. Capability output
+and `control batch --app <app> --actions-stdin`. Capability output
 classifies the app descriptively and distinguishes fresh daemon-executed routes
 from stale or caller-supplied inventory; it does not infer provider parity.
 The batch audit is a separate bounded, read-only inventory: it selects at most
@@ -169,13 +169,47 @@ fields and digests, not raw selectors, labels, or AX references.
 The menu-bar Control Center exposes foreground movement to the user: a light-blue
 `Focusing` pill precedes a foreground handoff and `Focused` identifies a one-shot
 target notice. For a run that spans native actions or a provider handoff, the caller
-must explicitly start `control hands-off begin --confirm`, pass its opaque
+must explicitly start `control hands-off begin`, pass its opaque
 `session_id` to each `control perform`/`control batch` request, heartbeat before
 the returned interval, and call `control hands-off end` on completion. While that
 bounded session is active, the persistent `Hands Off` pill and popover tell the user
 to keep the keyboard and trackpad untouched. Expiry, `control.stop_active`, and
 daemon shutdown clear it; no session is inferred from a one-shot action. `Frozen`
 remains the stronger visual state when physical keyboard suppression is active.
+Checkpointed task runs project their durable checkpoint into the Control Center as redacted
+`Pending`, `Running`, `Verified`, and `Stopped` rows. The projection uses plan step IDs only and
+does not expose targets, selectors, inputs, or output. Completed and stopped outcomes remain
+available for 60 seconds after input authority is released, so a failed later step cannot hide
+earlier verified actions. Use the stable `macctl.task.progress`,
+`macctl.task.progress.count`, and `macctl.task.progress.<step-id>` Accessibility identifiers for
+direct native-surface verification.
+
+`task compose focus-session` is an executable showcase surface. Its ordered effects open a
+bounded brief, open a bounded scratchpad, and arrange their Preview and TextEdit windows. The
+source verification contract accepts post-dispatch fixture digests and Accessibility window
+observations tied to the exact plan digest; it never accepts dispatch results as proof or retains
+visible titles, paths, or document contents. The returned preview is `ready`, executable, has an
+empty `blocked_by`, and exposes the exact `plan_digest` used by the runnable plan.
+
+Use `task compose focus-session --plan --json` to inspect the executable candidate behind that
+preview. Its three product-owned adapter operations accept no request-controlled path, content,
+application, script, or frame. Every step has a strict `focus_session_verified` postcondition;
+the open steps compare the fixture digest plus either the live AX document URL or, only when that
+attribute is absent, an exact in-memory digest of the product-owned public fixture filename; the
+layout step reads both window frames back. Raw titles and paths are not retained. Source
+availability is not installed proof.
+The open-step observer may wait up to two seconds for Accessibility publication, but it must not
+redispatch the open operation while polling; the three-action task budget remains one dispatch
+per declared effect.
+Resolve the unique public fixture across all visible windows in its expected app for both
+verification and layout; do not substitute the currently focused window.
 
 The Tier-1 gate is defined in `docs/TIER1_RELEASE.md`. Missing live evidence
 is a recorded `blocked` result, not permission to weaken a check.
+
+For a `paused`, `blocked`, or `indeterminate` checkpoint, resubmit the original full
+plan with `task resume`. The service establishes a fresh run-scoped execution lease, then
+revalidates the full plan digest, checkpoint index, exact targets, remaining preconditions, and
+the caller-declared deadline before dispatch. Never substitute `task run` for a partial resume.
+An `expired` checkpoint is terminal; use a versioned new task identity instead of resetting its
+plan-wide deadline.

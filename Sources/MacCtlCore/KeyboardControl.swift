@@ -390,7 +390,7 @@ public enum KeyboardDriveStoreError: Error, LocalizedError, Equatable {
         case .duplicateLease:
             return "A keyboard driving lease is already active"
         case .invalidLifetime:
-            return "Keyboard lease lifetime must be greater than zero and no more than 300 seconds"
+            return "Keyboard lease lifetime must be a positive finite duration; physical suppression and navigation leases may not exceed 300 seconds"
         case .applicationRequired:
             return "An app-scoped keyboard lease requires a foreground application"
         case .physicalKeyboardSuppressionRequiresSession:
@@ -522,9 +522,12 @@ public final class KeyboardDriveStore {
         navigationMode: KeyboardNavigationMode = .unchanged,
         fromPassThrough: Bool = false
     ) throws -> KeyboardDriveLease {
-        guard confirm else { throw KeyboardDriveStoreError.confirmationRequired }
         let lifetime = seconds ?? defaultLifetime
-        guard lifetime > 0, lifetime <= Self.maximumLifetime else {
+        guard lifetime.isFinite, lifetime > 0 else {
+            throw KeyboardDriveStoreError.invalidLifetime
+        }
+        if (physicalInputMode == .suppressed || navigationMode == .navigation),
+           lifetime > Self.maximumLifetime {
             throw KeyboardDriveStoreError.invalidLifetime
         }
         if scope == .app, application == nil {
@@ -790,7 +793,6 @@ public final class KeyboardAccessController {
         activeLease: KeyboardDriveLease? = nil,
         navigationRestorationPending: Bool = false
     ) throws -> KeyboardAccessStatus {
-        guard confirm else { throw KeyboardControlError.confirmationRequired }
         try preferenceStore.enableFullKeyboardAccess()
         guard preferenceStore.fullKeyboardAccessEnabled else {
             throw KeyboardControlError.enableVerificationFailed

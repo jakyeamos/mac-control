@@ -1,6 +1,7 @@
 import ApplicationServices
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 
 /// Resolution may inspect a larger bounded surface than the default fast
@@ -423,6 +424,155 @@ public final class AccessibilityController: FocusedElementInspecting {
             ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first
         guard let window else { return nil }
         return try? bounds(of: window)
+    }
+
+    /// Resolves one visible product-owned fixture window across the app's
+    /// complete window list. Raw document URLs and titles remain in memory.
+    public func fixtureWindowBounds(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String
+    ) throws -> CGRect? {
+        try fixtureWindow(
+            pid: pid,
+            expectedURL: expectedURL,
+            expectedTitleDigest: expectedTitleDigest
+        ).map { try bounds(of: $0) }
+    }
+
+    public func setFixtureWindowFrame(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String,
+        frame: CGRect,
+        tolerance: CGFloat = 2
+    ) throws {
+        guard let window = try fixtureWindow(
+            pid: pid,
+            expectedURL: expectedURL,
+            expectedTitleDigest: expectedTitleDigest
+        ) else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        try setWindowFrame(window, frame: frame, tolerance: tolerance)
+    }
+
+    private func fixtureWindow(
+        pid: pid_t,
+        expectedURL: URL,
+        expectedTitleDigest: String
+    ) throws -> AXUIElement? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        let windows = (attribute(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let focusedWindow = elementAttribute(application, kAXFocusedWindowAttribute)
+        var documentMatches: [AXUIElement] = []
+        var titleMatches: [AXUIElement] = []
+        let canonicalExpectedURL = expectedURL.standardizedFileURL.resolvingSymlinksInPath()
+        for window in windows {
+            let hidden = (attribute(window, kAXHiddenAttribute) as? Bool) ?? false
+            guard !hidden else { continue }
+            if let document = attribute(window, kAXDocumentAttribute) as? String,
+               !document.isEmpty {
+                let observedURL = URL(string: document)?.isFileURL == true
+                    ? URL(string: document)
+                    : URL(fileURLWithPath: document)
+                if observedURL?.standardizedFileURL.resolvingSymlinksInPath() == canonicalExpectedURL {
+                    documentMatches.append(window)
+                    continue
+                }
+            }
+            guard let title = attribute(window, kAXTitleAttribute) as? String,
+                  !title.isEmpty else { continue }
+            let digest = SHA256.hash(data: Data(title.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            if digest == expectedTitleDigest {
+                titleMatches.append(window)
+            }
+        }
+        if !documentMatches.isEmpty {
+            if let focusedWindow,
+               let focusedMatch = documentMatches.first(where: { CFEqual($0, focusedWindow) }) {
+                return focusedMatch
+            }
+            return documentMatches.first
+        }
+        guard titleMatches.count <= 1 else {
+            throw AccessibilityControllerError.ambiguousWindowMatch(titleMatches.count)
+        }
+        return titleMatches.first
+    }
+
+    /// Moves and resizes only the currently focused window, then reads the
+    /// frame back before returning. Callers must resolve and bind the process.
+    public func setFocusedWindowFrame(pid: pid_t, frame: CGRect, tolerance: CGFloat = 2) throws {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        try setWindowFrame(window, frame: frame, tolerance: tolerance)
+    }
+
+    private func setWindowFrame(_ window: AXUIElement, frame: CGRect, tolerance: CGFloat) throws {
+        var position = frame.origin
+        var size = frame.size
+        guard let positionValue = AXValueCreate(.cgPoint, &position),
+              let sizeValue = AXValueCreate(.cgSize, &size),
+              AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue) == .success,
+              AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue) == .success else {
+            throw AccessibilityControllerError.actionFailed("window_frame")
+        }
+        let observed = try bounds(of: window)
+        guard abs(observed.minX - frame.minX) <= tolerance,
+              abs(observed.minY - frame.minY) <= tolerance,
+              abs(observed.width - frame.width) <= tolerance,
+              abs(observed.height - frame.height) <= tolerance else {
+            throw AccessibilityControllerError.actionFailed("window_frame_verification")
+        }
+    }
+
+    /// Returns the focused window's document URL for an in-memory equality
+    /// check. Callers must not retain or project the raw path.
+    public func focusedWindowDocumentURL(pid: pid_t) throws -> URL? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        guard let document = attribute(window, kAXDocumentAttribute) as? String,
+              !document.isEmpty else {
+            return nil
+        }
+        return URL(string: document)?.isFileURL == true
+            ? URL(string: document)
+            : URL(fileURLWithPath: document)
+    }
+
+    /// Returns the focused window title for an immediate, in-memory identity
+    /// comparison. Callers must not retain or project the raw title.
+    public func focusedWindowTitle(pid: pid_t) throws -> String? {
+        guard PermissionDiagnostics.hasAccessibility() else {
+            throw AccessibilityControllerError.permissionDenied
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let window = elementAttribute(application, kAXFocusedWindowAttribute)
+            ?? (attribute(application, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            throw AccessibilityControllerError.elementNotFound
+        }
+        guard let title = attribute(window, kAXTitleAttribute) as? String,
+              !title.isEmpty else {
+            return nil
+        }
+        return title
     }
 
     /// Returns only structural window state.  No AX value, document text, or

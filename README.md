@@ -18,6 +18,8 @@ swift test
 The built binaries are under `.build/`:
 
 ```sh
+swift run macctl --version
+swift run macctl version --json
 swift run macctl doctor --json
 swift run macctl capabilities --json
 swift run macctl app list --json
@@ -42,18 +44,18 @@ loads the user LaunchAgent, which executes the bundle's
 rebuilding and reinstalling.
 
 Every binary install, LaunchAgent install, restart, and removal first asks the
-live daemon for a short atomic lifecycle drain. Pending proposals,
-approved-but-unconsumed authority, active keyboard leases/executions, and
+live daemon for a short atomic lifecycle drain. Pending legacy approval records,
+active keyboard leases/executions, and
 in-flight mutations block the operation. Once admitted, the daemon temporarily
 rejects new mutations while the lifecycle command changes installed state. A
 healthy daemon whose interlock cannot be reached fails closed; an unhealthy
-daemon remains restartable for recovery. Approval and lease tokens are never
+daemon remains restartable for recovery. Legacy approval and current lease tokens are never
 persisted or returned by this contract.
 
 The first upgrade from a daemon that predates lifecycle drains requires the
 explicit one-time `--allow-legacy-idle-snapshot` flag after the owner confirms
 the control center is idle. That compatibility path still blocks visible
-pending approvals and execution; after the new daemon is restarted, ordinary
+pending legacy approval records and execution; after the new daemon is restarted, ordinary
 atomic drains are required and the flag is no longer needed.
 
 Install the provider-neutral agent skill and its Codex projection separately:
@@ -91,6 +93,7 @@ Privacy & Security settings.
 Useful read-only commands include:
 
 ```sh
+~/.local/bin/macctl --version
 ~/.local/bin/macctl doctor --json
 ~/.local/bin/macctl capabilities --json
 ~/.local/bin/macctl status --json
@@ -103,7 +106,7 @@ Useful read-only commands include:
 
 `macctl release check --json` is the Tier-1 machine-readable gate. It checks
 the packaged launchd identity, live daemon permissions, owner-only transport,
-receipt storage/retention, fresh Mac GUI smoke receipts, and approval/fail-closed
+receipt storage/retention, fresh Mac GUI smoke receipts, and execution-integrity
 evidence. It does not run workflows as a side effect; missing live evidence is
 reported as `blocked`.
 
@@ -152,17 +155,31 @@ Mac Control. A source can open only through a registered Codex opener; otherwise
 is informational. An unannounced external dialog remains unverified in v1.
 
 The native Control Center publishes stable Accessibility identifiers for semantic inspection:
-`macctl.control-center.status`, `macctl.approval.window`, `macctl.control-center.health`, and
-`macctl.approval.count`. Exact approval buttons append the immutable operation ID to
-`macctl.approval.approve.` or `macctl.approval.deny.`. The operation ID still binds the private
-token lookup; the Accessibility identifier exposes no token.
+`macctl.control-center.status` and `macctl.control-center.health`. Checkpointed tasks publish
+`macctl.task.progress`,
+`macctl.task.progress.count`, and one redacted `macctl.task.progress.<step-id>` row per step.
+Rows show only plan-derived labels and the states `Pending`, `Running`, `Verified`, or `Stopped`;
+targets, selectors, inputs, and output stay out of the snapshot. A completed or stopped task
+remains visible for 60 seconds so a later failure cannot hide earlier verified actions. Task,
+workflow, and shortcut execution does not create native approval cards; stale compatibility
+records from an older daemon may only drain, expire, or be explicitly denied through their
+documented lifecycle.
 
 ## Safety boundary
 
-Workflows use `prepare -> approve -> execute -> verify`. Sensitive actions must
-be prepared first and approved through a short-lived, single-use token. The
-daemon never accepts credentials or other secrets as command-line arguments,
-and screenshot/OCR frames are held in memory only for the requested operation.
+Mac Control is an execution extension of the calling agent, not a second
+consent system. Routine visible reversible actions run from the user's task
+request without a native Mac Control approval or `--confirm` acknowledgement.
+The agent uses its normal Codex
+ask-user surface at meaningful human boundaries such as private-data access,
+destructive or irreversible change, send/submit/purchase/share, credentials,
+permission or security changes, scope expansion, or materially ambiguous
+targets. The daemon enforces target and exact-plan binding, caller-declared
+finite deadlines, replay resistance, state revalidation, immediate cancellation,
+postconditions, and redacted receipts; prompt text is not that enforcement
+boundary. It never accepts credentials or other secrets as command-line
+arguments, and screenshot/OCR frames are held in memory only for the requested
+operation.
 
 ### Focus-preserving background workflows
 
@@ -180,18 +197,18 @@ still force `focus_policy: "foreground"`, or request fail-closed
 ~/.local/bin/macctl app open "TextEdit" --background --json
 ```
 
-The requested policy remains part of the approval digest. Automatic is
+The requested policy remains part of the plan digest. Automatic is
 resolved only for execution, and results and receipts distinguish
 `requested_focus_policy` from effective `focus_policy`, with
 `focus_selection_reason` and (for fallback) `background_unavailable_reason`.
-This prevents changing approval authority merely because live target state
+This prevents changing execution scope merely because live target state
 made one route eligible or ineligible.
 
 Background workflow execution is deliberately narrower than foreground
 execution. It launches apps with a non-activating AppKit configuration, targets
 Accessibility actions at a named macOS app process, sends keyboard events to
 that process, and checks the foreground application before and after every
-action. The focus policy is part of the approval digest and is preserved in
+action. The focus policy is part of the plan digest and is preserved in
 execution reports and receipts.
 
 The background validator rejects activation, scroll, desktop capture/OCR,
@@ -210,21 +227,21 @@ interaction contract stays owned by `mac-control`.
 
 Generic workflow JSON files may be placed in
 `~/Library/Application Support/macctl/workflows/`. Accessibility, keyboard,
-and mouse input actions are classified conservatively: click, key, and type
-actions require a sensitive approval plan; scroll is reversible. Type actions
+and mouse input actions are classified conservatively: click, key, search, and
+scroll are reversible; type, adapter mutation, and command actions carry
+boundary metadata for the calling agent. Type actions
 must declare `text_source=ephemeral` and receive their value only through an
 owner-only socket request. The CLI supports this without putting the value in
 the process arguments:
 
 ```sh
-secret-producing-command | ~/.local/bin/macctl workflow prepare my.workflow --ephemeral-stdin
+secret-producing-command | ~/.local/bin/macctl workflow run my.workflow --ephemeral-stdin
 ```
 
-The stdin body must be a JSON object whose values are strings. The menu-bar
-control center commits the visible approval without executing the plan. Run the
-exact prepared workflow afterward with its approval token; the token is consumed
-at first dispatch, and ephemeral input is never returned by the daemon or
-written to its log.
+The stdin body must be a JSON object whose values are strings. `workflow
+prepare` remains an optional exact-plan preview and does not create authority;
+`workflow run` executes directly after daemon validation. Ephemeral input is
+never returned by the daemon or written to its log.
 
 When a foreground-bound test or action is about to move the active app, the menu-bar pill turns
 light blue and says `Focusing`; once the handoff is observed it says `Focused` and names the
@@ -234,9 +251,9 @@ hands-off session so the pill can truthfully cover the entire run:
 
 ```sh
 ~/.local/bin/macctl control hands-off begin --provider hybrid \
-  --app "Google Chrome" --task context-menu --seconds 60 --confirm --json
+  --app "Google Chrome" --task context-menu --seconds 60 --json
 ~/.local/bin/macctl control perform context-menu --app "Google Chrome" \
-  --hands-off-session-id <session_id> --confirm --json
+  --hands-off-session-id <session_id> --json
 ~/.local/bin/macctl control hands-off heartbeat --session-id <session_id> --json
 ~/.local/bin/macctl control hands-off end --session-id <session_id> --json
 ```
@@ -247,14 +264,10 @@ the user not to use the keyboard or trackpad; expiry, Stop & Release, or daemon 
 The session is caller-owned and never inferred from an individual action. `Frozen` remains the
 higher-salience state when physical keyboard suppression is active.
 
-The built-in `approval.smoke` workflow is the release-evidence path for this
-boundary. It only waits for 0.2 seconds, performs no external input, and is
-classified as sensitive solely so the approval lifecycle can be exercised
-without changing an app, device, account, or document. The Tier-1 gate accepts
-fresh control-center approve and deny receipts, a fresh expiry receipt from the
-control center or daemon CLI, and a direct fail-closed run without a token.
-Expiry is a backend state transition; the pending approval must remain untouched
-until the token expires.
+The built-in `execution.smoke` workflow is the release-evidence
+path for direct daemon authorization. It waits for 0.2 seconds, performs no
+external input, and must prepare and run without a Mac Control approval token.
+The Tier-1 gate requires fresh `not_required` prepare and verified run receipts.
 
 macOS Accessibility, Input Monitoring, Screen Recording, and Automation
 permissions remain user-controlled. `macctl doctor --json` reports what is
@@ -292,21 +305,18 @@ Suggestions avoid enabled macOS system
 shortcuts, the target app's current menu equivalents, and Mac Control's binding
 registry. A suggestion is only a proposal; it is never installed in bulk.
 
-Direct menu activation and shortcut setup, execution, and removal are
-sensitive operations. Calling one without authority prepares a digest-scoped,
-single-use approval:
+Direct menu activation and shortcut setup, execution, and removal execute
+through the calling agent's existing authority after exact binding validation:
 
 ```sh
 ~/.local/bin/macctl shortcut run sc_<digest> --route accessibility --json
-~/.local/bin/macctl approval approve <token> --json
-~/.local/bin/macctl shortcut run sc_<digest> \
-  --route accessibility --approval-token <token> --json
 ```
 
 The keyboard route additionally requires a configured chord and an app-scoped
-keyboard lease. Dispatch occurs at most once; if the declared postcondition is
-indeterminate or fails, the binding is not promoted to `behavior_verified` and
-the command is never retried automatically.
+keyboard lease. The daemon binds the shortcut ID, exact operation, route, and
+binding digest before dispatch. Dispatch occurs at most once; if the declared
+postcondition is indeterminate or fails, the binding is not promoted to
+`behavior_verified` and the command is never retried automatically.
 
 Before declaring browser chrome blocked because a tab-strip context menu is not
 reliably addressable, audit the browser's ordinary application menus for an
@@ -343,7 +353,7 @@ does not launch apps, assign shortcuts, approve operations, or dispatch input.
 The keyboard surface drives visible macOS applications and browser windows
 through Full Keyboard Access and the foreground application's Accessibility
 focus. It does not automate browser DOMs, inject text, or replace the
-approval-gated workflow `key` and `type` actions.
+structured workflow and task `key` and `type` actions.
 
 The named sequences follow [Apple's Full Keyboard Access guide](https://support.apple.com/en-gb/guide/mac-help/-mchlc06d1059/mac), and status verification uses
 [`NSApplication.isFullKeyboardAccessEnabled`](https://developer.apple.com/documentation/appkit/nsapplication/isfullkeyboardaccessenabled).
@@ -353,21 +363,24 @@ Check or configure Full Keyboard Access with:
 ```sh
 ~/.local/bin/macctl keyboard status --json
 ~/.local/bin/macctl keyboard setup --json
-~/.local/bin/macctl keyboard enable --confirm --json
+~/.local/bin/macctl keyboard enable --json
 ```
 
 `keyboard setup` is non-mutating. It reports the System Settings path and
-recovery instructions. `keyboard enable --confirm` is the only command that
-writes `AppleKeyboardUIMode`; the daemon never enables the preference at
+writes no state. `keyboard enable` writes `AppleKeyboardUIMode`; the daemon
+relies on the agent's governing policy for any needed conversational confirmation,
+never a second Mac Control acknowledgement. It
+never enables the preference at
 startup and verifies the resulting AppKit status before reporting success.
 
-Input requires an explicit, in-memory lease. Leases last 120 seconds by
-default, may be shortened or extended up to 300 seconds, and only one may be
-active in the daemon:
+Input uses an explicit, in-memory execution lease so one caller owns each key
+sequence. Shared leases last 120 seconds by default and may use any positive,
+finite caller-declared duration. Physical-input suppression and navigation-mode
+leases retain a 300-second integrity expiry. Only one lease may be active:
 
 ```sh
 ~/.local/bin/macctl keyboard lease acquire \
-  --scope app --app "Google Chrome" --seconds 120 --confirm --json
+  --scope app --app "Google Chrome" --seconds 120 --json
 # pass the returned lease.token to the following commands
 ~/.local/bin/macctl keyboard navigate commands-help --lease-token "$TOKEN" --json
 ~/.local/bin/macctl keyboard inspect --json
@@ -387,7 +400,7 @@ suppression of physical keyboard events:
 ```sh
 ~/.local/bin/macctl keyboard lease acquire \
   --scope session --seconds 120 --suppress-physical-keyboard \
-  --reason "interactive keyboard freeze" --confirm --json
+  --reason "interactive keyboard freeze" --json
 ```
 
 Suppression is session-scoped and is available only on a session lease. It
@@ -405,7 +418,7 @@ navigation mode:
 ```sh
 ~/.local/bin/macctl keyboard lease acquire \
   --scope session --seconds 120 --navigation-mode \
-  --from-pass-through --confirm --json
+  --from-pass-through --json
 ```
 
 This transition is separate from physical keyboard suppression. The caller
@@ -438,8 +451,8 @@ Named navigation commands use Apple's Full Keyboard Access sequences:
 
 `keyboard send` accepts only bounded `KeySpecification` sequences for
 non-printable shortcuts and timing. Bare printable characters are rejected;
-text, credentials, and ephemeral content remain on the existing
-approval-gated path. `keyboard inspect` returns only focused role, subrole,
+text, credentials, and ephemeral content remain on the structured workflow or
+task path. `keyboard inspect` returns only focused role, subrole,
 identifier, title, and target application. It never returns AX values,
 document text, screenshots, OCR text, or child trees.
 
@@ -471,7 +484,7 @@ remain unchanged across the action boundary and returns that oracle in both
 the report and evidence (`foreground_oracle=target_foreground_unchanged`,
 `foreground_state=preserved`). `--background` is a shorthand for
 `focus_policy=background`, but explicit background still fails closed: use an
-approved `task.run` plan for named, process-directed background actions so the
+exact `task.run` plan for named, process-directed background actions so the
 target, authority, expiry, and unrelated foreground oracle are bound together.
 A rejected background request is an
 `action_unavailable`/`background_unsupported` handoff, not permission to
@@ -479,10 +492,10 @@ fall back to global input.
 
 ```sh
 ~/.local/bin/macctl control perform activate \
-  --app "Notes" --confirm --focus-policy foreground \
+  --app "Notes" --focus-policy foreground \
   --role AXButton --title "New Note" --json
 ~/.local/bin/macctl control perform activate \
-  --app "Notes" --confirm --background \
+  --app "Notes" --background \
   --role AXButton --title "New Note" --json
 ```
 
@@ -500,15 +513,15 @@ named row, click it through Computer Use, and verify the selected pane there.
 Rows that actually expose `AXPress` still require the task-specific
 `selected_pane` postcondition before reporting success.
 
-For a self-contained action, provide the target app and explicit confirmation
-instead of a lease token. The daemon activates the app, waits for two stable
+For a self-contained action, provide the target app instead of a lease token.
+The daemon activates the app, waits for two stable
 foreground reads, acquires an app-scoped ephemeral lease, performs and verifies
 the action, and invalidates the lease before replying. Foreground changes still
 fail closed with `keyboard_focus_changed`.
 
 ```sh
 ~/.local/bin/macctl control perform next-control \
-  --app "System Settings" --confirm --json
+  --app "System Settings" --json
 ```
 
 Accessibility selectors can be scoped to one uniquely titled or identified
@@ -518,7 +531,7 @@ requiring the expected menu labels:
 
 ```sh
 ~/.local/bin/macctl control perform context-menu \
-  --app "Google Chrome" --confirm \
+  --app "Google Chrome" \
   --role AXButton --identifier tab-group \
   --window-title "Project - Google Chrome" \
   --expected-menu-items "Add tab to new group" --json
@@ -554,7 +567,7 @@ route:
   --task focus-next-control --target-fingerprint "settings-pane" \
   --action next-control --route keyboard \
   --verification-oracle "focus changed" --samples 5 --warmups 1 \
-  --confirm --json
+  --json
 ~/.local/bin/macctl route inspect --app "System Settings" \
   --task focus-next-control --target-fingerprint "settings-pane" --json
 ```
@@ -621,7 +634,7 @@ Semantic scroll routes can be benchmarked by the daemon as well. Use a unique, r
   --action scroll --route scroll --role AXScrollArea --identifier main-scroll \
   --direction down --amount 1 --reset-direction up --reset-amount 1 \
   --verification-oracle "viewport changed" --samples 5 --warmups 1 \
-  --confirm --json
+  --json
 ```
 
 The benchmark measures the daemon's semantic AX scroll route, verifies every bounded invocation,
@@ -706,7 +719,7 @@ within one foreground app:
   --max-nodes 500 --max-depth 8 --json
 ~/.local/bin/macctl control capability-audit-batch --all-applicable --json
 printf '%s\n' '[{"action":"next-control"},{"action":"next-control"}]' | \
-  ~/.local/bin/macctl control batch --app "Chrome" --actions-stdin --confirm --json
+  ~/.local/bin/macctl control batch --app "Chrome" --actions-stdin --json
 ```
 
 The fast capability probe reports app archetype plus fresh measured, stale, and
@@ -816,7 +829,7 @@ redacted structural findings:
 
 This audit does not invent task success from a tree inspection. Measured task
 attempts, selected routes, and readable postconditions remain backed by the
-normal approval-gated `task.*` or route receipts. A v2, v3, or v4 repository manifest must
+normal exact-plan `task.*` or route receipts. A v2, v3, or v4 repository manifest must
 not contain `selected_route`; Quality Runner adds it only from live task
 evidence. Human accessibility metadata, agent task operability, and runtime
 performance remain distinct evidence even while the v1 report envelope carries
@@ -835,7 +848,7 @@ verifies that the selected container can still be resolved after the action:
 ```sh
 ~/.local/bin/macctl control perform scroll --app "System Settings" \
   --role AXScrollArea --identifier settings-list --direction down \
-  --amount 1 --confirm --json
+  --amount 1 --json
 ```
 
 If AX cannot perform the action or cannot verify a changed viewport, the response is blocked
@@ -847,7 +860,7 @@ changed state. The Mac Control low-level input route is opt-in and fail-closed:
 ```sh
 ~/.local/bin/macctl control perform scroll --app "System Settings" \
   --role AXScrollArea --identifier settings-list --direction down \
-  --amount 1 --fallback input-scroll --confirm --json
+  --amount 1 --fallback input-scroll --json
 ```
 
 An input event that was merely dispatched is reported as unverified; it is not treated as
@@ -879,24 +892,63 @@ behavior, daemon receipts prove lease/input/redaction events, and the manual
 
 For multi-step work, use `task.*` with a structured plan. A task plan names
 typed actions, target identity, preconditions, postconditions, risk,
-approval reason, timeout, and its declared recovery policy. It is not free-form
+boundary reason, timeout, and its declared recovery policy. It is not free-form
 task text and it cannot invoke arbitrary shell commands or AppleScript/JXA:
+
+The showcase composer produces an executable exact synthetic
+research-session plan. It returns the same
+ordered targets, effects, rollback notes, verification requirements, and
+plan digest for the same supported request:
+
+```sh
+~/.local/bin/macctl task compose focus-session \
+  --request "Prepare my research session" --json
+```
+
+The preview reports `status=ready`, `executable=true`, an empty `blocked_by`,
+and the exact `plan_digest`. The source build can emit the runnable plan:
+
+```sh
+~/.local/bin/macctl task compose focus-session \
+  --request "Prepare my research session" --plan --json
+```
+
+That candidate uses three product-owned allowlisted operations. They accept no
+caller-provided path, content, application, script, or frame. Each step is
+strict and passes only after an independent post-dispatch check confirms the
+fixture document in its expected app or reads both window frames back. A live
+`AXDocument` URL is authoritative; when an app omits it, the observer requires
+exact in-memory digest equality with the product-owned public fixture filename,
+in addition to the fixture-content digest and visible focused window. Source
+validation remains distinct from installed proof; exercise the exact packaged
+daemon before claiming the visible behavior.
+
+The source verification contract produces one plan-bound record for the brief,
+one for the scratchpad, and one for the two-window layout. It accepts only
+post-dispatch fixture and Accessibility observations; action return values are
+not a verification source. Receipts retain bundle IDs, fixture/window digests,
+and bounded frames, never document contents, visible titles, or file paths.
+Because app-open completion can precede Accessibility window publication, the
+observer polls that read-only postcondition for at most two seconds; it never
+redispatches the open operation during that wait.
+Verification and layout resolve the unique matching fixture across every
+visible window in the expected app, so repeated demos do not depend on which
+window happens to be focused.
 
 ```sh
 cat plan.json | ~/.local/bin/macctl task prepare --plan-stdin --json
-~/.local/bin/macctl approval approve "$TASK_APPROVAL_TOKEN" --json
-cat plan.json | ~/.local/bin/macctl task run --plan-stdin \
-  --approval-token "$TASK_APPROVAL_TOKEN" --json
+cat plan.json | ~/.local/bin/macctl task run --plan-stdin --json
 ~/.local/bin/macctl task status "$TASK_ID" --json
 ~/.local/bin/macctl task cancel "$TASK_ID" --json
 ```
 
-`task.prepare` returns an approval bound to the exact serialized plan,
-target, risk, recovery policy, and ephemeral-input digest. Any plan or
-ephemeral-input change invalidates it. The daemon automatically grants approved
-foreground work a session-scoped execution lease bounded by the task deadline
-and the 300-second maximum. `--lease-token` remains an exact-mode compatibility
-override and cannot upgrade shared authority into physical-keyboard suppression.
+`task.prepare` creates a redacted checkpoint and returns the exact serialized
+plan digest and classified risk; it creates no approval or token. `task.run`
+requires the same task identity and full-plan digest. Any plan or
+ephemeral-input change fails closed. The daemon grants foreground work a
+run-scoped execution lease bounded by the caller-declared task deadline. Shared
+input leases may span that finite deadline; physical-input suppression and
+keyboard-navigation leases retain their 300-second safety expiry.
 A `focus_policy: "automatic"` task is checked against the same background
 validator immediately before dispatch. If eligible and addressable it receives
 the background input channel; otherwise it immediately takes the existing
@@ -922,19 +974,25 @@ Checkpoints are separate from receipts, atomic, owner-only, retention-bounded,
 and redacted. They contain task and step identity, hashes, route, attempt
 counts, timestamps, lifecycle state, and redacted verification status; they do
 not contain selectors, AX values, screenshots, OCR, credentials, private
-document/message bodies, lease tokens, or approval tokens. The states are
+document/message bodies, lease tokens, or legacy approval tokens. The states are
 `prepared`, `running`, `paused`, `blocked`, `indeterminate`, `completed`,
-`cancelled`, and `expired`. Safe steps may use at most three bounded attempts,
-reversible steps at most two, and sensitive steps dispatch once. An uncertain
-sensitive result becomes `indeterminate` and is never retried automatically.
+`cancelled`, and `expired`. The daemon does not impose a separate action count,
+step-count ceiling, duration ceiling, or risk-based retry quota. Deterministic
+recovery follows the finite policy declared in the exact plan. An uncertain
+mutation becomes `indeterminate` and is never retried automatically.
 
 After interruption or daemon restart, automatic resume is disabled. Supply the
-original plan again, obtain a fresh lease and permission/target validation,
-prepare and approve the remaining checkpointed plan, then call `task.resume`.
+original plan again to `task.resume`; the service obtains a fresh run-scoped
+lease and revalidates permissions, targets, the original full-plan digest,
+current checkpoint index, remaining preconditions, and the caller-declared deadline
+before dispatch. `task.run` is only for a newly prepared task and must not be
+used to continue a partial checkpoint.
+An `expired` checkpoint is terminal because its plan-wide deadline has elapsed;
+start a versioned new task identity rather than resetting that deadline.
 No fallback route is invented after an action may already have caused an
 external side effect. `task.status` and `task.cancel` remain available without
 input authority; cancellation is cooperative and is checked before each
-action and at bounded action checkpoints.
+action and at each dispatch checkpoint.
 
 ### Allowlisted application adapters
 
@@ -971,21 +1029,18 @@ it remains, then add `~/.local/share/macctl/macctld.app` to each list and
 restart the daemon. TCC permissions are attached to the packaged application
 identity, not granted automatically by the installer.
 
-The approval-evidence path is:
+The direct-execution evidence path is:
 
 ```sh
-~/.local/bin/macctl workflow prepare approval.smoke --json
+~/.local/bin/macctl workflow prepare execution.smoke --json
+~/.local/bin/macctl workflow run execution.smoke --json
 ```
 
-Use the menu-bar control center to approve one prepared plan and deny a second.
-Approval only commits authority; run the approved workflow separately with its
-token. For expiry, leave a third approval untouched until its 300-second token
-expires, then attempt Approve from the control center or run
-`macctl approval approve <token>` and confirm the result is `approval_expired`.
-Finally run
-`~/.local/bin/macctl workflow run approval.smoke --json` without a token; it
-must be blocked. Double-tapping Caps Lock opens the control center only while an
-approval is pending; it never approves a plan or changes the Caps Lock state.
+Both commands must complete without an approval token or a native approval
+card. The prepare receipt records `approval_state=not_required`; the run must
+also record `not_required` plus a passed verification result. Double-tapping
+Caps Lock remains a Control Center shortcut and never authorizes execution or
+changes the Caps Lock state.
 
 The project does not modify AIOS or career-ops. Career Ops can invoke this
 standalone control plane when a local macOS interaction is required.

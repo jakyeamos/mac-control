@@ -572,7 +572,6 @@ def run_mac_scroll(args: argparse.Namespace) -> int:
             direction,
             "--amount",
             str(amount),
-            "--confirm",
             "--json",
         ]
         if args.identifier:
@@ -779,7 +778,6 @@ def run_mac_focus(args: argparse.Namespace) -> int:
                 action_name,
                 "--app",
                 args.app,
-                "--confirm",
                 "--json",
             ]
         )
@@ -956,7 +954,6 @@ def run_mac_batch_focus(args: argparse.Namespace) -> int:
                 "--app",
                 args.app,
                 "--actions-stdin",
-                "--confirm",
                 "--json",
             ],
             input_text=batch_input(action, count),

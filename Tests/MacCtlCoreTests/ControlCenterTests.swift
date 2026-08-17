@@ -4,12 +4,125 @@ import XCTest
 @testable import MacCtlCore
 
 final class ControlCenterTests: XCTestCase {
+    func testTaskProgressProjectionPreservesVerifiedStepsWhenCurrentStepStops() {
+        let plan = TaskPlan(
+            id: "focus-session",
+            name: "Focus session",
+            summary: "Prepare a focus session",
+            steps: [
+                TaskStep(id: "open-brief", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "open-scratchpad", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "arrange-workspace", action: ActionSpec(kind: .assert, surface: .macApp))
+            ]
+        )
+        let status = TaskStatusReport(
+            taskID: plan.id,
+            planDigest: "digest",
+            state: .blocked,
+            stepIndex: 1,
+            currentStepID: "open-scratchpad",
+            lastStepID: "open-brief",
+            attempts: 2,
+            lastRoute: "accessibility",
+            lastErrorCode: "task_postcondition_failed",
+            checkpointUpdatedAt: Date()
+        )
+
+        let progress = ControlCenterTaskProgress.make(plan: plan, status: status)
+
+        XCTAssertEqual(progress.completedStepCount, 1)
+        XCTAssertEqual(progress.steps.map(\.state), [.verified, .stopped, .pending])
+        XCTAssertEqual(progress.steps.map(\.label), ["Open Brief", "Open Scratchpad", "Arrange Workspace"])
+        XCTAssertEqual(progress.lastErrorCode, "task_postcondition_failed")
+    }
+
+    func testTaskProgressProjectionShowsRunningAndImmediateStopStates() {
+        let plan = TaskPlan(
+            id: "focus-session",
+            name: "Focus session",
+            summary: "Prepare a focus session",
+            steps: [
+                TaskStep(id: "open-brief", action: ActionSpec(kind: .assert, surface: .macApp)),
+                TaskStep(id: "arrange-windows", action: ActionSpec(kind: .assert, surface: .macApp))
+            ]
+        )
+        let status = TaskStatusReport(
+            taskID: plan.id,
+            planDigest: "digest",
+            state: .running,
+            stepIndex: 0,
+            currentStepID: "open-brief",
+            attempts: 0,
+            lastRoute: nil,
+            lastErrorCode: nil,
+            checkpointUpdatedAt: Date()
+        )
+
+        XCTAssertEqual(
+            ControlCenterTaskProgress.make(plan: plan, status: status).steps.map(\.state),
+            [.running, .pending]
+        )
+        XCTAssertEqual(
+            ControlCenterTaskProgress.make(plan: plan, status: status, stopping: true).steps.map(\.state),
+            [.stopped, .pending]
+        )
+    }
+
+    func testControlCenterRendersTaskProgressWithoutPlanTargetsOrInputs() throws {
+        let progress = ControlCenterTaskProgress(
+            state: .blocked,
+            completedStepCount: 1,
+            totalStepCount: 3,
+            currentStepID: "open-scratchpad",
+            lastErrorCode: "task_postcondition_failed",
+            steps: [
+                ControlCenterTaskStepProgress(stepID: "open-brief", label: "Open Brief", state: .verified),
+                ControlCenterTaskStepProgress(stepID: "open-scratchpad", label: "Open Scratchpad", state: .stopped),
+                ControlCenterTaskStepProgress(stepID: "arrange-workspace", label: "Arrange Workspace", state: .pending)
+            ]
+        )
+        let hud = ApprovalHUD(capsLockMonitor: CapsLockMonitor())
+        hud.pendingApprovalsHandler = { [] }
+        hud.snapshotHandler = {
+            ControlCenterSnapshot(
+                approvals: [],
+                execution: ControlCenterExecution(
+                    executionID: "execution",
+                    taskID: "focus-session",
+                    summary: "Prepare a focus session",
+                    applicationName: "Preview",
+                    physicalInputMode: .shared,
+                    acquiredAt: Date(),
+                    expiresAt: Date().addingTimeInterval(60),
+                    taskProgress: progress
+                ),
+                permissions: []
+            )
+        }
+
+        hud.refreshOnMain(populatePopover: true)
+        guard let view = hud.popover.contentViewController?.view else {
+            return XCTFail("Control Center popover content was not built")
+        }
+        let labels = allSubviews(of: view).compactMap { ($0 as? NSTextField)?.stringValue }
+        XCTAssertTrue(labels.contains("PROGRESS · 1 OF 3 VERIFIED"))
+        XCTAssertTrue(labels.contains("✓ Open Brief · Verified"))
+        XCTAssertTrue(labels.contains("■ Open Scratchpad · Stopped"))
+        XCTAssertTrue(labels.contains("○ Arrange Workspace · Pending"))
+        XCTAssertTrue(labels.contains("Stopped safely · task postcondition failed"))
+        XCTAssertFalse(labels.joined().contains("private"))
+        let captureURL = URL(fileURLWithPath: "/private/tmp/macctl-control-center-progress.png")
+        try? FileManager.default.removeItem(at: captureURL)
+        try renderPNG(view, to: captureURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
     func testHiddenControlCenterBuildsPopoverContentBeforeFirstPresentation() {
         let now = Date()
         let approval = ApprovalRecord(
             token: "private-token",
             operationID: "approval-1",
-            workflowID: "approval.smoke",
+            workflowID: "execution.smoke",
             summary: "Approval smoke",
             risk: .sensitive,
             focusPolicy: .foreground,
@@ -46,6 +159,27 @@ final class ControlCenterTests: XCTestCase {
 
     private func allSubviews(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap(allSubviews)
+    }
+
+    private func renderPNG(_ view: NSView, to url: URL) throws {
+        let fittingSize = view.fittingSize
+        let size = NSSize(width: max(fittingSize.width, 392), height: fittingSize.height + 16)
+        view.appearance = NSAppearance(named: .aqua)
+        view.frame = NSRect(origin: .zero, size: NSSize(width: size.width, height: fittingSize.height))
+        view.layoutSubtreeIfNeeded()
+        let canvas = NSView(frame: NSRect(origin: .zero, size: size))
+        canvas.appearance = view.appearance
+        canvas.wantsLayer = true
+        canvas.layer?.backgroundColor = NSColor.white.cgColor
+        canvas.addSubview(view)
+        guard let bitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else {
+            throw NSError(domain: "ControlCenterTests", code: 1)
+        }
+        canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "ControlCenterTests", code: 2)
+        }
+        try data.write(to: url, options: .atomic)
     }
 
     func testPresentationCoversIdleApprovalLeaseFreezeStoppingAndDegradedStates() {
@@ -279,7 +413,7 @@ final class ControlCenterTests: XCTestCase {
         XCTAssertEqual(expired.state, .idle)
     }
 
-    func testHandsOffSessionIsRunScopedBoundedAndStopsLifecycle() throws {
+    func testHandsOffSessionStartsDirectlyAndStopsLifecycle() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-hands-off-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         var now = Date(timeIntervalSince1970: 30_000)
@@ -290,24 +424,13 @@ final class ControlCenterTests: XCTestCase {
             lifecycleDrainDuration: 2
         )
 
-        let missingConfirmation = service.handle(RequestEnvelope(
-            method: "control.hands_off.begin",
-            params: ["provider": .string("computer_use")]
-        ))
-        XCTAssertEqual(missingConfirmation.status, .blocked)
-        XCTAssertEqual(
-            missingConfirmation.error?.code,
-            MacCtlErrorCode.handsOffSessionConfirmationRequired.rawValue
-        )
-
         let begin = service.handle(RequestEnvelope(
             method: "control.hands_off.begin",
             params: [
-                "confirm": .bool(true),
                 "provider": .string("computer_use"),
                 "app": .string("Google Chrome"),
                 "task_id": .string("context-menu"),
-                "seconds": .number(20)
+                "seconds": .number(600)
             ]
         ))
         XCTAssertEqual(begin.status, .succeeded)
@@ -338,16 +461,16 @@ final class ControlCenterTests: XCTestCase {
             method: "control.hands_off.heartbeat",
             params: [
                 "session_id": .string(session.sessionID),
-                "seconds": .number(30)
+                "seconds": .number(900)
             ]
         ))
         XCTAssertEqual(heartbeat.status, .succeeded)
         XCTAssertEqual(service.controlCenterSnapshot().handsOffSession?.lastHeartbeatAt, now)
-        XCTAssertEqual(service.controlCenterSnapshot().handsOffSession?.expiresAt, now.addingTimeInterval(30))
+        XCTAssertEqual(service.controlCenterSnapshot().handsOffSession?.expiresAt, now.addingTimeInterval(900))
 
         let duplicate = service.handle(RequestEnvelope(
             method: "control.hands_off.begin",
-            params: ["confirm": .bool(true)]
+            params: [:]
         ))
         XCTAssertEqual(duplicate.status, .blocked)
         XCTAssertEqual(duplicate.error?.code, MacCtlErrorCode.handsOffSessionActive.rawValue)
@@ -363,14 +486,13 @@ final class ControlCenterTests: XCTestCase {
         let expiring = service.handle(RequestEnvelope(
             method: "control.hands_off.begin",
             params: [
-                "confirm": .bool(true),
                 "provider": .string("mac_control"),
-                "seconds": .number(5)
+                "seconds": .number(0.5)
             ]
         ))
         let expiringSessionObject = try XCTUnwrap(expiring.result["hands_off_session"]?.objectValue)
         let expiringID = try XCTUnwrap(expiringSessionObject["session_id"]?.stringValue)
-        now = now.addingTimeInterval(6)
+        now = now.addingTimeInterval(1)
         let expiredHeartbeat = service.handle(RequestEnvelope(
             method: "control.hands_off.heartbeat",
             params: ["session_id": .string(expiringID)]
@@ -381,7 +503,7 @@ final class ControlCenterTests: XCTestCase {
 
         let stoppedRun = service.handle(RequestEnvelope(
             method: "control.hands_off.begin",
-            params: ["confirm": .bool(true), "seconds": .number(20)]
+            params: ["seconds": .number(20)]
         ))
         XCTAssertEqual(stoppedRun.status, .succeeded)
         let stopped = service.handle(RequestEnvelope(method: "control.stop_active"))
@@ -646,8 +768,7 @@ final class ControlCenterTests: XCTestCase {
                 )],
                 totalTimeout: 30
             )
-            let prepared = try runner.prepare(plan: plan)
-            _ = try approvals.approve(token: prepared.approval.token)
+            _ = try runner.prepare(plan: plan)
             let service = MacCtlService(
                 permissionContext: "test",
                 keyboardDriveStore: leases,
@@ -662,10 +783,7 @@ final class ControlCenterTests: XCTestCase {
             )
             let response = service.handle(RequestEnvelope(
                 method: "task.run",
-                params: [
-                    "plan": try JSONValue.fromEncodable(plan),
-                    "approval_token": .string(prepared.approval.token)
-                ]
+                params: ["plan": try JSONValue.fromEncodable(plan)]
             ))
             XCTAssertEqual(response.status, .succeeded)
             XCTAssertNil(leases.activeLease())
@@ -675,7 +793,7 @@ final class ControlCenterTests: XCTestCase {
         }
     }
 
-    func testDigestMismatchAndWrongCallerLeaseCannotEscalateKeyboardMode() throws {
+    func testDifferentPlanAndWrongCallerLeaseCannotEscalateKeyboardMode() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-control-center-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let approvals = TaskApprovalStore()
@@ -687,9 +805,8 @@ final class ControlCenterTests: XCTestCase {
             actionExecutor: RecordingTaskExecutor(),
             targetRevalidator: { _ in nil }
         )
-        let approvedPlan = frozenPlan(id: "exact-plan", summary: "Approved summary")
-        let prepared = try runner.prepare(plan: approvedPlan)
-        _ = try approvals.approve(token: prepared.approval.token)
+        let preparedPlan = frozenPlan(id: "exact-plan", summary: "Prepared summary")
+        _ = try runner.prepare(plan: preparedPlan)
         let sharedLease = try leases.acquire(
             scope: .session,
             application: nil,
@@ -715,23 +832,17 @@ final class ControlCenterTests: XCTestCase {
             method: "task.run",
             params: [
                 "plan": try JSONValue.fromEncodable(mismatched),
-                "approval_token": .string(prepared.approval.token),
                 "lease_token": .string(sharedLease.token)
             ]
         ))
         XCTAssertEqual(mismatchResponse.status, .blocked)
         XCTAssertFalse(suppressor.active)
-        XCTAssertNotNil(try approvals.validateApproved(
-            token: prepared.approval.token,
-            plan: approvedPlan,
-            ephemeralInputs: [:]
-        ))
+        XCTAssertEqual(try runner.status(taskID: preparedPlan.id).state, .prepared)
 
         let wrongModeResponse = service.handle(RequestEnvelope(
             method: "task.run",
             params: [
-                "plan": try JSONValue.fromEncodable(approvedPlan),
-                "approval_token": .string(prepared.approval.token),
+                "plan": try JSONValue.fromEncodable(preparedPlan),
                 "lease_token": .string(sharedLease.token)
             ]
         ))
@@ -774,8 +885,7 @@ final class ControlCenterTests: XCTestCase {
             ],
             totalTimeout: 30
         )
-        let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
+        _ = try runner.prepare(plan: plan)
         let app = calculatorApp()
         let service = MacCtlService(
             permissionContext: "test",
@@ -796,10 +906,7 @@ final class ControlCenterTests: XCTestCase {
         DispatchQueue.global().async {
             let response = service.handle(RequestEnvelope(
                 method: "task.run",
-                params: [
-                    "plan": (try? JSONValue.fromEncodable(plan)) ?? .null,
-                    "approval_token": .string(prepared.approval.token)
-                ]
+                params: ["plan": (try? JSONValue.fromEncodable(plan)) ?? .null]
             ))
             responseLock.lock()
             runResponse = response
@@ -832,7 +939,10 @@ final class ControlCenterTests: XCTestCase {
         let completedResponse = runResponse
         responseLock.unlock()
         XCTAssertNotEqual(completedResponse?.status, .succeeded)
-        XCTAssertNil(service.controlCenterSnapshot().execution)
+        let stoppedSnapshot = service.controlCenterSnapshot()
+        XCTAssertNil(stoppedSnapshot.execution)
+        XCTAssertEqual(stoppedSnapshot.taskOutcome?.progress.state, .cancelled)
+        XCTAssertEqual(stoppedSnapshot.taskOutcome?.progress.steps.map(\.state), [.verified, .stopped])
         XCTAssertEqual(try runner.status(taskID: plan.id).state, .cancelled)
 
         let recoveryLease = try leases.acquire(
@@ -842,6 +952,69 @@ final class ControlCenterTests: XCTestCase {
             confirm: true
         )
         XCTAssertTrue(leases.invalidate(token: recoveryLease.token))
+        XCTAssertNil(leases.activeLease())
+    }
+
+    func testPostconditionFailureRetainsCompletedActionsInStoppedOutcome() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-control-center-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let approvals = TaskApprovalStore()
+        let leases = KeyboardDriveStore()
+        let executor = RecordingTaskExecutor()
+        executor.evaluationResults = [true, false, false, false]
+        let runner = TaskRunner(
+            checkpointStore: TaskCheckpointStore(directory: directory),
+            approvalStore: approvals,
+            actionExecutor: executor,
+            targetRevalidator: { _ in nil }
+        )
+        let predicate = TaskPredicate(kind: .applicationRunning, application: "Calculator")
+        let plan = TaskPlan(
+            id: "seeded-postcondition-failure",
+            name: "Seeded failure",
+            summary: "Show completed work before a safe stop",
+            steps: [
+                TaskStep(
+                    id: "completed-action",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    target: TaskTargetIdentity(application: "Calculator"),
+                    postconditions: [predicate]
+                ),
+                TaskStep(
+                    id: "failed-verification",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    target: TaskTargetIdentity(application: "Calculator"),
+                    postconditions: [predicate]
+                )
+            ]
+        )
+        _ = try runner.prepare(plan: plan)
+        let app = calculatorApp()
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardDriveStore: leases,
+            taskApprovalStore: approvals,
+            taskRunner: runner,
+            focusedElementInspector: EmptyFocusInspector(),
+            foregroundApplication: { app },
+            resolveApplication: { _ in app },
+            activateApplication: { _ in app },
+            foregroundStabilityVerifier: ControlStateVerifier(sleep: { _ in }),
+            hasPostEventAccess: { true }
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "task.run",
+            params: ["plan": try JSONValue.fromEncodable(plan)]
+        ))
+
+        XCTAssertEqual(response.status, .blocked)
+        let snapshot = service.controlCenterSnapshot()
+        XCTAssertNil(snapshot.execution)
+        XCTAssertEqual(snapshot.taskOutcome?.progress.state, .blocked)
+        XCTAssertEqual(snapshot.taskOutcome?.progress.steps.map(\.state), [.verified, .stopped])
+        XCTAssertEqual(snapshot.taskOutcome?.progress.lastErrorCode, "task_postcondition_failed")
         XCTAssertNil(leases.activeLease())
     }
 
@@ -910,7 +1083,7 @@ final class ControlCenterTests: XCTestCase {
         XCTAssertFalse(String(data: try JSONCodec.encode(approvedResponse), encoding: .utf8)!.contains(pending.record.token))
     }
 
-    func testPreDispatchFailureLeavesApprovalRetryableUntilFirstActionDispatch() throws {
+    func testPreDispatchFailureLeavesPreparedPlanRetryableUntilFirstActionDispatch() throws {
         let directory = URL(fileURLWithPath: "/private/tmp/macctl-control-center-\(UUID().uuidString)")
         let approvals = TaskApprovalStore()
         let executor = RecordingTaskExecutor()
@@ -931,21 +1104,15 @@ final class ControlCenterTests: XCTestCase {
                 preconditions: [TaskPredicate(kind: .applicationRunning, application: "Calculator")]
             )]
         )
-        let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
+        _ = try runner.prepare(plan: plan)
 
-        XCTAssertThrowsError(try runner.run(plan: plan, approvalToken: prepared.approval.token))
+        XCTAssertThrowsError(try runner.run(plan: plan))
         XCTAssertEqual(try runner.status(taskID: plan.id).state, .prepared)
-        XCTAssertNotNil(try approvals.validateApproved(
-            token: prepared.approval.token,
-            plan: plan,
-            ephemeralInputs: [:]
-        ))
         XCTAssertEqual(executor.executeCount, 0)
 
         executor.evaluationResult = true
         XCTAssertEqual(
-            try runner.run(plan: plan, approvalToken: prepared.approval.token).state,
+            try runner.run(plan: plan).state,
             .completed
         )
         XCTAssertEqual(executor.executeCount, 1)
@@ -1037,6 +1204,7 @@ private final class EmptyFocusInspector: FocusedElementInspecting {
 private final class RecordingTaskExecutor: TaskActionExecuting {
     var onExecute: (() -> Void)?
     var evaluationResult = true
+    var evaluationResults: [Bool] = []
     private(set) var executeCount = 0
 
     func execute(action: ActionSpec, context: TaskActionContext) throws -> TaskActionExecutionReport {
@@ -1046,7 +1214,8 @@ private final class RecordingTaskExecutor: TaskActionExecuting {
     }
 
     func evaluate(predicate: TaskPredicate, context: TaskActionContext) throws -> Bool {
-        evaluationResult
+        if !evaluationResults.isEmpty { return evaluationResults.removeFirst() }
+        return evaluationResult
     }
 }
 

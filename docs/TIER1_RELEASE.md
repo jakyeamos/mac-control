@@ -22,7 +22,7 @@ swift test
 ```
 
 `release check` is read-only. It fails closed when launchd identity, daemon
-permissions, socket ownership, receipt storage, approval safety, Mac GUI
+permissions, socket ownership, receipt storage, execution authorization, Mac GUI
 smokes are missing. It does not launch a workflow or alter a device to
 manufacture evidence.
 
@@ -71,7 +71,8 @@ macOS permission migration.
 
 Every request receives a durable receipt under
 `~/Library/Application Support/macctl/receipts/`. A receipt includes the
-operation/request IDs, method/workflow, target surface, risk, approval state,
+operation/request IDs, method/workflow, target surface, risk, compatibility
+`approval_state` (normally `not_required` for new execution),
 execution result, verification result, plan digest, daemon runtime identity,
 permission snapshot, status, redacted evidence kinds, and timestamps. It never
 includes credentials, ephemeral input, OCR text, screenshots, image bytes,
@@ -89,36 +90,31 @@ permissions. Run the reversible Finder, TextEdit, System Settings, Google Chrome
 and Notes workflows. Missing GUI permissions, capture, input, window discovery,
 or verification produces a blocked result.
 
-Menu-bar control-center approve/deny/expiry behavior and Caps Lock double-tap activation
-must be exercised by a user in the GUI session using the built-in
-`approval.smoke` workflow. That workflow waits for 0.2 seconds and performs no
-external input or account change, but is classified as sensitive to exercise
-the approval boundary. The release gate requires fresh receipts for:
+Direct daemon execution and Control Center behavior must be exercised in the
+GUI session using the built-in `execution.smoke` workflow. That
+workflow waits for 0.2 seconds and performs no external input or account
+change. The release gate requires fresh receipts for:
 
 ```sh
-~/.local/bin/macctl workflow prepare approval.smoke --json
-~/.local/bin/macctl workflow run approval.smoke --json
+~/.local/bin/macctl workflow prepare execution.smoke --json
+~/.local/bin/macctl workflow run execution.smoke --json
 ```
 
-The first command must be followed by a mouse-driven control-center approval and
-then a run with the returned token. A second prepare is denied in the control
-center. A third remains pending until its 300-second token expires and then gets
-an expiry attempt from the control center or daemon CLI. The tokenless run must
-be blocked. Approve and deny receipts identify `control_center` as their source;
-the expiry receipt may identify the control center or CLI because expiry is a
-backend state transition. Caps Lock opens the control center only while an
-approval is pending and never approves an operation.
+Both commands must complete without an approval token or native approval card.
+The prepare receipt must report `approval_state=not_required`; the run receipt
+must also report `not_required` plus a passed verification result. Caps Lock
+opens the Control Center but never authorizes an operation.
 
 ## Keyboard-first evidence
 
-The keyboard release dimension is separate from generic workflow-key approval.
+The keyboard release dimension is separate from structured workflow/task input.
 After Full Keyboard Access is enabled
 by the user, the live smoke run is:
 
 ```sh
 ~/.local/bin/macctl keyboard status --json
 ~/.local/bin/macctl keyboard lease acquire \
-  --scope app --app "Google Chrome" --seconds 30 --confirm --json
+  --scope app --app "Google Chrome" --seconds 30 --json
 ~/.local/bin/macctl keyboard navigate commands-help --lease-token "$TOKEN" --json
 ~/.local/bin/macctl keyboard inspect --json
 ~/.local/bin/macctl keyboard send escape --lease-token "$TOKEN" --json
@@ -151,15 +147,15 @@ For each accepted binding:
 
 1. Record the original menu state and chord.
 2. Propose the exact path and review the suggested chord.
-3. Prepare, approve, and run the Accessibility route once; verify the declared
+3. Run the Accessibility route once; verify the declared
    postcondition, then repeat once to restore the original state.
-4. If a shortcut is configured, prepare, approve, and run the keyboard route
+4. If a shortcut is configured, run the keyboard route
    once; verify and restore the original state.
-5. If Mac Control created or changed the shortcut, prepare, approve, and remove
+5. If Mac Control created or changed the shortcut, remove
    it, then verify the original chord was restored.
 
-Every setup, run, restore, and removal uses its own binding-and-operation scoped
-approval token. Indeterminate execution is never retried. Report source tests,
+Every setup, run, restore, and removal revalidates the exact binding digest,
+operation, route, target, and postcondition. Indeterminate execution is never retried. Report source tests,
 installed/reloaded daemon state, direct Accessibility behavior, keyboard
 behavior, restored state, and unavailable apps separately.
 
@@ -178,7 +174,7 @@ status-item `Quit daemon` action as the recovery path:
 ```sh
 ~/.local/bin/macctl keyboard lease acquire \
   --scope session --seconds 30 --suppress-physical-keyboard \
-  --reason "interactive keyboard freeze test" --confirm --json
+  --reason "interactive keyboard freeze test" --json
 ```
 
 The daemon emits the normal `keyboard_lease`,
@@ -198,7 +194,7 @@ request, avoiding foreground handoff between separate client calls:
 
 ```sh
 ~/.local/bin/macctl control perform next-control \
-  --app "System Settings" --confirm --json
+  --app "System Settings" --json
 ```
 
 These responses distinguish the selected route (`accessibility`, `keyboard`,
@@ -285,13 +281,14 @@ The task-control release dimension covers the structured `task.prepare`,
 `task.run`, `task.status`, `task.resume`, and `task.cancel` methods plus the
 allowlisted application-adapter manifests. A release candidate must show:
 
-- a prepared approval bound to the exact plan, target, risk, recovery policy,
-  and ephemeral-input digest;
+- a prepared redacted checkpoint bound to the exact plan, target, risk,
+  recovery policy, and ephemeral-input digest, with no approval token;
 - a completed safe task or an explicit blocked/paused result with a durable
   redacted checkpoint;
-- fresh lease, permission, target, timeout, cancellation, and action-budget
+- fresh lease, permission, target, caller-declared timeout, and cancellation
   revalidation at each dispatch boundary;
-- explicit fresh authority and a new approval for resume after interruption;
+- a fresh run-scoped lease plus full-plan, checkpoint-index, permission, target,
+  and deadline revalidation for resume after interruption;
 - adapter capability and Automation-permission diagnostics, including an
   unsupported-operation block; and
 - receipts/checkpoints containing only task/step IDs, plan digest, route,
@@ -299,11 +296,11 @@ allowlisted application-adapter manifests. A release candidate must show:
   verification results.
 
 The lifecycle states `paused`, `blocked`, `indeterminate`, `completed`,
-`cancelled`, and `expired` must remain distinguishable. Safe recovery is
-bounded to three attempts, reversible recovery to two, and sensitive actions
-to one dispatch; an uncertain sensitive result is indeterminate and is never
-retried. Automatic resume is disabled. The original plan is required again on
-resume, and any mutation of it invalidates the previous approval.
+`cancelled`, and `expired` must remain distinguishable. Mac Control imposes no
+separate action count, step-count ceiling, duration ceiling, or risk-based retry
+quota; deterministic retry follows the caller's finite exact-plan policy. An
+uncertain mutation is indeterminate and is never retried. Automatic resume is disabled. The original plan is required again on
+resume, and any mutation of it fails closed before dispatch.
 
 The first adapter set is Finder, System Settings, Terminal, TextEdit, Preview,
 Mail, Calendar, Notes, and Messages. Only declared typed operations may use

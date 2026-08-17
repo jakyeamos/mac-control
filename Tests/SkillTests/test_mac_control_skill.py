@@ -42,7 +42,7 @@ class MacControlSkillTests(unittest.TestCase):
             "foreground_only",
             "lease_released",
             "result.verification.state",
-            "approval-gated",
+            "structured ephemeral-input",
             "skip redundant activation",
             "daemon-executed",
             "route register",
@@ -69,6 +69,11 @@ class MacControlSkillTests(unittest.TestCase):
             "browser connector select the tab and read back",
             "Tab-group title",
             "menu item's enabled state as the postcondition",
+            "Mac Control is an execution extension, not a second permission system",
+            "routine visible reversible actions",
+            "Do not call `approval.*` for new task, workflow, or shortcut work",
+            "status=ready",
+            "task.run` without an\napproval token",
         ):
             self.assertIn(marker, text)
 

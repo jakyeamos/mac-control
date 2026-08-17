@@ -325,6 +325,9 @@ public final class ApprovalHUD: NSObject {
             root.addArrangedSubview(secondaryLabel(
                 "\(input) · \(durationLabel(execution.expiresAt.timeIntervalSinceNow)) remaining"
             ))
+            if let progress = execution.taskProgress {
+                root.addArrangedSubview(taskProgressView(progress))
+            }
             let stop = NSButton(title: "Stop & Release", target: self, action: #selector(stopAndRelease(_:)))
             stop.bezelStyle = .rounded
             stop.focusRingType = .none
@@ -339,6 +342,18 @@ public final class ApprovalHUD: NSObject {
                 "Mac Control is \(focused ? "focused on" : "moving focus to") \(focusActivity.applicationName)."
             ))
             root.addArrangedSubview(secondaryLabel("The foreground app may change during this test."))
+        }
+
+        if snapshot.execution == nil,
+           let outcome = snapshot.taskOutcome,
+           outcome.expiresAt > Date() {
+            root.addArrangedSubview(separator())
+            root.addArrangedSubview(sectionLabel(
+                outcome.progress.state == .completed ? "TASK COMPLETED" : "TASK STOPPED"
+            ))
+            let target = outcome.applicationName.map { " · \($0)" } ?? ""
+            root.addArrangedSubview(wrappingLabel(outcome.summary + target))
+            root.addArrangedSubview(taskProgressView(outcome.progress))
         }
 
         root.addArrangedSubview(separator())
@@ -385,6 +400,48 @@ public final class ApprovalHUD: NSObject {
         let contentHeight = min(max(root.fittingSize.height, 180), 620)
         controller.preferredContentSize = NSSize(width: 392, height: contentHeight)
         return controller
+    }
+
+    private func taskProgressView(_ progress: ControlCenterTaskProgress) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        stack.setAccessibilityIdentifier("macctl.task.progress")
+        stack.setAccessibilityLabel(
+            "Task progress, \(progress.completedStepCount) of \(progress.totalStepCount) steps verified"
+        )
+
+        let heading = sectionLabel(
+            "PROGRESS · \(progress.completedStepCount) OF \(progress.totalStepCount) VERIFIED"
+        )
+        heading.setAccessibilityIdentifier("macctl.task.progress.count")
+        stack.addArrangedSubview(heading)
+
+        for step in progress.steps {
+            let marker: String
+            switch step.state {
+            case .pending: marker = "○"
+            case .running: marker = "◉"
+            case .verified: marker = "✓"
+            case .stopped: marker = "■"
+            }
+            let row = secondaryLabel("\(marker) \(step.label) · \(step.state.rawValue.capitalized)")
+            row.setAccessibilityIdentifier("macctl.task.progress.\(step.stepID)")
+            row.setAccessibilityLabel("\(step.label), \(step.state.rawValue)")
+            if step.state == .stopped { row.textColor = .systemRed }
+            stack.addArrangedSubview(row)
+        }
+
+        if let errorCode = progress.lastErrorCode {
+            let message = "Stopped safely · " + errorCode
+                .replacingOccurrences(of: "_", with: " ")
+            let error = secondaryLabel(message)
+            error.textColor = .systemRed
+            error.setAccessibilityIdentifier("macctl.task.progress.error")
+            stack.addArrangedSubview(error)
+        }
+        return stack
     }
 
     private func approvalRow(_ approval: ApprovalRecord) -> NSView {

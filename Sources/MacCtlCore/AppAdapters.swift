@@ -291,6 +291,28 @@ public final class AppAdapterRegistry {
             routes: [.appleScript],
             redactedObservationSchema: ["application", "saved"]
         )
+        let openFocusBrief = AppAdapterOperation(
+            name: FocusSessionExecutionOperation.openBrief.rawValue,
+            mutating: true,
+            risk: .reversible,
+            routes: [.native],
+            redactedObservationSchema: ["application", "fixture_digest", "opened"]
+        )
+        let openFocusScratchpad = AppAdapterOperation(
+            name: FocusSessionExecutionOperation.openScratchpad.rawValue,
+            mutating: true,
+            risk: .reversible,
+            routes: [.native],
+            redactedObservationSchema: ["application", "fixture_digest", "opened"]
+        )
+        let arrangeFocusSession = AppAdapterOperation(
+            name: FocusSessionExecutionOperation.arrangeWorkspace.rawValue,
+            mutating: true,
+            risk: .reversible,
+            requiredPermissions: ["Accessibility"],
+            routes: [.accessibility],
+            redactedObservationSchema: ["applications", "layout_applied"]
+        )
         let draft = AppAdapterOperation(
             name: "draft.create",
             mutating: true,
@@ -318,6 +340,13 @@ public final class AppAdapterRegistry {
             var operations = [open, activate, inspect, locate]
             if id == "textedit" || id == "preview" {
                 operations.append(save)
+            }
+            if id == "preview" {
+                operations.append(openFocusBrief)
+                operations.append(arrangeFocusSession)
+            }
+            if id == "textedit" {
+                operations.append(openFocusScratchpad)
             }
             result.append(AppAdapterManifest(
                 adapterID: id,

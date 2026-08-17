@@ -503,17 +503,17 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(encoded.contains("\"hasValue\":true"))
     }
 
-    func testRiskClassificationAndSensitiveValidation() {
+    func testRiskClassificationCoversRoutineBoundaryAndAmbiguousActions() {
         let safe = ActionSpec(kind: .capture, surface: .macDesktop)
         XCTAssertEqual(ActionRiskClassifier.classify(safe), .safe)
 
         XCTAssertEqual(
             ActionRiskClassifier.classify(ActionSpec(kind: .click, surface: .macApp)),
-            .sensitive
+            .reversible
         )
         XCTAssertEqual(
             ActionRiskClassifier.classify(ActionSpec(kind: .key, surface: .macApp)),
-            .sensitive
+            .reversible
         )
 
         let sensitive = ActionSpec(
@@ -532,10 +532,22 @@ final class MacCtlCoreTests: XCTestCase {
         let validation = WorkflowRegistry().validate(workflow)
         XCTAssertFalse(validation.valid)
         XCTAssertEqual(validation.risk, .sensitive)
-        XCTAssertTrue(validation.errors.contains { $0.contains("approval_reason") })
+        XCTAssertTrue(validation.errors.contains { $0.contains("boundary_reason") })
+
+        let ambiguous = WorkflowSpec(
+            id: "test.ambiguous",
+            name: "Ambiguous",
+            summary: "Test",
+            surface: .macApp,
+            actions: [ActionSpec(kind: .click, surface: .macApp)]
+        )
+        let ambiguousValidation = WorkflowRegistry().validate(ambiguous)
+        XCTAssertFalse(ambiguousValidation.valid)
+        XCTAssertEqual(ambiguousValidation.risk, .reversible)
+        XCTAssertTrue(ambiguousValidation.errors.contains { $0.contains("needs an Accessibility") })
     }
 
-    func testTypeActionsRequireEphemeralInputAndSensitiveApproval() {
+    func testTypeActionsRequireEphemeralInputAndBoundaryMetadata() {
         let typeAction = ActionSpec(
             kind: .type,
             surface: .macApp,
@@ -553,18 +565,18 @@ final class MacCtlCoreTests: XCTestCase {
         let validation = WorkflowRegistry().validate(workflow)
         XCTAssertFalse(validation.valid)
         XCTAssertEqual(validation.risk, .sensitive)
-        XCTAssertTrue(validation.errors.contains { $0.contains("approval_reason") })
+        XCTAssertTrue(validation.errors.contains { $0.contains("boundary_reason") })
     }
 
     func testApprovalSmokeWorkflowIsSensitiveWithoutExternalInput() throws {
-        let workflow = try XCTUnwrap(WorkflowRegistry().workflow(id: "approval.smoke"))
+        let workflow = try XCTUnwrap(WorkflowRegistry().workflow(id: "execution.smoke"))
         let validation = WorkflowRegistry().validate(workflow)
 
         XCTAssertTrue(validation.valid)
         XCTAssertEqual(validation.risk, .sensitive)
         XCTAssertEqual(workflow.actions.count, 1)
         XCTAssertEqual(workflow.actions.first?.kind, .waitFor)
-        XCTAssertEqual(workflow.recipe, "approval-smoke")
+        XCTAssertEqual(workflow.recipe, "execution-smoke")
         XCTAssertNil(workflow.actions.first?.parameters["text_source"])
     }
 
@@ -655,6 +667,20 @@ final class MacCtlCoreTests: XCTestCase {
             response.evidence.first?.metadata["foreground_preserved"]?.boolValue,
             false
         )
+    }
+
+    func testCapabilitiesAdvertiseCallerDeclaredRecoveryWithoutAnImplicitQuota() throws {
+        let response = MacCtlService(permissionContext: "test").handle(
+            RequestEnvelope(method: "capabilities")
+        )
+
+        XCTAssertEqual(response.status, .succeeded)
+        let safety = try XCTUnwrap(response.result["safety"]?.arrayValue?.compactMap(\.stringValue))
+        XCTAssertTrue(safety.contains {
+            $0.contains("caller-declared finite recovery policy")
+                && $0.contains("no risk-based retry quota")
+        })
+        XCTAssertFalse(safety.contains { $0.contains("three safe") || $0.contains("two reversible") })
     }
 
     func testKeyboardCommandsMapToTheDocumentedSequences() {
@@ -933,20 +959,15 @@ final class MacCtlCoreTests: XCTestCase {
         }
     }
 
-    func testKeyboardEnablementRequiresConfirmationAndAppKitVerification() throws {
+    func testKeyboardEnablementReliesOnAgentPolicyAndAppKitVerification() throws {
         let preferenceStore = TestKeyboardPreferenceStore(enabled: false)
         let controller = KeyboardAccessController(
             eventSender: RecordingKeyboardEventSender(),
             preferenceStore: preferenceStore
         )
 
-        XCTAssertThrowsError(try controller.enable(confirm: false)) { error in
-            XCTAssertEqual(error as? KeyboardControlError, .confirmationRequired)
-        }
-        XCTAssertFalse(preferenceStore.enableCalled)
-
         preferenceStore.enableResult = .verificationFailure
-        XCTAssertThrowsError(try controller.enable(confirm: true)) { error in
+        XCTAssertThrowsError(try controller.enable(confirm: false)) { error in
             XCTAssertEqual(error as? KeyboardControlError, .enableVerificationFailed)
         }
         XCTAssertTrue(preferenceStore.enableCalled)
@@ -958,21 +979,17 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(status.permissionContext, "test")
     }
 
-    func testKeyboardLeaseStoreRequiresConfirmationIsExclusiveAndExpires() throws {
+    func testKeyboardLeaseStoreIsExclusiveAndExpiresWithoutAConfirmationGate() throws {
         var now = Date(timeIntervalSince1970: 100)
         let app = testApp(name: "Chrome", processID: 42)
         let store = KeyboardDriveStore(defaultLifetime: 120, now: { now })
 
-        XCTAssertThrowsError(try store.acquire(
+        let lease = try store.acquire(
             scope: .app,
             application: app,
             seconds: nil,
             confirm: false
-        )) { error in
-            XCTAssertEqual(error as? KeyboardDriveStoreError, .confirmationRequired)
-        }
-
-        let lease = try store.acquire(scope: .app, application: app, seconds: 5, confirm: true)
+        )
         XCTAssertEqual(lease.scope, .app)
         XCTAssertEqual(lease.application, app)
         XCTAssertEqual(try store.lease(for: lease.token), lease)
@@ -983,7 +1000,7 @@ final class MacCtlCoreTests: XCTestCase {
             XCTAssertEqual(error as? KeyboardDriveStoreError, .notFound)
         }
 
-        now = now.addingTimeInterval(6)
+        now = now.addingTimeInterval(121)
         XCTAssertThrowsError(try store.lease(for: lease.token)) { error in
             XCTAssertEqual(error as? KeyboardDriveStoreError, .expired)
         }
@@ -992,6 +1009,29 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertNoThrow(try store.release(token: replacement.token))
         XCTAssertThrowsError(try store.release(token: replacement.token)) { error in
             XCTAssertEqual(error as? KeyboardDriveStoreError, .notFound)
+        }
+    }
+
+    func testSharedKeyboardLeaseHonorsCallerDeclaredFiniteLifetimeBeyondLegacyCeiling() throws {
+        let store = KeyboardDriveStore()
+        let shared = try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 600,
+            confirm: true
+        )
+        XCTAssertEqual(shared.expiresAt.timeIntervalSince(shared.acquiredAt), 600, accuracy: 0.001)
+        try store.release(token: shared.token)
+
+        XCTAssertThrowsError(try store.acquire(
+            scope: .session,
+            application: nil,
+            seconds: 600,
+            confirm: true,
+            physicalInputMode: .suppressed,
+            freezeReason: "test freeze"
+        )) { error in
+            XCTAssertEqual(error as? KeyboardDriveStoreError, .invalidLifetime)
         }
     }
 
@@ -4395,7 +4435,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(profile.invalidationReasons.contains(.verificationFailed))
     }
 
-    func testAtomicControlRequiresOneExplicitAuthorityModeAndConfirmation() throws {
+    func testAtomicControlRequiresOneExplicitAuthorityModeButNoConfirmationShim() throws {
         let app = testApp(name: "Chrome", processID: 42)
         var activationCount = 0
         let service = MacCtlService(
@@ -4420,19 +4460,19 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(conflicting.status, .blocked)
         XCTAssertEqual(conflicting.error?.code, MacCtlErrorCode.unsafeInput.rawValue)
 
-        let unconfirmed = service.handle(RequestEnvelope(
+        let direct = service.handle(RequestEnvelope(
             method: "control.perform",
             params: [
                 "action": .string("next-control"),
                 "app": .string("Chrome")
             ]
         ))
-        XCTAssertEqual(unconfirmed.status, .blocked)
+        XCTAssertEqual(direct.status, .blocked)
         XCTAssertEqual(
-            unconfirmed.error?.code,
-            MacCtlErrorCode.keyboardConfirmationRequired.rawValue
+            direct.error?.code,
+            MacCtlErrorCode.controlVerificationUnavailable.rawValue
         )
-        XCTAssertEqual(activationCount, 0)
+        XCTAssertEqual(activationCount, 1)
     }
 
     func testAtomicControlFailsClosedWhenForegroundIsStolenBeforeExecution() throws {
@@ -4702,7 +4742,7 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertTrue(WorkflowRegistry().validate(accessibility).valid)
     }
 
-    func testBackgroundApprovalExecutionPreservesPolicyInResponseAndReceipt() throws {
+    func testBackgroundWorkflowExecutionPreservesPolicyInResponseAndReceipt() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-background-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         let service = MacCtlService(
@@ -4713,31 +4753,18 @@ final class MacCtlCoreTests: XCTestCase {
         let prepared = service.handle(RequestEnvelope(
             method: "workflow.prepare",
             params: [
-                "workflow": .string("approval.smoke"),
+                "workflow": .string("execution.smoke"),
                 "focus_policy": .string("background")
             ]
         ))
         XCTAssertEqual(prepared.status, .prepared)
         XCTAssertEqual(prepared.result["focus_policy"]?.stringValue, "background")
-        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
-        XCTAssertEqual(approval["focusPolicy"]?.stringValue, "background")
-        let token = try XCTUnwrap(approval["token"]?.stringValue)
-
-        let approved = service.handle(RequestEnvelope(
-            method: "approval.approve",
-            params: [
-                "token": .string(token),
-                "source": .string("test")
-            ]
-        ))
-        XCTAssertEqual(approved.status, .succeeded)
-        XCTAssertEqual(approved.result["approved"]?.boolValue, true)
+        XCTAssertNil(prepared.result["approval"])
 
         let executed = service.handle(RequestEnvelope(
             method: "workflow.run",
             params: [
-                "workflow": .string("approval.smoke"),
-                "approval_token": .string(token),
+                "workflow": .string("execution.smoke"),
                 "focus_policy": .string("background")
             ]
         ))
@@ -4755,16 +4782,16 @@ final class MacCtlCoreTests: XCTestCase {
             .background
         )
         XCTAssertEqual(
-            receipts.first(where: { $0.method == "approval.approve" })?.focusPolicy,
-            .background
-        )
-        XCTAssertEqual(
             receipts.first(where: { $0.method == "workflow.run" })?.focusPolicy,
             .background
         )
+        XCTAssertEqual(
+            receipts.first(where: { $0.method == "workflow.run" })?.approvalState,
+            "not_required"
+        )
     }
 
-    func testMismatchedBackgroundRunDoesNotConsumeApprovalToken() throws {
+    func testPreparedWorkflowDoesNotCreateOrBindNativeApprovalAuthority() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-policy-mismatch-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         let service = MacCtlService(
@@ -4773,27 +4800,25 @@ final class MacCtlCoreTests: XCTestCase {
         )
         let prepared = service.handle(RequestEnvelope(
             method: "workflow.prepare",
-            params: ["workflow": .string("approval.smoke")]
+            params: ["workflow": .string("execution.smoke")]
         ))
-        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
-        let token = try XCTUnwrap(approval["token"]?.stringValue)
+        XCTAssertEqual(prepared.status, .prepared)
+        XCTAssertNil(prepared.result["approval"])
+        XCTAssertTrue(service.pendingApprovalRecords().isEmpty)
 
-        let mismatched = service.handle(RequestEnvelope(
+        let executed = service.handle(RequestEnvelope(
             method: "workflow.run",
             params: [
-                "workflow": .string("approval.smoke"),
-                "approval_token": .string(token),
+                "workflow": .string("execution.smoke"),
                 "focus_policy": .string("background")
             ]
         ))
-        XCTAssertEqual(mismatched.status, .blocked)
-        XCTAssertEqual(mismatched.error?.code, MacCtlErrorCode.approvalRequired.rawValue)
-
-        let approved = service.handle(RequestEnvelope(
-            method: "approval.approve",
-            params: ["token": .string(token)]
-        ))
-        XCTAssertEqual(approved.status, .succeeded)
+        XCTAssertEqual(
+            executed.status,
+            .succeeded,
+            executed.error.map { "\($0.code): \($0.message) \($0.details)" } ?? "no error"
+        )
+        XCTAssertEqual(executed.result["focus_policy"]?.stringValue, "background")
     }
 
     func testApprovalExpiresAndCannotBeReused() throws {
@@ -4819,46 +4844,26 @@ final class MacCtlCoreTests: XCTestCase {
         }
     }
 
-    func testExpiredApprovalReceiptRetainsWorkflowAndControlCenterProvenance() throws {
+    func testWorkflowPreviewReceiptReportsNoMacControlApprovalRequirement() throws {
         let receiptDirectory = URL(fileURLWithPath: "/private/tmp/macctl-expiry-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: receiptDirectory) }
         let service = MacCtlService(
-            approvalStore: ApprovalStore(lifetime: 0.02),
             receiptStore: OperationReceiptStore(directory: receiptDirectory),
             permissionContext: "client"
         )
 
         let prepared = service.handle(RequestEnvelope(
             method: "workflow.prepare",
-            params: ["workflow": .string("approval.smoke")]
+            params: ["workflow": .string("execution.smoke")]
         ))
-        let approval = try XCTUnwrap(prepared.result["approval"]?.objectValue)
-        let token = try XCTUnwrap(approval["token"]?.stringValue)
-
-        Thread.sleep(forTimeInterval: 0.05)
-        let expired = service.handle(RequestEnvelope(
-            method: "approval.approve",
-            params: [
-                "token": .string(token),
-                "source": .string("control_center")
-            ]
-        ))
-
-        XCTAssertEqual(expired.status, .blocked)
-        XCTAssertEqual(expired.error?.code, MacCtlErrorCode.approvalExpired.rawValue)
-        XCTAssertEqual(expired.error?.details["workflow_id"]?.stringValue, "approval.smoke")
+        XCTAssertEqual(prepared.status, .prepared)
+        XCTAssertNil(prepared.result["approval"])
+        XCTAssertTrue(service.pendingApprovalRecords().isEmpty)
 
         let receipts = try OperationReceiptStore(directory: receiptDirectory).list(limit: 10)
         let preparedReceipt = try XCTUnwrap(receipts.first { $0.method == "workflow.prepare" })
-        XCTAssertEqual(preparedReceipt.workflowID, "approval.smoke")
-        XCTAssertEqual(preparedReceipt.approvalState, "prepared")
-        let receipt = try XCTUnwrap(receipts.first { $0.method == "approval.approve" })
-        XCTAssertEqual(receipt.workflowID, "approval.smoke")
-        XCTAssertEqual(receipt.source, "control_center")
-        XCTAssertEqual(receipt.status, .blocked)
-        XCTAssertEqual(receipt.approvalState, "required")
-        XCTAssertEqual(receipt.errorCode, MacCtlErrorCode.approvalExpired.rawValue)
-        XCTAssertEqual(receipt.verificationResult, "blocked")
+        XCTAssertEqual(preparedReceipt.workflowID, "execution.smoke")
+        XCTAssertEqual(preparedReceipt.approvalState, "not_required")
     }
 
     func testDoubleTapDetectorHonorsTimingAndResetsAfterDetection() {
@@ -5222,9 +5227,10 @@ final class MacCtlCoreTests: XCTestCase {
         )
         XCTAssertEqual(legacy.focusPolicy, .foreground)
         XCTAssertEqual(legacy.totalTimeout, 300)
-        XCTAssertEqual(legacy.maxActions, TaskPlanValidator.maximumActions)
         XCTAssertEqual(legacy.steps.first?.timeout, 30)
         XCTAssertEqual(legacy.steps.first?.recovery, .adaptive)
+        XCTAssertFalse(String(data: try JSONCodec.encode(legacy), encoding: .utf8)!.contains("maxActions"))
+        XCTAssertFalse(String(data: try JSONCodec.encode(TaskCapabilityReport()), encoding: .utf8)!.contains("maximumActions"))
 
         let target = try JSONCodec.decode(
             TaskTargetIdentity.self,
@@ -5244,6 +5250,44 @@ final class MacCtlCoreTests: XCTestCase {
             steps: legacy.steps
         )
         XCTAssertNotEqual(firstDigest, TaskPlan.digest(changed))
+    }
+
+    func testTaskPlanUsesCallerDeclaredFiniteShapeAndTimeoutsWithoutArbitraryCeilings() {
+        let steps = (0..<65).map { index in
+            TaskStep(
+                id: "step-\(index)",
+                action: ActionSpec(kind: .assert, surface: .macApp),
+                timeout: 3_600
+            )
+        }
+        let plan = TaskPlan(
+            id: "caller-shaped-task",
+            name: "Caller-shaped task",
+            summary: "No daemon-selected step or duration ceiling",
+            steps: steps,
+            totalTimeout: 86_400
+        )
+        XCTAssertTrue(TaskPlanValidator.validate(plan).valid)
+        XCTAssertEqual(
+            TaskPlanValidator.attemptLimit(
+                for: .reversible,
+                recovery: TaskRecoveryPolicy(mode: "retry", maxAttempts: 100)
+            ),
+            100
+        )
+
+        let invalid = TaskPlan(
+            id: "invalid-duration",
+            name: "Invalid duration",
+            summary: "A deadline must remain finite",
+            steps: [TaskStep(
+                id: "step",
+                action: ActionSpec(kind: .assert, surface: .macApp),
+                timeout: .infinity
+            )],
+            totalTimeout: .infinity
+        )
+        XCTAssertFalse(TaskPlanValidator.validate(invalid).valid)
     }
 
     func testBackgroundTaskValidationAcceptsTaskScopedRoutesAndRejectsGlobalInput() {
@@ -5638,9 +5682,8 @@ final class MacCtlCoreTests: XCTestCase {
                 recovery: TaskRecoveryPolicy(alternateRoutes: ["native"])
             )]
         )
-        let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
-        XCTAssertEqual(try runner.run(plan: plan, approvalToken: prepared.approval.token).state, .completed)
+        _ = try runner.prepare(plan: plan)
+        XCTAssertEqual(try runner.run(plan: plan).state, .completed)
         XCTAssertEqual(executor.recoveryRoutes, [nil, "native"])
     }
 
@@ -5715,7 +5758,7 @@ final class MacCtlCoreTests: XCTestCase {
         }
     }
 
-    func testTaskRunnerUsesRiskBoundedRecoveryAndCumulativeActionBudget() throws {
+    func testTaskRunnerUsesCallerDeclaredFiniteRecoveryWithoutAGlobalActionBudget() throws {
         let safeDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-safe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: safeDirectory) }
         let safeExecutor = TestTaskActionExecutor(failuresBeforeSuccess: 2)
@@ -5730,11 +5773,14 @@ final class MacCtlCoreTests: XCTestCase {
             id: "safe.recovery",
             name: "Safe recovery",
             summary: "Retry safe action",
-            steps: [TaskStep(id: "step", action: ActionSpec(kind: .assert, surface: .macApp))]
+            steps: [TaskStep(
+                id: "step",
+                action: ActionSpec(kind: .assert, surface: .macApp),
+                recovery: TaskRecoveryPolicy(mode: "retry", maxAttempts: 3)
+            )]
         )
-        let safeApproval = try safeRunner.prepare(plan: safePlan)
-        _ = try safeApprovals.approve(token: safeApproval.approval.token)
-        let safeReport = try safeRunner.run(plan: safePlan, approvalToken: safeApproval.approval.token)
+        _ = try safeRunner.prepare(plan: safePlan)
+        let safeReport = try safeRunner.run(plan: safePlan)
         XCTAssertEqual(safeReport.state, .completed)
         XCTAssertEqual(safeExecutor.executeCount, 3)
         XCTAssertEqual(safeReport.attempts, 3)
@@ -5756,46 +5802,19 @@ final class MacCtlCoreTests: XCTestCase {
             steps: [TaskStep(
                 id: "step",
                 action: ActionSpec(kind: .assert, surface: .macApp, risk: .reversible),
-                risk: .reversible
+                risk: .reversible,
+                recovery: TaskRecoveryPolicy(mode: "retry", maxAttempts: 2)
             )]
         )
-        let reversibleApproval = try reversibleRunner.prepare(plan: reversiblePlan)
-        _ = try reversibleApprovals.approve(token: reversibleApproval.approval.token)
+        _ = try reversibleRunner.prepare(plan: reversiblePlan)
         XCTAssertThrowsError(try reversibleRunner.run(
-            plan: reversiblePlan,
-            approvalToken: reversibleApproval.approval.token
+            plan: reversiblePlan
         )) { error in
             XCTAssertEqual(error as? TaskControlError, .blocked("task_action_blocked"))
         }
         XCTAssertEqual(reversibleExecutor.executeCount, 2)
         XCTAssertEqual(try reversibleRunner.status(taskID: reversiblePlan.id).state, .blocked)
 
-        let budgetDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-budget-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: budgetDirectory) }
-        let budgetExecutor = TestTaskActionExecutor(failuresBeforeSuccess: 2)
-        let budgetApprovals = TaskApprovalStore()
-        let budgetRunner = TaskRunner(
-            checkpointStore: TaskCheckpointStore(directory: budgetDirectory),
-            approvalStore: budgetApprovals,
-            actionExecutor: budgetExecutor,
-            targetRevalidator: { _ in nil }
-        )
-        let budgetPlan = TaskPlan(
-            id: "budget.recovery",
-            name: "Budget recovery",
-            summary: "Bound action attempts",
-            steps: [TaskStep(id: "step", action: ActionSpec(kind: .assert, surface: .macApp))],
-            maxActions: 1
-        )
-        let budgetApproval = try budgetRunner.prepare(plan: budgetPlan)
-        _ = try budgetApprovals.approve(token: budgetApproval.approval.token)
-        XCTAssertThrowsError(try budgetRunner.run(
-            plan: budgetPlan,
-            approvalToken: budgetApproval.approval.token
-        )) { error in
-            XCTAssertEqual(error as? TaskControlError, .actionBudgetExceeded)
-        }
-        XCTAssertEqual(budgetExecutor.executeCount, 1)
     }
 
     func testTaskRunnerPausesForPreconditionsRequiresFreshResumeAuthorityAndBindsRemainingPlan() throws {
@@ -5825,9 +5844,8 @@ final class MacCtlCoreTests: XCTestCase {
                 )
             ]
         )
-        let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
-        XCTAssertThrowsError(try runner.run(plan: plan, approvalToken: prepared.approval.token)) { error in
+        _ = try runner.prepare(plan: plan)
+        XCTAssertThrowsError(try runner.run(plan: plan)) { error in
             XCTAssertEqual(error as? TaskControlError, .preconditionFailed("step-2"))
         }
         let paused = try runner.status(taskID: plan.id)
@@ -5840,9 +5858,8 @@ final class MacCtlCoreTests: XCTestCase {
         let resumePrepared = try runner.prepare(plan: plan)
         XCTAssertEqual(
             resumePrepared.planDigest,
-            TaskPlan.digest(plan.remaining(from: 1))
+            TaskPlan.digest(plan)
         )
-        _ = try approvals.approve(token: resumePrepared.approval.token)
         let staleAuthority = TaskExecutionAuthority(
             leaseToken: "lease",
             fresh: false,
@@ -5850,7 +5867,6 @@ final class MacCtlCoreTests: XCTestCase {
         )
         XCTAssertThrowsError(try runner.resume(
             plan: plan,
-            approvalToken: resumePrepared.approval.token,
             authority: staleAuthority
         )) { error in
             XCTAssertEqual(error as? TaskControlError, .leaseRequired)
@@ -5862,7 +5878,6 @@ final class MacCtlCoreTests: XCTestCase {
         )
         let completed = try runner.resume(
             plan: plan,
-            approvalToken: resumePrepared.approval.token,
             authority: freshAuthority
         )
         XCTAssertEqual(completed.state, .completed)
@@ -5910,7 +5925,6 @@ final class MacCtlCoreTests: XCTestCase {
             accuracy: 0.000_001
         )
 
-        _ = try approvals.approve(token: prepared.approval.token)
         let authority = TaskExecutionAuthority(
             leaseToken: "fresh-lease",
             fresh: true,
@@ -5918,7 +5932,6 @@ final class MacCtlCoreTests: XCTestCase {
         )
         let completed = try runner.resume(
             plan: plan,
-            approvalToken: prepared.approval.token,
             authority: authority
         )
         XCTAssertEqual(completed.state, .completed)
@@ -5927,6 +5940,47 @@ final class MacCtlCoreTests: XCTestCase {
             startedAt.timeIntervalSince1970,
             accuracy: 0.000_001
         )
+    }
+
+    func testExpiredTaskIdentityCannotBePreparedOrResumed() throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/macctl-task-expired-identity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let approvals = TaskApprovalStore()
+        let store = TaskCheckpointStore(directory: directory)
+        let runner = TaskRunner(
+            checkpointStore: store,
+            approvalStore: approvals,
+            actionExecutor: TestTaskActionExecutor(),
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "expired.identity",
+            name: "Expired identity",
+            summary: "Require a new identity after the plan-wide deadline",
+            steps: [TaskStep(id: "step", action: ActionSpec(kind: .assert, surface: .macApp))]
+        )
+        try store.save(TaskCheckpoint(
+            taskID: plan.id,
+            planDigest: TaskPlan.digest(plan),
+            currentStepID: "step",
+            stepIndex: 0,
+            state: .expired
+        ))
+
+        XCTAssertThrowsError(try runner.prepare(plan: plan)) { error in
+            XCTAssertEqual(error as? TaskControlError, .invalidState(.expired))
+        }
+        let authority = TaskExecutionAuthority(
+            leaseToken: "fresh-lease",
+            fresh: true,
+            revalidate: { nil }
+        )
+        XCTAssertThrowsError(try runner.resume(
+            plan: plan,
+            authority: authority
+        )) { error in
+            XCTAssertEqual(error as? TaskControlError, .invalidState(.expired))
+        }
     }
 
     func testSensitiveTaskNeverRetriesUncertainActionAndCancellationInvalidatesState() throws {
@@ -5952,8 +6006,8 @@ final class MacCtlCoreTests: XCTestCase {
             )]
         )
         let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
-        XCTAssertThrowsError(try runner.run(plan: plan, approvalToken: prepared.approval.token)) { error in
+        XCTAssertEqual(prepared.risk, .sensitive)
+        XCTAssertThrowsError(try runner.run(plan: plan)) { error in
             XCTAssertEqual(error as? TaskControlError, .indeterminate("send"))
         }
         XCTAssertEqual(executor.executeCount, 1)
@@ -5985,9 +6039,8 @@ final class MacCtlCoreTests: XCTestCase {
             summary: "Terminal tasks cannot be cancelled",
             steps: [TaskStep(id: "step", action: ActionSpec(kind: .assert, surface: .macApp))]
         )
-        let completedPrepared = try cancellationRunner.prepare(plan: completedPlan)
-        _ = try cancellationApprovals.approve(token: completedPrepared.approval.token)
-        _ = try cancellationRunner.run(plan: completedPlan, approvalToken: completedPrepared.approval.token)
+        _ = try cancellationRunner.prepare(plan: completedPlan)
+        _ = try cancellationRunner.run(plan: completedPlan)
         XCTAssertThrowsError(try cancellationRunner.cancel(taskID: completedPlan.id)) { error in
             XCTAssertEqual(error as? TaskControlError, .invalidState(.completed))
         }
@@ -6046,17 +6099,12 @@ final class MacCtlCoreTests: XCTestCase {
             ]
         ))
         XCTAssertEqual(prepared.status, .prepared)
-        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
-        let approved = service.handle(RequestEnvelope(
-            method: "approval.approve",
-            params: ["token": .string(token)]
-        ))
-        XCTAssertEqual(approved.status, .succeeded)
+        XCTAssertNil(prepared.result["approval"])
+        XCTAssertEqual(prepared.result["risk"]?.stringValue, RiskLevel.safe.rawValue)
         let run = service.handle(RequestEnvelope(
             method: "task.run",
             params: [
                 "plan": planValue,
-                "approval_token": .string(token),
                 "ephemeral_inputs": .object(["body": .string("PRIVATE BODY")])
             ]
         ))
@@ -6066,7 +6114,6 @@ final class MacCtlCoreTests: XCTestCase {
 
         let receipts = try OperationReceiptStore(directory: receiptDirectory).list(limit: 20)
         let receiptText = String(decoding: try JSONCodec.encode(receipts), as: UTF8.self)
-        XCTAssertFalse(receiptText.contains(token))
         XCTAssertFalse(receiptText.contains("PRIVATE BODY"))
         XCTAssertFalse(receiptText.contains("AXValue"))
         XCTAssertTrue(receipts.contains {
@@ -6075,6 +6122,68 @@ final class MacCtlCoreTests: XCTestCase {
                 && $0.stepID == "step"
                 && $0.evidence.contains { $0.kind == "task_checkpoint" }
         })
+    }
+
+    func testTaskServiceResumeUsesFreshExecutionAuthorityForTheRemainingPlan() throws {
+        let checkpointDirectory = URL(fileURLWithPath: "/private/tmp/macctl-task-resume-service-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
+        let approvals = TaskApprovalStore()
+        let checkpoints = TaskCheckpointStore(directory: checkpointDirectory)
+        let executor = FailSecondTaskActionExecutor()
+        let runner = TaskRunner(
+            checkpointStore: checkpoints,
+            approvalStore: approvals,
+            actionExecutor: executor,
+            targetRevalidator: { _ in nil }
+        )
+        let plan = TaskPlan(
+            id: "service.resume.remaining",
+            name: "Resume remaining steps",
+            summary: "Resume only work that remains",
+            steps: [
+                TaskStep(
+                    id: "first",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    recovery: .strict
+                ),
+                TaskStep(
+                    id: "second",
+                    action: ActionSpec(kind: .assert, surface: .macApp),
+                    recovery: .strict
+                )
+            ]
+        )
+        _ = try runner.prepare(plan: plan)
+        XCTAssertThrowsError(try runner.run(plan: plan))
+        XCTAssertEqual(try runner.status(taskID: plan.id).stepIndex, 1)
+
+        executor.shouldFailSecond = false
+        let service = MacCtlService(
+            permissionContext: "test",
+            keyboardDriveStore: KeyboardDriveStore(),
+            taskApprovalStore: approvals,
+            taskCheckpointStore: checkpoints,
+            taskRunner: runner,
+            hasPostEventAccess: { true }
+        )
+        let planValue = try JSONValue.fromEncodable(plan)
+        let prepared = service.handle(RequestEnvelope(
+            method: "task.prepare",
+            params: ["plan": planValue]
+        ))
+        XCTAssertEqual(
+            prepared.result["planDigest"]?.stringValue,
+            TaskPlan.digest(plan)
+        )
+
+        let resumed = service.handle(RequestEnvelope(
+            method: "task.resume",
+            params: ["plan": planValue]
+        ))
+
+        XCTAssertEqual(resumed.status, .succeeded)
+        XCTAssertEqual(resumed.result["lifecycle_state"]?.stringValue, "completed")
+        XCTAssertEqual(executor.executeCount, 3)
     }
 
     func testTaskServiceCreatesBackgroundInputChannelWithoutKeyboardLease() throws {
@@ -6144,21 +6253,12 @@ final class MacCtlCoreTests: XCTestCase {
             method: "task.prepare",
             params: ["plan": planValue]
         ))
-        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
-        XCTAssertEqual(
-            service.handle(RequestEnvelope(
-                method: "approval.approve",
-                params: ["token": .string(token)]
-            )).status,
-            .succeeded
-        )
+        XCTAssertEqual(prepared.status, .prepared)
+        XCTAssertNil(prepared.result["approval"])
 
         let run = service.handle(RequestEnvelope(
             method: "task.run",
-            params: [
-                "plan": planValue,
-                "approval_token": .string(token)
-            ]
+            params: ["plan": planValue]
         ))
 
         XCTAssertEqual(run.status, .succeeded)
@@ -6222,18 +6322,12 @@ final class MacCtlCoreTests: XCTestCase {
             method: "task.prepare",
             params: ["plan": planValue]
         ))
-        let token = try XCTUnwrap(prepared.result["approval"]?.objectValue?["token"]?.stringValue)
-        _ = service.handle(RequestEnvelope(
-            method: "approval.approve",
-            params: ["token": .string(token)]
-        ))
+        XCTAssertEqual(prepared.status, .prepared)
+        XCTAssertNil(prepared.result["approval"])
 
         let run = service.handle(RequestEnvelope(
             method: "task.run",
-            params: [
-                "plan": planValue,
-                "approval_token": .string(token)
-            ]
+            params: ["plan": planValue]
         ))
 
         XCTAssertEqual(run.status, .blocked)
@@ -6267,8 +6361,7 @@ final class MacCtlCoreTests: XCTestCase {
             approvalReason: "Test key dispatch"
         )]
         )
-        let prepared = try runner.prepare(plan: plan)
-        _ = try approvals.approve(token: prepared.approval.token)
+        _ = try runner.prepare(plan: plan)
         let authority = TaskExecutionAuthority(
             leaseToken: "lease",
             fresh: true,
@@ -6276,18 +6369,12 @@ final class MacCtlCoreTests: XCTestCase {
         )
         XCTAssertThrowsError(try runner.run(
             plan: plan,
-            approvalToken: prepared.approval.token,
             authority: authority
         )) { error in
             XCTAssertEqual(error as? TaskControlError, .preconditionFailed("modal_dialog"))
         }
         XCTAssertEqual(executor.executeCount, 0)
         XCTAssertEqual(try runner.status(taskID: plan.id).state, .prepared)
-        XCTAssertNotNil(try approvals.validateApproved(
-            token: prepared.approval.token,
-            plan: plan,
-            ephemeralInputs: [:]
-        ))
     }
 
     func testReleaseGateRequiresEveryTierOneEvidenceDimension() {
@@ -6346,7 +6433,7 @@ final class MacCtlCoreTests: XCTestCase {
                 "authorization notices are short-lived, owner-local, redacted, and explanatory only; Mac Control never approves or denies the native macOS prompt",
                 "authorization provenance is attested, declared, or unverified; missing or mismatched peer identity is never treated as safe",
                 "authorization source opening is unavailable unless a registered Codex opener accepts an allowlisted codex:// reference",
-                "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
+                "shortcut bindings are owner-only, exact-digest scoped, and promote to behavior_verified only after a declared postcondition passes",
                 "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
             ],
             shortcutCapabilities: ShortcutCapabilityReport(
@@ -6436,8 +6523,8 @@ final class MacCtlCoreTests: XCTestCase {
                 method: method,
                 source: source,
                 workflowID: workflowID,
-                targetSurface: workflowID == "approval.smoke" ? .macDesktop : .macApp,
-                risk: workflowID == "approval.smoke" ? .sensitive : .safe,
+                targetSurface: workflowID == "execution.smoke" ? .macDesktop : .macApp,
+                risk: workflowID == "execution.smoke" ? .sensitive : .safe,
                 approvalState: approvalState,
                 executionResult: status.rawValue,
                 verificationResult: verificationResult,
@@ -6458,18 +6545,13 @@ final class MacCtlCoreTests: XCTestCase {
         let receipts = ReleaseGate.requiredMacWorkflows.map {
             receipt(method: "workflow.run", workflowID: $0, status: .succeeded, verificationResult: "passed")
         } + [
-            receipt(method: "workflow.prepare", workflowID: "approval.smoke", status: .prepared, approvalState: "prepared"),
-            receipt(method: "approval.approve", workflowID: "approval.smoke", status: .succeeded, source: "control_center", approvalState: "approved"),
-            receipt(method: "approval.deny", workflowID: "approval.smoke", status: .succeeded, source: "control_center", approvalState: "denied"),
+            receipt(method: "workflow.prepare", workflowID: "execution.smoke", status: .prepared),
             receipt(
-                method: "approval.approve",
-                workflowID: "approval.smoke",
-                status: .blocked,
-                approvalState: "required",
-                verificationResult: "blocked",
-                errorCode: MacCtlErrorCode.approvalExpired.rawValue
+                method: "workflow.run",
+                workflowID: "execution.smoke",
+                status: .succeeded,
+                evidence: [ReceiptEvidence(kind: "execution_probe", source: "macctl")]
             ),
-            receipt(method: "workflow.run", workflowID: "approval.smoke", status: .blocked, approvalState: "required", verificationResult: "blocked"),
             receipt(method: "keyboard.lease.acquire", workflowID: nil, status: .succeeded, evidence: [
                 ReceiptEvidence(kind: "keyboard_lease", source: "macctld")
             ]),
@@ -7089,5 +7171,22 @@ private final class TestTaskActionExecutor: TaskActionExecuting {
     ) throws -> Bool {
         evaluationCount += 1
         return evaluationResult
+    }
+}
+
+private final class FailSecondTaskActionExecutor: TaskActionExecuting {
+    private(set) var executeCount = 0
+    var shouldFailSecond = true
+
+    func execute(action: ActionSpec, context: TaskActionContext) throws -> TaskActionExecutionReport {
+        executeCount += 1
+        if shouldFailSecond && executeCount >= 2 {
+            throw TaskActionExecutionError.blocked("second_step")
+        }
+        return TaskActionExecutionReport(route: "test")
+    }
+
+    func evaluate(predicate: TaskPredicate, context: TaskActionContext) throws -> Bool {
+        true
     }
 }

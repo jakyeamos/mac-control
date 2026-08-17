@@ -32,6 +32,7 @@ public struct ControlCenterExecution: Codable, Equatable {
     public let acquiredAt: Date
     public let expiresAt: Date
     public let stopping: Bool
+    public let taskProgress: ControlCenterTaskProgress?
 
     public init(
         executionID: String,
@@ -42,7 +43,8 @@ public struct ControlCenterExecution: Codable, Equatable {
         acquiredAt: Date,
         expiresAt: Date,
         stopping: Bool = false,
-        focusPolicy: FocusPolicy? = nil
+        focusPolicy: FocusPolicy? = nil,
+        taskProgress: ControlCenterTaskProgress? = nil
     ) {
         self.executionID = executionID
         self.taskID = taskID
@@ -53,6 +55,116 @@ public struct ControlCenterExecution: Codable, Equatable {
         self.acquiredAt = acquiredAt
         self.expiresAt = expiresAt
         self.stopping = stopping
+        self.taskProgress = taskProgress
+    }
+}
+
+public enum ControlCenterTaskStepState: String, Codable, Equatable {
+    case pending
+    case running
+    case verified
+    case stopped
+}
+
+/// A redacted projection of durable task state for the menu-bar Control Center.
+/// Step labels come only from plan IDs; targets, selectors, inputs, and output
+/// remain outside this forward-facing snapshot.
+public struct ControlCenterTaskStepProgress: Codable, Equatable {
+    public let stepID: String
+    public let label: String
+    public let state: ControlCenterTaskStepState
+
+    public init(stepID: String, label: String, state: ControlCenterTaskStepState) {
+        self.stepID = stepID
+        self.label = label
+        self.state = state
+    }
+}
+
+public struct ControlCenterTaskProgress: Codable, Equatable {
+    public let state: TaskLifecycleState
+    public let completedStepCount: Int
+    public let totalStepCount: Int
+    public let currentStepID: String?
+    public let lastErrorCode: String?
+    public let steps: [ControlCenterTaskStepProgress]
+
+    public init(
+        state: TaskLifecycleState,
+        completedStepCount: Int,
+        totalStepCount: Int,
+        currentStepID: String?,
+        lastErrorCode: String?,
+        steps: [ControlCenterTaskStepProgress]
+    ) {
+        self.state = state
+        self.completedStepCount = completedStepCount
+        self.totalStepCount = totalStepCount
+        self.currentStepID = currentStepID
+        self.lastErrorCode = lastErrorCode
+        self.steps = steps
+    }
+
+    public static func make(
+        plan: TaskPlan,
+        status: TaskStatusReport,
+        stopping: Bool = false
+    ) -> ControlCenterTaskProgress {
+        let completedCount = min(max(status.stepIndex, 0), plan.steps.count)
+        let stoppedStates: Set<TaskLifecycleState> = [
+            .paused, .blocked, .indeterminate, .cancelled, .expired
+        ]
+        let steps = plan.steps.enumerated().map { index, step in
+            let state: ControlCenterTaskStepState
+            if index < completedCount || status.state == .completed {
+                state = .verified
+            } else if index == completedCount,
+                      stopping || stoppedStates.contains(status.state) {
+                state = .stopped
+            } else if index == completedCount, status.state == .running {
+                state = .running
+            } else {
+                state = .pending
+            }
+            return ControlCenterTaskStepProgress(
+                stepID: step.id,
+                label: step.id
+                    .replacingOccurrences(of: "-", with: " ")
+                    .replacingOccurrences(of: "_", with: " ")
+                    .capitalized,
+                state: state
+            )
+        }
+        return ControlCenterTaskProgress(
+            state: stopping && status.state == .running ? .cancelled : status.state,
+            completedStepCount: completedCount,
+            totalStepCount: plan.steps.count,
+            currentStepID: status.currentStepID,
+            lastErrorCode: status.lastErrorCode,
+            steps: steps
+        )
+    }
+}
+
+public struct ControlCenterTaskOutcome: Codable, Equatable {
+    public let taskID: String
+    public let summary: String
+    public let applicationName: String?
+    public let progress: ControlCenterTaskProgress
+    public let expiresAt: Date
+
+    public init(
+        taskID: String,
+        summary: String,
+        applicationName: String?,
+        progress: ControlCenterTaskProgress,
+        expiresAt: Date
+    ) {
+        self.taskID = taskID
+        self.summary = summary
+        self.applicationName = applicationName
+        self.progress = progress
+        self.expiresAt = expiresAt
     }
 }
 
@@ -131,6 +243,7 @@ public struct ControlCenterSnapshot: Codable, Equatable {
     public let handsOffSession: ControlCenterHandsOffSession?
     public let permissions: [PermissionStatus]
     public let lifecycleDrain: ControlCenterLifecycleDrain?
+    public let taskOutcome: ControlCenterTaskOutcome?
 
     public init(
         approvals: [ControlCenterApproval],
@@ -139,7 +252,8 @@ public struct ControlCenterSnapshot: Codable, Equatable {
         lifecycleDrain: ControlCenterLifecycleDrain? = nil,
         focusActivity: ControlCenterFocusActivity? = nil,
         handsOffSession: ControlCenterHandsOffSession? = nil,
-        authorizationNotices: [AuthorizationNotice] = []
+        authorizationNotices: [AuthorizationNotice] = [],
+        taskOutcome: ControlCenterTaskOutcome? = nil
     ) {
         self.approvals = approvals
         self.authorizationNotices = authorizationNotices
@@ -148,6 +262,7 @@ public struct ControlCenterSnapshot: Codable, Equatable {
         self.handsOffSession = handsOffSession
         self.permissions = permissions
         self.lifecycleDrain = lifecycleDrain
+        self.taskOutcome = taskOutcome
     }
 }
 

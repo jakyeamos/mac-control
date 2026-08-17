@@ -6,10 +6,10 @@ Use these maintained surfaces as references rather than copying ad hoc code:
   with reasoned JSON evidence.
 - `Sources/MacCtlCore/ReceiptStore.swift` — atomic, redacted, owner-only,
   retention-bounded evidence storage.
-- `Sources/MacCtlCore/WorkflowValidator.swift` — conservative workflow and
-  focus-policy validation before approval.
-- `Sources/MacCtlCore/ApprovalStore.swift` — short-lived, single-use approval
-  lifecycle and explicit expiry/denial states.
+- `Sources/MacCtlCore/WorkflowValidator.swift` — conservative workflow,
+  target, risk, and focus-policy validation before execution.
+- `Sources/MacCtlCore/TaskRunner.swift` — checkpointed exact-plan execution,
+  drift stops, bounded recovery, cancellation, and verified completion.
 - `docs/TIER1_RELEASE.md` — canonical release evidence and manual live-check
   contract.
 

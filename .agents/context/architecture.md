@@ -1,7 +1,7 @@
 # Architecture and boundaries
 
 `macctl` is a command-first local macOS control plane. The `MacCtlCore`
-library owns workflow validation, approval plans, receipts, release checks,
+library owns workflow validation, exact plan digests, receipts, release checks,
 and platform adapters. `macctl` is the user-facing CLI. `macctld` is the
 per-user daemon that owns the GUI session and serves an owner-only Unix socket.
 
@@ -11,8 +11,10 @@ not bypass daemon validation. Apple frameworks are the platform boundary:
 AppKit, ApplicationServices, CoreGraphics, ScreenCaptureKit, Vision, and
 Foundation. There are no third-party runtime dependencies in the baseline.
 
-The workflow boundary is `prepare -> approve -> execute -> verify`. Receipts
-are the durable evidence boundary. TCC permissions, launchd, and the Aqua
+The workflow boundary is `request or preview -> execute -> verify`. The calling
+agent owns any conversational confirmation required by its normal policy; Mac
+Control does not mint execution authority. Receipts are the durable evidence
+boundary. TCC permissions, launchd, and the Aqua
 session remain user-controlled external systems; unsupported providers are not
 silently substituted into this boundary.
 
@@ -38,7 +40,7 @@ when the exact workflow, task, or app-open operation is eligible, otherwise it
 immediately executes through the existing foreground authority. There is no
 idle scheduler, focus queue, or focus-change batching. Explicit `background`
 remains fail-closed and explicit `foreground` remains forced. The requested
-policy stays in the approval digest; the effective policy is separate runtime
+policy stays in the plan digest; the effective policy is separate runtime
 evidence (`requested_focus_policy`, `focus_policy`,
 `focus_selection_reason`, and optional `background_unavailable_reason`). A
 background failure after possible dispatch is never blindly replayed in the

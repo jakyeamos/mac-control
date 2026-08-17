@@ -131,7 +131,7 @@ public final class ReleaseGate {
             shortcutCapabilityCheck(snapshot),
             agentContractCheck(snapshot),
             authorizationNoticeCheck(snapshot),
-            approvalSafetyCheck(snapshot)
+            executionAuthorizationCheck(snapshot)
         ]
         let passed = checks.allSatisfy { $0.state == .passed }
         let blockerCount = checks.reduce(into: 0) { count, check in
@@ -648,7 +648,7 @@ public final class ReleaseGate {
             "control.batch holds one bounded app lease, revalidates every step, and releases the lease on every exit path",
             "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
             "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
-            "shortcut bindings are owner-only, approval-bound by exact digest and operation, and promote to behavior_verified only after a declared postcondition passes",
+            "shortcut bindings are owner-only, exact-digest scoped, and promote to behavior_verified only after a declared postcondition passes",
             "shortcut commands dispatch at most once; indeterminate postconditions never trigger an automatic retry"
         ]
         let missingCapabilities = requiredCapabilities.filter { !capabilities.capabilities.contains($0) }
@@ -720,45 +720,21 @@ public final class ReleaseGate {
         }
     }
 
-    private func approvalSafetyCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
-        let approvalWorkflow = "approval.smoke"
+    private func executionAuthorizationCheck(_ snapshot: ReleaseGateSnapshot) -> ReleaseGateCheck {
+        let smokeWorkflow = "execution.smoke"
         let required: [(String, (OperationReceipt) -> Bool)] = [
-            ("prepared", { receipt in
+            ("plan_preview", { receipt in
                 receipt.method == "workflow.prepare"
-                    && receipt.workflowID == approvalWorkflow
+                    && receipt.workflowID == smokeWorkflow
                     && receipt.status == .prepared
-                    && receipt.approvalState == "prepared"
+                    && receipt.approvalState == "not_required"
             }),
-            ("approved_by_control_center", { receipt in
-                receipt.method == "approval.approve"
-                    && receipt.workflowID == approvalWorkflow
-                    && receipt.source == "control_center"
-                    && receipt.status == .succeeded
-                    && receipt.approvalState == "approved"
-            }),
-            ("denied_by_control_center", { receipt in
-                receipt.method == "approval.deny"
-                    && receipt.workflowID == approvalWorkflow
-                    && receipt.source == "control_center"
-                    && receipt.status == .succeeded
-                    && receipt.approvalState == "denied"
-            }),
-            ("expired", { receipt in
-                receipt.method == "approval.approve"
-                    && receipt.workflowID == approvalWorkflow
-                    && (receipt.source == "control_center" || receipt.source == "cli" || receipt.source == nil)
-                    && receipt.status == .blocked
-                    && receipt.approvalState == "required"
-                    && receipt.verificationResult == "blocked"
-                    && receipt.errorCode == MacCtlErrorCode.approvalExpired.rawValue
-            }),
-            ("fail_closed", { receipt in
+            ("direct_execution", { receipt in
                 receipt.method == "workflow.run"
-                    && receipt.workflowID == approvalWorkflow
-                    && receipt.status == .blocked
-                    && receipt.approvalState == "required"
-                    && receipt.verificationResult == "blocked"
-                    && receipt.errorCode == MacCtlErrorCode.approvalRequired.rawValue
+                    && receipt.workflowID == smokeWorkflow
+                    && receipt.status == .succeeded
+                    && receipt.approvalState == "not_required"
+                    && receipt.evidence.contains { $0.kind == "execution_probe" }
             })
         ]
         let missing = required.compactMap { label, predicate in
@@ -766,13 +742,13 @@ public final class ReleaseGate {
             return found ? nil : label
         }
         return ReleaseGateCheck(
-            id: "approval.safety",
+            id: "execution.direct",
             state: missing.isEmpty ? .passed : .blocked,
             message: missing.isEmpty
-                ? "Menu-bar approval, denial, expiry, and fail-closed evidence is fresh"
-                : "Approval safety evidence is missing",
+                ? "Agent-policy execution runs without a second Mac Control approval layer"
+                : "Direct execution evidence is missing",
             details: [
-                "workflow": .string(approvalWorkflow),
+                "workflow": .string(smokeWorkflow),
                 "missing": .array(missing.map(JSONValue.string))
             ]
         )
