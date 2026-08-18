@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "project": {
+    "name": "Mac Control focus and display sessions",
+    "identity": "The Mac Control focus and display session boundary.",
+    "audience": "Operators who need a visible, exact-targeted local workspace arrangement with proof of the resulting state.",
+    "core_loop": "Plan a display-bound session, execute under authority, observe the resulting layout, and preserve verification or degradation.",
+    "north_star": "Visible workspace changes are exact-targeted, reversible where possible, and proved at the user-visible boundary.",
+    "not_this": [
+      "Claiming visual success from source or hashes",
+      "Rearranging an unverified target",
+      "Replacing capability checks"
+    ]
+  },
+  "scope": {
+    "id": "focus-display-sessions",
+    "kind": "subsystem",
+    "parent_id": "project",
+    "purpose": "Plan and verify exact focus, window, and display-bound sessions without confusing layout intent with successful control.",
+    "boundary": "Owns focus session planning, execution, layout, verification, and control-center presentation; generic invocation authority and provider diagnostics remain outside this child.",
+    "non_goals": [
+      "Claiming visual success from source or hashes",
+      "Rearranging an unverified target",
+      "Replacing capability checks"
+    ],
+    "parent_outcomes": [
+      "display-bound-layout",
+      "guarded-local-invocation"
+    ],
+    "paths": [
+      "Sources/MacCtlCore/FocusSessionExecution.swift",
+      "Sources/MacCtlCore/FocusSessionLayout.swift",
+      "Sources/MacCtlCore/FocusSessionPlan.swift",
+      "Sources/MacCtlCore/FocusSessionVerification.swift",
+      "Sources/MacCtlCore/ControlCenter.swift"
+    ]
+  },
+  "targets": {
+    "mvp": {
+      "definition": "The scoped boundary is explicitly ratified, its parent outcome is clear, and its smallest local proof is repeatable."
+    },
+    "complete_product": {
+      "definition": "The scoped boundary remains aligned through changes, interfaces, and user-visible or consumer-facing verification."
+    }
+  },
+  "pillars": [
+    {
+      "id": "focus-display-sessions-purpose",
+      "name": "Draft scoped purpose",
+      "outcomes": [
+        {
+          "id": "focus-display-sessions-aligned-boundary",
+          "name": "The Mac Control focus and display sessions boundary advances its parent outcome without silently taking on sibling responsibilities.",
+          "targets": [
+            "mvp",
+            "complete_product"
+          ],
+          "maturity": 25,
+          "confidence": "low",
+          "layers": {
+            "intended": "Drafted from explicit repository documentation; pending owner quiz and ratification.",
+            "planned": "Local proof and sibling contracts are pending the boundary decision.",
+            "implemented": "Observed implementation paths: Sources/MacCtlCore/FocusSessionExecution.swift, Sources/MacCtlCore/FocusSessionLayout.swift, Sources/MacCtlCore/FocusSessionPlan.swift, Sources/MacCtlCore/FocusSessionVerification.swift, Sources/MacCtlCore/ControlCenter.swift.",
+            "verified": "No independently scoped end-to-end proof has been accepted yet."
+          },
+          "evidence": [
+            {
+              "ref": "README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "AGENTS.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": ".agents/context/README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "docs/MAC_CONTROL_ROADMAP.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            }
+          ],
+          "blockers": [
+            {
+              "kind": "product-decision",
+              "summary": "Owner must ratify, split, merge, or retire this draft child Compass through the realignment quiz before it becomes active truth."
+            },
+            {
+              "kind": "verification",
+              "summary": "An independently scoped local proof and its neighboring handoffs are not yet established."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_layers": {
+    "intended": [
+      {
+        "ref": "README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "AGENTS.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": ".agents/context/README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "docs/MAC_CONTROL_ROADMAP.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "planned": [],
+    "implemented": [
+      {
+        "ref": "Sources/MacCtlCore/FocusSessionExecution.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/FocusSessionLayout.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/FocusSessionPlan.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/FocusSessionVerification.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/ControlCenter.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "verified": []
+  },
+  "drift": [
+    {
+      "kind": "verification-gap",
+      "summary": "This child boundary is a draft derived from repository documentation and has not yet been ratified or independently verified.",
+      "status": "open",
+      "observed_at": "2026-08-14T23:31:00Z",
+      "evidence": [
+        {
+          "ref": "README.md",
+          "note": "Draft boundary needs explicit owner confirmation and local proof.",
+          "observed_at": "2026-08-14T23:31:00Z"
+        }
+      ]
+    }
+  ],
+  "updated_at": "2026-08-14T23:31:00Z"
+}
