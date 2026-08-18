@@ -614,7 +614,8 @@ public final class AuthorizationNoticeStore {
         observedPeer: UnixSocketPeerIdentity?,
         provenance: AuthorizationNoticeProvenance
     ) -> String {
-        let values = [
+        let observedProcessID = observedPeer?.processID.map { String($0) } ?? ""
+        let values: [String] = [
             request.kind.rawValue,
             request.project,
             request.repository ?? "",
@@ -629,13 +630,14 @@ public final class AuthorizationNoticeStore {
             request.action,
             request.summary,
             provenance.rawValue,
-            observedPeer?.processID.map(String.init) ?? "",
+            observedProcessID,
             observedPeer?.executablePath ?? "",
             observedPeer?.signingIdentity ?? "",
             observedPeer?.teamIdentifier ?? ""
-        ].joined(separator: "\u{1f}")
-        let digest = SHA256.hash(data: Data(values.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        ]
+        let joinedValues = values.joined(separator: "\u{1f}")
+        let digest = SHA256.hash(data: Data(joinedValues.utf8))
+        return digest.map { byte in String(format: "%02x", byte) }.joined()
     }
 
     private static func safeText(
