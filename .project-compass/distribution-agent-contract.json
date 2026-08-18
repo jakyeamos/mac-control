@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "project": {
+    "name": "Mac Control distribution and agent contract",
+    "identity": "The Mac Control distribution and agent-facing contract surface.",
+    "audience": "Agents and operators invoking the installed Mac Control command or skill.",
+    "core_loop": "Build and install the supported surface, verify its projection and limitations, and expose only the authorized contract.",
+    "north_star": "The installed agent surface says exactly what Mac Control can and cannot do on this machine.",
+    "not_this": [
+      "Loosening a limitation to pass a check",
+      "Treating a source skill as installed proof",
+      "Publishing unsupported provider claims"
+    ]
+  },
+  "scope": {
+    "id": "distribution-agent-contract",
+    "kind": "subsystem",
+    "parent_id": "project",
+    "purpose": "Keep the installed command, global skill projection, and release boundary aligned with the supported Mac Control agent contract.",
+    "boundary": "Owns the Mac Control skill, installation and projection checks, and release gate; native runtime behavior and capability evidence remain outside this child.",
+    "non_goals": [
+      "Loosening a limitation to pass a check",
+      "Treating a source skill as installed proof",
+      "Publishing unsupported provider claims"
+    ],
+    "parent_outcomes": [
+      "portable-agent-contract",
+      "permission-aware-result"
+    ],
+    "paths": [
+      "skills/mac-control",
+      "scripts/install_mac_control_skill.py",
+      "scripts/check_global_mac_control_projection.py",
+      "Sources/MacCtlCore/ReleaseGate.swift"
+    ]
+  },
+  "targets": {
+    "mvp": {
+      "definition": "The scoped boundary is explicitly ratified, its parent outcome is clear, and its smallest local proof is repeatable."
+    },
+    "complete_product": {
+      "definition": "The scoped boundary remains aligned through changes, interfaces, and user-visible or consumer-facing verification."
+    }
+  },
+  "pillars": [
+    {
+      "id": "distribution-agent-contract-purpose",
+      "name": "Draft scoped purpose",
+      "outcomes": [
+        {
+          "id": "distribution-agent-contract-aligned-boundary",
+          "name": "The Mac Control distribution and agent contract boundary advances its parent outcome without silently taking on sibling responsibilities.",
+          "targets": [
+            "mvp",
+            "complete_product"
+          ],
+          "maturity": 25,
+          "confidence": "low",
+          "layers": {
+            "intended": "Drafted from explicit repository documentation; pending owner quiz and ratification.",
+            "planned": "Local proof and sibling contracts are pending the boundary decision.",
+            "implemented": "Observed implementation paths: skills/mac-control, scripts/install_mac_control_skill.py, scripts/check_global_mac_control_projection.py, Sources/MacCtlCore/ReleaseGate.swift.",
+            "verified": "No independently scoped end-to-end proof has been accepted yet."
+          },
+          "evidence": [
+            {
+              "ref": "README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "AGENTS.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": ".agents/context/README.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            },
+            {
+              "ref": "docs/MAC_CONTROL_ROADMAP.md",
+              "note": "Repository documentation used to draft this child boundary; not treated as user intent until quiz review.",
+              "observed_at": "2026-08-14T23:31:00Z"
+            }
+          ],
+          "blockers": [
+            {
+              "kind": "product-decision",
+              "summary": "Owner must ratify, split, merge, or retire this draft child Compass through the realignment quiz before it becomes active truth."
+            },
+            {
+              "kind": "verification",
+              "summary": "An independently scoped local proof and its neighboring handoffs are not yet established."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_layers": {
+    "intended": [
+      {
+        "ref": "README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "AGENTS.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": ".agents/context/README.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "docs/MAC_CONTROL_ROADMAP.md",
+        "note": "Explicit repository documentation is the current basis for this draft; owner quiz remains open.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "planned": [],
+    "implemented": [
+      {
+        "ref": "skills/mac-control",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "scripts/install_mac_control_skill.py",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "scripts/check_global_mac_control_projection.py",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      },
+      {
+        "ref": "Sources/MacCtlCore/ReleaseGate.swift",
+        "note": "Observed implementation or contract path used as evidence only.",
+        "observed_at": "2026-08-14T23:31:00Z"
+      }
+    ],
+    "verified": []
+  },
+  "drift": [
+    {
+      "kind": "verification-gap",
+      "summary": "This child boundary is a draft derived from repository documentation and has not yet been ratified or independently verified.",
+      "status": "open",
+      "observed_at": "2026-08-14T23:31:00Z",
+      "evidence": [
+        {
+          "ref": "README.md",
+          "note": "Draft boundary needs explicit owner confirmation and local proof.",
+          "observed_at": "2026-08-14T23:31:00Z"
+        }
+      ]
+    }
+  ],
+  "updated_at": "2026-08-14T23:31:00Z"
+}
