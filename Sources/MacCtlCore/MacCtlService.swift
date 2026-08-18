@@ -7147,18 +7147,24 @@ public final class MacCtlService {
         response: ResponseEnvelope,
         startedAt: Date
     ) {
-        let workflowID = request.params["workflow"]?.stringValue
-            ?? response.result["workflow_id"]?.stringValue
-            ?? response.result["workflow"]?.stringValue
-            ?? response.result["approval"]?.objectValue?["workflowID"]?.stringValue
-            ?? response.result["approval"]?.objectValue?["workflow_id"]?.stringValue
-            ?? response.error?.details["workflow_id"]?.stringValue
+        let workflowIDCandidates: [String?] = [
+            request.params["workflow"]?.stringValue,
+            response.result["workflow_id"]?.stringValue,
+            response.result["workflow"]?.stringValue,
+            response.result["approval"]?.objectValue?["workflowID"]?.stringValue,
+            response.result["approval"]?.objectValue?["workflow_id"]?.stringValue,
+            response.error?.details["workflow_id"]?.stringValue
+        ]
+        let workflowID = Self.firstPresent(workflowIDCandidates)
         let workflow = workflowID.flatMap { workflowRegistry.workflow(id: $0) }
         let taskPlan = decodeTaskPlan(request.params["plan"])
-        let taskID = request.params["task_id"]?.stringValue
-            ?? response.result["task_id"]?.stringValue
-            ?? response.result["taskID"]?.stringValue
-            ?? taskPlan?.id
+        let taskIDCandidates: [String?] = [
+            request.params["task_id"]?.stringValue,
+            response.result["task_id"]?.stringValue,
+            response.result["taskID"]?.stringValue,
+            taskPlan?.id
+        ]
+        let taskID = Self.firstPresent(taskIDCandidates)
         let checkpoint: TaskCheckpoint?
         if let taskID {
             do {
@@ -7169,16 +7175,25 @@ public final class MacCtlService {
         } else {
             checkpoint = nil
         }
-        let taskLifecycleState = response.result["lifecycle_state"]?.stringValue
-            ?? response.result["state"]?.stringValue
-            ?? checkpoint?.state.rawValue
-        let currentTaskStepID = response.result["current_step_id"]?.stringValue
-            ?? response.result["currentStepID"]?.stringValue
-            ?? checkpoint?.currentStepID
-        let lastTaskStepID = response.result["last_step_id"]?.stringValue
-            ?? response.result["lastStepID"]?.stringValue
-            ?? checkpoint?.lastStepID
-        let terminalTaskState = [
+        let taskLifecycleStateCandidates: [String?] = [
+            response.result["lifecycle_state"]?.stringValue,
+            response.result["state"]?.stringValue,
+            checkpoint?.state.rawValue
+        ]
+        let taskLifecycleState = Self.firstPresent(taskLifecycleStateCandidates)
+        let currentTaskStepIDCandidates: [String?] = [
+            response.result["current_step_id"]?.stringValue,
+            response.result["currentStepID"]?.stringValue,
+            checkpoint?.currentStepID
+        ]
+        let currentTaskStepID = Self.firstPresent(currentTaskStepIDCandidates)
+        let lastTaskStepIDCandidates: [String?] = [
+            response.result["last_step_id"]?.stringValue,
+            response.result["lastStepID"]?.stringValue,
+            checkpoint?.lastStepID
+        ]
+        let lastTaskStepID = Self.firstPresent(lastTaskStepIDCandidates)
+        let terminalTaskState: [String] = [
             TaskLifecycleState.completed.rawValue,
             TaskLifecycleState.cancelled.rawValue,
             TaskLifecycleState.expired.rawValue
@@ -7186,38 +7201,36 @@ public final class MacCtlService {
         let taskStepID = terminalTaskState.contains(taskLifecycleState ?? "")
             ? (lastTaskStepID ?? currentTaskStepID)
             : (currentTaskStepID ?? lastTaskStepID)
-        let taskStep = taskPlan?.steps.first { $0.id == taskStepID }
-            ?? taskPlan?.steps.first
+        let taskStepForID = taskPlan?.steps.first { $0.id == taskStepID }
+        let taskStep = taskStepForID ?? taskPlan?.steps.first
         let taskRisk = taskStep?.risk
         let taskTargetSurface = taskPlan?.surface
         let taskFocusPolicy = taskPlan?.focusPolicy
-        let requestedFocusPolicy = response.result["requested_focus_policy"]?.stringValue
-            .flatMap(FocusPolicy.init(rawValue:))
-            ?? request.params["focus_policy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? taskFocusPolicy
-            ?? workflow?.focusPolicy
-        let focusPolicy = response.result["focus_policy"]?.stringValue
-            .flatMap(FocusPolicy.init(rawValue:))
-            ?? response.result["focusPolicy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? response.result["approval"]?.objectValue?["focusPolicy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? response.result["approval"]?.objectValue?["focus_policy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? response.error?.details["focus_policy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? request.params["focus_policy"]?.stringValue
-                .flatMap(FocusPolicy.init(rawValue:))
-            ?? workflow?.focusPolicy
-            ?? taskFocusPolicy
+        let requestedFocusPolicyCandidates: [FocusPolicy?] = [
+            Self.receiptFocusPolicy(from: response.result["requested_focus_policy"]),
+            Self.receiptFocusPolicy(from: request.params["focus_policy"]),
+            taskFocusPolicy,
+            workflow?.focusPolicy
+        ]
+        let requestedFocusPolicy = Self.firstPresent(requestedFocusPolicyCandidates)
+        let focusPolicyCandidates: [FocusPolicy?] = [
+            Self.receiptFocusPolicy(from: response.result["focus_policy"]),
+            Self.receiptFocusPolicy(from: response.result["focusPolicy"]),
+            Self.receiptFocusPolicy(from: response.result["approval"]?.objectValue?["focusPolicy"]),
+            Self.receiptFocusPolicy(from: response.result["approval"]?.objectValue?["focus_policy"]),
+            Self.receiptFocusPolicy(from: response.error?.details["focus_policy"]),
+            Self.receiptFocusPolicy(from: request.params["focus_policy"]),
+            workflow?.focusPolicy,
+            taskFocusPolicy
+        ]
+        let focusPolicy = Self.firstPresent(focusPolicyCandidates)
         let permissions = permissionContext == "daemon"
             ? PermissionDiagnostics.report()
             : PermissionDiagnostics.unknownReport()
         let approvalState: String
         if let workflow {
-            let risk = workflowRegistry.validate(workflow).risk
-            if risk != .sensitive {
+            let risk: RiskLevel = workflowRegistry.validate(workflow).risk
+            if risk != RiskLevel.sensitive {
                 approvalState = "not_required"
             } else {
                 switch request.method {
@@ -7246,8 +7259,11 @@ public final class MacCtlService {
         } else {
             approvalState = "not_required"
         }
-        let controlVerification = response.result["verification"]?.objectValue?["state"]?.stringValue
-            ?? response.result["verification"]?.stringValue
+        let controlVerificationCandidates: [String?] = [
+            response.result["verification"]?.objectValue?["state"]?.stringValue,
+            response.result["verification"]?.stringValue
+        ]
+        let controlVerification = Self.firstPresent(controlVerificationCandidates)
         let verificationResult: String
         if let controlVerification {
             verificationResult = controlVerification
@@ -7262,8 +7278,37 @@ public final class MacCtlService {
         } else {
             verificationResult = "not_required"
         }
-        let receiptSource = request.params["source"]?.stringValue
-            ?? (["approval.approve", "approval.deny"].contains(request.method) ? "cli" : nil)
+        let receiptSourceCandidates: [String?] = [
+            request.params["source"]?.stringValue,
+            ["approval.approve", "approval.deny"].contains(request.method) ? "cli" : nil
+        ]
+        let receiptSource = Self.firstPresent(receiptSourceCandidates)
+        let actionPlanDigest: String?
+        if request.method.hasPrefix("action.") {
+            let actionPlanDigestCandidates: [String?] = [
+                response.result["resolution_id"]?.stringValue,
+                request.params["resolution_id"]?.stringValue
+            ]
+            actionPlanDigest = Self.firstPresent(actionPlanDigestCandidates)
+        } else {
+            actionPlanDigest = nil
+        }
+        let planDigestCandidates: [String?] = [
+            response.result["plan_digest"]?.stringValue,
+            response.result["planDigest"]?.stringValue,
+            actionPlanDigest,
+            checkpoint?.planDigest
+        ]
+        let planDigest = Self.firstPresent(planDigestCandidates)
+        let routeCandidates: [String?] = [
+            response.result["last_route"]?.stringValue,
+            response.result["lastRoute"]?.stringValue,
+            response.result["route"]?.stringValue,
+            response.outcome?.route,
+            checkpoint?.route
+        ]
+        let route = Self.firstPresent(routeCandidates)
+        let workflowRisk: RiskLevel? = workflow.map { workflowRegistry.validate($0).risk }
         let receipt = OperationReceipt(
             operationID: response.operationID,
             requestID: response.requestID,
@@ -7275,23 +7320,14 @@ public final class MacCtlService {
             focusPolicy: focusPolicy,
             focusSelectionReason: response.result["focus_selection_reason"]?.stringValue,
             backgroundUnavailableReason: response.result["background_unavailable_reason"]?.stringValue,
-            risk: workflow.map { workflowRegistry.validate($0).risk } ?? taskRisk,
+            risk: workflowRisk ?? taskRisk,
             approvalState: approvalState,
             executionResult: response.status.rawValue,
             verificationResult: verificationResult,
-            planDigest: response.result["plan_digest"]?.stringValue
-                ?? response.result["planDigest"]?.stringValue
-                ?? (request.method.hasPrefix("action.")
-                    ? response.result["resolution_id"]?.stringValue ?? request.params["resolution_id"]?.stringValue
-                    : nil)
-                ?? checkpoint?.planDigest,
+            planDigest: planDigest,
             taskID: taskID,
             stepID: taskStepID,
-            route: response.result["last_route"]?.stringValue
-                ?? response.result["lastRoute"]?.stringValue
-                ?? response.result["route"]?.stringValue
-                ?? response.outcome?.route
-                ?? checkpoint?.route,
+            route: route,
             adapterID: taskStep?.action.parameters["adapter_id"]?.stringValue,
             recoveryClassification: taskStep?.recovery.mode,
             preconditionResult: checkpoint?.verificationResult == "precondition_failed"
@@ -7411,6 +7447,20 @@ public final class MacCtlService {
     private func decodeTaskPlan(_ value: JSONValue?) -> TaskPlan? {
         guard let value, let data = try? JSONCodec.encode(value) else { return nil }
         return try? JSONCodec.decode(TaskPlan.self, from: data)
+    }
+
+    private static func firstPresent<T>(_ candidates: [T?]) -> T? {
+        for candidate in candidates {
+            if let candidate {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func receiptFocusPolicy(from value: JSONValue?) -> FocusPolicy? {
+        guard let rawValue = value?.stringValue else { return nil }
+        return FocusPolicy(rawValue: rawValue)
     }
 
     private func receiptEvidence(

@@ -2,7 +2,7 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "mac-control"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-16",
+  "last_reviewed": "2026-08-18",
   "surfaces": [
     {
       "id": "matrix-maintenance",
@@ -34,5 +34,15 @@
     "add": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift"]},
     "change": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/MacCtlCoreTests.swift"]},
     "remove": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ControlCenterTests.swift"]}
-  }
+  },
+  "change_records": [
+    {
+      "type": "reviewed_no_impact",
+      "reason": "Swift compiler-compatibility refactor only: existing fingerprint, receipt precedence, focus-policy, approval-state, plan, and route behavior remain unchanged; no CLI, protocol, workflow, data, integration, security, or installed-surface contract changed.",
+      "evidence": [
+        "Sources/MacCtlCore/AuthorizationNotice.swift and Sources/MacCtlCore/MacCtlService.swift split inferred expressions into explicitly typed intermediate values.",
+        "Existing AuthorizationNoticeTests and MacCtlCore receipt/focus-policy tests cover the preserved behavior."
+      ]
+    }
+  ]
 }
