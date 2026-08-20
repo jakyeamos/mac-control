@@ -119,6 +119,15 @@ class MacControlSkillTests(unittest.TestCase):
             text,
         )
 
+    def test_live_app_inventory_does_not_fallback_to_sandbox_blind_state(self) -> None:
+        cli = (ROOT / "Sources" / "MacCtlCLI" / "main.swift").read_text(encoding="utf-8")
+        self.assertIn(
+            'return render(sendOrLocal(method: "app.list", params: [:], localFallback: false))',
+            cli,
+        )
+        self.assertIn("sandbox-blind local catalog", SKILL.read_text(encoding="utf-8"))
+        self.assertIn("daemon-authoritative", (ROOT / "README.md").read_text(encoding="utf-8"))
+
     def test_skill_is_loaded_only_once_across_projections(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertIn("Load this packet once", text)

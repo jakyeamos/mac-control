@@ -2556,6 +2556,24 @@ public final class MacCtlService {
             "action_dispatched": .bool(false),
             "observation_persisted": .bool(observationPersisted)
         ]
+        if let execution {
+            metadata["audit_attempts"] = .number(Double(execution.attempts))
+            metadata["adaptive_retry"] = .bool(execution.adaptiveRetry)
+            metadata["initial_max_nodes"] = .number(Double(execution.initialMaxNodes))
+            metadata["initial_max_depth"] = .number(Double(execution.initialMaxDepth))
+            metadata["effective_max_nodes"] = .number(Double(execution.effectiveMaxNodes))
+            metadata["effective_max_depth"] = .number(Double(execution.effectiveMaxDepth))
+            metadata["adaptive_ceiling_reached"] = .bool(execution.exhausted)
+            metadata["traversal_mode"] = .string(execution.traversalMode)
+            metadata["windowed_attempted"] = .bool(execution.windowedAttempted)
+            metadata["coverage_complete"] = .bool(execution.coverageComplete)
+            if let coverage = execution.coverage {
+                metadata["window_count"] = .number(Double(coverage.windowCount))
+                metadata["page_count"] = .number(Double(coverage.pageCount))
+                metadata["omitted_window_count"] = .number(Double(coverage.omittedWindowCount))
+                metadata["omitted_page_count"] = .number(Double(coverage.omittedPageCount))
+            }
+        }
         if let treeSignature = profile?.identity.treeSignature {
             metadata["tree_signature"] = .string(treeSignature)
         }

@@ -2,7 +2,7 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "mac-control"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-18",
+  "last_reviewed": "2026-08-20",
   "surfaces": [
     {
       "id": "matrix-maintenance",
@@ -42,6 +42,35 @@
       "evidence": [
         "Sources/MacCtlCore/AuthorizationNotice.swift and Sources/MacCtlCore/MacCtlService.swift split inferred expressions into explicitly typed intermediate values.",
         "Existing AuthorizationNoticeTests and MacCtlCore receipt/focus-policy tests cover the preserved behavior."
+      ]
+    },
+    {
+      "type": "change",
+      "reason": "Live app process-state reporting is now daemon-authoritative, and task-specific verification evidence records the bounded adaptive and windowed traversal used before structural matching. A socket-unavailable CLI returns a typed blocker instead of synthesizing isRunning:false; ambiguous or incomplete AX surfaces still retain the Computer Use handoff.",
+      "surfaces": [
+        "Sources/MacCtlCLI/main.swift",
+        "Sources/MacCtlCore/MacCtlService.swift",
+        "README.md",
+        ".agents/context/architecture.md",
+        ".agents/context/commands.md",
+        "skills/mac-control/SKILL.md",
+        "skills/mac-control/references/routing.md",
+        "Tests/SkillTests/test_mac_control_skill.py",
+        "docs/evidence/phase1-task-capability-verification-followup-2026-08-20.json",
+        "~/.agents/skills/mac-control/SKILL.md",
+        "~/.codex/skills/mac-control/"
+      ],
+      "validation": [
+        "swift build",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "macctl app list --json",
+        "macctl app instances --app ChatGPT --json",
+        "macctl app instances --app Spotify --json",
+        "control capability-verify read-only probes for ChatGPT and Spotify"
       ]
     }
   ]

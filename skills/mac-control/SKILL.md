@@ -307,6 +307,12 @@ keeps that identity conjunctive and independently probes the exact PID's
 `AXApplication` root. A process, healthy daemon, and granted Accessibility
 permission do not establish AX addressability.
 
+Use `app list` only through the daemon-backed route when live process state is
+needed. If the owner-only socket is unavailable, treat the result as blocked or
+unknown; never reinterpret a sandbox-blind local catalog's `isRunning:false` as
+proof that an app is stopped. Prefer `app instances` for the exact PID and
+launch-bound instance evidence needed before an AX read.
+
 If binding reports
 `development_binary_not_registered_as_accessibility_application`, classify Mac
 Control as `blocked_unsupported` for that unregistered target while preserving

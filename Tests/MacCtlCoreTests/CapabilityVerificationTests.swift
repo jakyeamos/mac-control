@@ -172,6 +172,80 @@ final class CapabilityVerificationTests: XCTestCase {
         XCTAssertEqual(record.ambiguousEvidenceCount, 1)
     }
 
+    func testServiceUsesBoundedWindowedTraversalBeforeMatching() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macctl-capability-verification-windowed-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let app = testApplication()
+        let coverage = AccessibilityTreeCoverage(
+            mode: "windowed_pages",
+            windowCount: 1,
+            pageCount: 1,
+            pages: [AccessibilityTreeCoveragePage(
+                identityDigest: "window-digest",
+                nodeCount: 2,
+                truncated: false
+            )],
+            complete: true
+        )
+        let inspector = RecordingVerificationTreeInspector(
+            report: makeTree(application: app, actions: ["AXPress"], truncated: true),
+            windowedReport: makeTree(
+                application: app,
+                actions: ["AXPress"],
+                coverage: coverage
+            )
+        )
+        let profileStore = CapabilityProfileStore(
+            directory: root.appendingPathComponent("profiles", isDirectory: true)
+        )
+        let service = MacCtlService(
+            permissionContext: "test",
+            resolveApplication: { _ in app },
+            resolveApplicationTarget: { selector in
+                ApplicationInstanceInfo(
+                    application: app,
+                    processID: selector.processID ?? app.processID ?? 404
+                )
+            },
+            capabilityProfileStore: profileStore,
+            accessibilityTreeInspector: inspector
+        )
+
+        let response = service.handle(RequestEnvelope(
+            method: "control.capability_verify",
+            params: [
+                "app": .string(app.name),
+                "task": .string("chatgpt-focus-control"),
+                "target_fingerprint": .string("chatgpt-surface-v1"),
+                "route": .string("accessibility"),
+                "selector": .object([
+                    "role": .string("AXButton"),
+                    "identifier": .string("chatgpt-control")
+                ]),
+                "postcondition_kind": .string("selected_pane_changed"),
+                "postcondition_digest": .string(String(repeating: "f", count: 64))
+            ]
+        ))
+
+        XCTAssertEqual(response.status, .succeeded)
+        let report = try JSONCodec.decode(
+            TaskCapabilityVerificationReport.self,
+            from: JSONCodec.encode(response.result)
+        )
+        XCTAssertEqual(report.state, .readyForMeasurement)
+        XCTAssertFalse(report.treeTruncated)
+        XCTAssertTrue(report.coverageComplete)
+        XCTAssertEqual(inspector.treeCallCount, 3)
+        XCTAssertEqual(inspector.windowedTreeCallCount, 1)
+        let evidence = try XCTUnwrap(response.evidence.first)
+        XCTAssertEqual(evidence.metadata["traversal_mode"]?.stringValue, "windowed_pages")
+        XCTAssertEqual(evidence.metadata["windowed_attempted"]?.boolValue, true)
+        XCTAssertEqual(evidence.metadata["coverage_complete"]?.boolValue, true)
+        XCTAssertEqual(evidence.metadata["audit_attempts"]?.intValue, 3)
+    }
+
     private func testApplication() -> AppInfo {
         AppInfo(
             name: "ChatGPT",
@@ -188,7 +262,8 @@ final class CapabilityVerificationTests: XCTestCase {
         actions: [String],
         duplicateTarget: Bool = false,
         truncated: Bool = false,
-        role: String = "AXButton"
+        role: String = "AXButton",
+        coverage: AccessibilityTreeCoverage? = nil
     ) -> AccessibilityTreeReport {
         let state = AccessibilityTreeNodeState(
             enabled: true,
@@ -249,17 +324,21 @@ final class CapabilityVerificationTests: XCTestCase {
             truncated: truncated,
             nodes: nodes,
             identifierMatchCounts: ["chatgpt-control": duplicateTarget ? 2 : 1],
-            nameMatchCounts: ["Continue": duplicateTarget ? 2 : 1]
+            nameMatchCounts: ["Continue": duplicateTarget ? 2 : 1],
+            coverage: coverage
         )
     }
 }
 
-private final class RecordingVerificationTreeInspector: AccessibilityTreeInspecting {
+private final class RecordingVerificationTreeInspector: AccessibilityTreeInspecting, WindowedAccessibilityTreeInspecting {
     let report: AccessibilityTreeReport
+    private let windowedReport: AccessibilityTreeReport?
     private(set) var treeCallCount = 0
+    private(set) var windowedTreeCallCount = 0
 
-    init(report: AccessibilityTreeReport) {
+    init(report: AccessibilityTreeReport, windowedReport: AccessibilityTreeReport? = nil) {
         self.report = report
+        self.windowedReport = windowedReport
     }
 
     func tree(
@@ -278,5 +357,17 @@ private final class RecordingVerificationTreeInspector: AccessibilityTreeInspect
         manifest: AccessibilityAuditManifest
     ) throws -> AccessibilityAuditReport {
         AccessibilityAuditEngine.audit(tree: report, manifest: manifest)
+    }
+
+    func windowedTree(
+        pid: pid_t,
+        application: AppInfo,
+        maxNodesPerPage: Int,
+        maxDepth: Int,
+        maxWindows: Int,
+        maxPages: Int
+    ) throws -> AccessibilityTreeReport {
+        windowedTreeCallCount += 1
+        return windowedReport ?? report
     }
 }

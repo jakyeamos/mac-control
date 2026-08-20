@@ -30,6 +30,10 @@ daemon health, and Accessibility permission are not substitutes for that probe.
 An unbundled process whose AX root is unavailable is typed as
 `development_binary_not_registered_as_accessibility_application` with a
 registered `.app` development fallback; installed app support is unchanged.
+`app.list` is daemon-authoritative for its live `isRunning` and `processID`
+fields. The CLI does not fall back to a local catalog when the owner-only
+socket is unavailable, because a sandbox-blind process inventory must remain
+unknown/blocked rather than being reported as not running.
 `window.list` returns title-free opaque
 `window_ref` values within one resolved PID. Every supplied app, PID, instance,
 and window field is conjunctive. Ambiguity, disappearance, PID reuse, or stale

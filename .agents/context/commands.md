@@ -63,6 +63,12 @@ manifests with the active LaunchAgent PID and live executable, reporting
 `install_stale`, `restart_required`, `not_running`, or `unverifiable` instead
 of treating a healthy daemon as proof that it is current.
 
+`macctl app list --json` is daemon-authoritative for live process fields. It
+returns a typed `daemon_unavailable` blocker when the owner-only socket cannot
+be reached; it never uses a local `NSWorkspace` fallback that could turn an
+unobservable process into `isRunning:false`. Use `app instances --app <app>` for
+exact running-process and launch-instance evidence.
+
 For a sensitive-request explanation, use the daemon-only authorization surface:
 `control authorization prepare`, `bind`, `list`, and `resolve`. Prepare accepts only
 bounded project/task/thread/helper/target/action/summary metadata and an allowlisted

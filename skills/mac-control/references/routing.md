@@ -45,6 +45,7 @@ documentation, and test change.
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
 | A fresh native task surface needs bounded verification before routing | `control capability-verify` | Observe one bounded structural AX surface; require an exact postcondition digest before readiness and preserve Computer Use for candidate, ambiguous, or unsupported results. |
+| Live app process state is needed for targeting | Daemon-backed `app list` or exact `app instances` | A socket-unavailable or sandbox-blind catalog is unknown/blocked, never evidence that the app is stopped. |
 | Known limitation preflight is needed before considering Mac Control | `control limitations` | Read the local versioned call/no-call ledger without daemon or Accessibility probing. |
 | A new boundary was observed and should be retained for review | `control limitations propose --stdin` | Append one owner-only `unproven` candidate without mutating the canonical ledger. |
 | Review candidates already recorded by agents | `control limitations proposals` | Read the append-only candidate store; candidates have no routing or execution authority. |

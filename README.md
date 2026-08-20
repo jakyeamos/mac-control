@@ -25,10 +25,14 @@ swift run macctl capabilities --json
 swift run macctl app list --json
 ```
 
-`capabilities` and the read-only workflow/app listings can report locally when
-the daemon is not running. `doctor` and `status` are daemon-authoritative:
-when the socket is unavailable they return a blocked response with an explicit
-unknown permission/runtime context.
+`capabilities` and the read-only workflow listing can report locally when the
+daemon is not running. `app list` is daemon-authoritative because `isRunning`
+and `processID` are live process observations; when the socket is unavailable it
+returns a blocked `daemon_unavailable` response instead of synthesizing
+`isRunning:false` from a sandbox-blind local catalog. Use `app instances` for
+exact running-process and launch-instance evidence. `doctor` and `status` are
+also daemon-authoritative: when the socket is unavailable they return a blocked
+response with an explicit unknown permission/runtime context.
 
 The installed command path is:
 
@@ -856,8 +860,10 @@ unique actionable match with that postcondition is `ready_for_measurement`;
 missing, incomplete, ambiguous, presentation-only, unsupported, and not-running
 surfaces remain candidates with a redacted Computer Use handoff. The handoff
 requires fresh state, unique relocation, provider-native action, and readback,
-with native replay disabled. Rendered web content remains a browser-connector
-task.
+with native replay disabled. When the initial recursive surface is truncated,
+the verifier records bounded adaptive retries and window-aware/page traversal
+metadata before matching; incomplete coverage still remains a candidate.
+Rendered web content remains a browser-connector task.
 A fresh locator's `identityDigest` can be passed back through
 `control perform --locator-digest <digest>` (optionally combined with role,
 subrole, identifier, window scope, and the locator's redacted

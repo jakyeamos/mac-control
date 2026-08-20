@@ -96,7 +96,10 @@ struct CLI {
         }
         switch subcommand {
         case "list":
-            return render(sendOrLocal(method: "app.list", params: [:], localFallback: true))
+            // isRunning and processID are live observations. A local
+            // NSWorkspace fallback can be blind inside a sandbox and would
+            // turn an unknown state into a false "not running" result.
+            return render(sendOrLocal(method: "app.list", params: [:], localFallback: false))
         case "instances":
             return render(sendOrLocal(
                 method: "app.instances",
