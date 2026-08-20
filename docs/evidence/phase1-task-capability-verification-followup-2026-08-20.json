@@ -1,0 +1,241 @@
+{
+  "schema": "mac-control-phase1-task-capability-verification-followup/v1",
+  "recorded_at": "2026-08-20T17:21:05Z",
+  "phase": "phase_1",
+  "repository": {
+    "branch": "dev",
+    "implementation_commit": "2a0e45348da9c6c13053996755619818d90a1363",
+    "source_root": "/Users/jakyeamos/projects/mac-control"
+  },
+  "current_app_identities": [
+    {
+      "name": "ChatGPT",
+      "bundle_id": "com.openai.codex",
+      "bundle_version": "26.803.61601",
+      "path": "/Applications/ChatGPT.app",
+      "is_running": true,
+      "exact_instance_observation": "one_live_daemon_instance",
+      "window_observation": {
+        "window_count": 1,
+        "visible": true,
+        "focused": true,
+        "unique": true
+      },
+      "accessibility_observation": {
+        "bounded": true,
+        "node_count": 9,
+        "initial_tree_truncated": true,
+        "redacted": true
+      }
+    },
+    {
+      "name": "Spotify",
+      "bundle_id": "com.spotify.client",
+      "bundle_version": "1.2.96.518",
+      "path": "/Applications/Spotify.app",
+      "is_running": true,
+      "exact_instance_observation": "one_live_daemon_instance",
+      "window_observation": {
+        "window_count": 1,
+        "visible": true,
+        "focused": true,
+        "unique": true
+      },
+      "accessibility_observation": {
+        "bounded": true,
+        "node_count": 10,
+        "initial_tree_truncated": true,
+        "redacted": true
+      }
+    }
+  ],
+  "source_verification": {
+    "capability": "control.capability_verify",
+    "swift_build": "passed",
+    "full_swift_tests": {
+      "status": "passed",
+      "test_count": 335
+    },
+    "focused_capability_verification_tests": {
+      "status": "passed",
+      "test_count": 4
+    },
+    "skill_tests": {
+      "status": "passed",
+      "test_count": 7
+    },
+    "environment_contract": "passed",
+    "projection_checks": "passed",
+    "read_only": true,
+    "native_actions_dispatched": 0,
+    "computer_use_actions_dispatched": 0,
+    "route_promotions_claimed": 0,
+    "states_covered": [
+      "ready_for_measurement",
+      "needs_postcondition",
+      "candidate",
+      "ambiguous",
+      "unsupported"
+    ],
+    "postcondition_gate": "A unique actionable native target is not ready until the caller supplies an exact postcondition kind and 64-character SHA-256 digest."
+  },
+  "inventory_parity": {
+    "host_daemon_app_list": {
+      "ChatGPT": {
+        "is_running": true,
+        "process_observed": true,
+        "bundle_version": "26.803.61601"
+      },
+      "Spotify": {
+        "is_running": true,
+        "process_observed": true,
+        "bundle_version": "1.2.96.518"
+      }
+    },
+    "sandboxed_app_list": {
+      "status": "blocked",
+      "reason": "daemon_unavailable",
+      "false_not_running_synthesized": false
+    },
+    "local_catalog_fallback": "disabled_for_live_process_fields"
+  },
+  "installed_runtime": {
+    "macctl_path": "/Users/jakyeamos/.local/bin/macctl",
+    "macctl_version": "0.1.0",
+    "source_revision": "2a0e45348da9c6c13053996755619818d90a1363",
+    "capability_verify_command": "available_and_exercised",
+    "daemon": {
+      "launchd_loaded": true,
+      "healthy": true,
+      "identity_matches": true,
+      "runtime_parity": "passed",
+      "socket_owner_only": true
+    },
+    "skill_projection": "source_and_canonical_projection_match",
+    "projection_check": "passed"
+  },
+  "live_runtime": {
+    "apps_launched": 0,
+    "native_actions_dispatched": 0,
+    "computer_use_actions_dispatched": 0,
+    "route_promotions_claimed": 0,
+    "capability_probes": [
+      {
+        "app": "ChatGPT",
+        "route": "accessibility",
+        "task": "focus-control",
+        "target_fingerprint_supplied": true,
+        "structural_selector": {
+          "role": "AXWebArea",
+          "selector_fields": ["role"],
+          "precision": "unique_but_non_activatable"
+        },
+        "postcondition": {
+          "kind": "selected_pane_changed",
+          "digest_supplied": true,
+          "verification": "not_attempted_no_action"
+        },
+        "status": "blocked",
+        "state": "unsupported",
+        "reason": "accessibility_activation_action_unavailable",
+        "target_match_count": 1,
+        "tree_node_count": 602,
+        "tree_truncated": false,
+        "coverage_complete": true,
+        "traversal_mode": "windowed_pages",
+        "audit_attempts": 3,
+        "initial_bounds": {
+          "max_nodes": 500,
+          "max_depth": 8
+        },
+        "effective_bounds": {
+          "max_nodes": 2000,
+          "max_depth": 20,
+          "window_count": 1,
+          "page_count": 86
+        },
+        "action_dispatched": false,
+        "recommended_provider": "computer_use",
+        "fresh_state_required": true,
+        "native_action_replay_allowed": false
+      },
+      {
+        "app": "Spotify",
+        "route": "accessibility",
+        "task": "playback-control",
+        "target_fingerprint_supplied": true,
+        "structural_selector": {
+          "role": "AXButton",
+          "selector_fields": ["role"],
+          "precision": "ambiguous_without_stable_identifier"
+        },
+        "postcondition": {
+          "kind": "playback_state_changed",
+          "digest_supplied": true,
+          "verification": "not_attempted_no_action"
+        },
+        "status": "blocked",
+        "state": "ambiguous",
+        "reason": "target_ambiguous",
+        "target_match_count": 528,
+        "tree_node_count": 4602,
+        "tree_truncated": false,
+        "coverage_complete": true,
+        "traversal_mode": "windowed_pages",
+        "audit_attempts": 3,
+        "initial_bounds": {
+          "max_nodes": 500,
+          "max_depth": 8
+        },
+        "effective_bounds": {
+          "max_nodes": 2000,
+          "max_depth": 20,
+          "window_count": 1,
+          "page_count": 157
+        },
+        "action_dispatched": false,
+        "recommended_provider": "computer_use",
+        "fresh_state_required": true,
+        "native_action_replay_allowed": false
+      }
+    ]
+  },
+  "attentiond": {
+    "host_daemon": "running",
+    "permission": "authorized",
+    "actions_available": true,
+    "alerts_available": true,
+    "host_context_notice": "accepted",
+    "mac_control_authority_unchanged": true,
+    "socket_ownership_change": "none"
+  },
+  "handoff_boundary": {
+    "ambiguous_or_unsupported_controls": "preserve_existing_computer_use_handoff",
+    "fresh_state_required": true,
+    "native_action_replay_allowed": false,
+    "required_provider_steps": [
+      "get_app_state",
+      "locate_one_unique_current_target",
+      "perform_provider_native_action",
+      "read_back_declared_postcondition"
+    ],
+    "rendered_web_content": "browser_provider"
+  },
+  "release_gate_context": {
+    "installed_runtime_parity": "passed",
+    "release_check": "blocked",
+    "unrelated_missing_dimensions": [
+      "live.mac-workflows",
+      "live.keyboard-control",
+      "task.control",
+      "live.shortcut-control",
+      "approval.safety"
+    ]
+  },
+  "limitations": [
+    "The initial bounded AX views are generic and truncated; deeper bounded adaptive retries reached complete windowed coverage but did not expose a unique actionable control for either task.",
+    "ChatGPT exposed one generic AXWebArea without an activation action; Spotify exposed many AXButton matches without a stable identifier.",
+    "No native action was dispatched and no native route was promoted; Computer Use remains the required handoff for these surfaces.",
+    "The broader release gate still lacks unrelated GUI, keyboard, task, shortcut, and approval proofs; those blockers are not substituted with this Phase 1 evidence."
+  ]
+}
