@@ -820,6 +820,10 @@ within one foreground app:
   --target-surface web-content --json
 ~/.local/bin/macctl control capability-audit --app "Chrome" \
   --max-nodes 500 --max-depth 8 --json
+~/.local/bin/macctl control capability-verify --app "ChatGPT" \
+  --task focus-control --target-fingerprint chatgpt-current-v1 \
+  --route accessibility --role AXButton --identifier <stable-id> \
+  --postcondition-kind <kind> --postcondition-digest <sha256> --json
 ~/.local/bin/macctl control capability-audit-batch --all-applicable --json
 printf '%s\n' '[{"action":"next-control"},{"action":"next-control"}]' | \
   ~/.local/bin/macctl control batch --app "Chrome" --actions-stdin --confirm --json
@@ -844,6 +848,16 @@ audit before every action. After recursive retries reach the fixed ceiling, a
 separate bounded window-aware/page traversal may inspect up to 8 windows, 256
 top-level pages, and 16,000 total nodes. Only complete coverage promotes the
 profile; omitted or truncated pages keep it stale and are reported as evidence.
+A task-specific verifier closes the observation-to-readiness gap for one native
+surface. `control capability-verify` uses only a bounded fresh AX tree and
+structural selectors, never launches or acts, and returns `needs_postcondition`
+until the caller supplies an exact postcondition kind and SHA-256 digest. A
+unique actionable match with that postcondition is `ready_for_measurement`;
+missing, incomplete, ambiguous, presentation-only, unsupported, and not-running
+surfaces remain candidates with a redacted Computer Use handoff. The handoff
+requires fresh state, unique relocation, provider-native action, and readback,
+with native replay disabled. Rendered web content remains a browser-connector
+task.
 A fresh locator's `identityDigest` can be passed back through
 `control perform --locator-digest <digest>` (optionally combined with role,
 subrole, identifier, window scope, and the locator's redacted

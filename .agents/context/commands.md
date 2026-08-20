@@ -227,6 +227,7 @@ stores only `foreground_oracle=foreground_unchanged` and the redacted
 
 Agent-facing control discovery and batching are available through:
 `control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]`,
+`control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role>`,
 `control capability-audit-batch --all-applicable [--run-id <id>] [--max-apps <n>]`,
 and `control batch --app <app> --actions-stdin --confirm`. Capability output
 classifies the app descriptively and distinguishes fresh daemon-executed routes
@@ -243,6 +244,14 @@ on an app, and never handles `web_content`.
 If a recursive deep audit reaches its fixed ceiling, the daemon may use a
 bounded window-aware/page traversal of up to 8 windows, 256 pages, and 16,000
 total nodes; only complete coverage can promote a profile.
+
+`control capability-verify` is a daemon-only, read-only task gate. It accepts one
+stable structural selector and observes one bounded current AX surface without
+launching or dispatching. Without a postcondition kind and SHA-256 digest it
+returns `needs_postcondition`; a unique actionable target with both returns
+`ready_for_measurement`. Missing, incomplete, ambiguous, presentation-only,
+unsupported, or not-running results remain candidates and preserve a redacted
+Computer Use handoff with fresh state and readback; native replay is disabled.
 Batching owns one bounded app lease, revalidates every step, stops on the first
 unverified action, and releases the lease on every exit path. Semantic scroll
 remains an explicit `control perform` action so a Computer Use handoff is visible.

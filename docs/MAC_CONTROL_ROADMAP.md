@@ -150,8 +150,25 @@ Phase 1 evidence snapshot:
   a SwiftUI accessibility surface; both therefore remain `native_appkit`
   until a visible task-specific SwiftUI behavior is independently verified.
 
+Fresh Phase 1 evidence — 2026-08-20:
+
+- Source `swift build` and the focused `CapabilityVerificationTests` pass for
+  `control.capability_verify`; the verifier is read-only, candidate-only, and
+  requires a precise postcondition before readiness.
+- The current installed identities are ChatGPT `26.803.61601` and Spotify
+  `1.2.96.518`, and both were observed as not running. No current AX tree was
+  available, so no live route promotion was claimed and no app was launched.
+- The installed daemon LaunchAgent is present but not loaded, and the installed
+  `macctl` runtime remains separate from the source checkout. Live installed and
+  Accessibility behavior therefore remain blocked pending an already-running
+  app and healthy daemon.
+- No native action or Computer Use action was dispatched. Ambiguous or
+  unsupported controls continue to return the existing fresh-state Computer Use
+  handoff with native replay disabled.
+
 Phase 1 remains active until the not-observed targets have legitimate
-already-running evidence and task-specific capability verification is added;
+already-running evidence and fresh current-app task-specific observations
+complete the verification gate;
 the audit must not launch apps or perform consequential actions merely to close
 the coverage count.
 

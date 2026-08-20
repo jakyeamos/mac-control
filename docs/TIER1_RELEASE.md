@@ -243,6 +243,16 @@ audit and persists only stable, redacted locator descriptors keyed by app
 identity/version, OS/provider state, and tree signature. It does not dispatch
 actions and is not route-ranking authority.
 
+`control.capability_verify` is the bounded task-specific read-only gate after
+the broad audit. It observes one fresh current Accessibility surface using a
+stable structural selector and returns `needs_postcondition` until the caller
+supplies an exact postcondition kind and SHA-256 digest. A unique actionable
+match with both is `ready_for_measurement`; missing, incomplete, ambiguous,
+presentation-only, unsupported, or not-running surfaces remain candidates with
+a redacted Computer Use handoff. The verifier never launches, activates,
+dispatches, promotes, or replays a native action, and it does not handle
+rendered web content.
+
 The deep audit both matches the current bundle overlay's declared disclosure
 signals and performs generic `capabilityLeads` discovery. Generic discovery is
 limited to app-owned menus, controls, dialogs, help, onboarding, and

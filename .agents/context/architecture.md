@@ -141,6 +141,16 @@ menus, controls, dialogs, help, onboarding, and accessibility disclosures, but
 those leads are candidate planning evidence only. They never dispatch input or
 admit a route without independent measured-route evidence.
 
+`control.capability_verify` is the bounded task-specific observation edge in that
+sequence. It reads a fresh redacted Accessibility tree for one already-running
+native app, matches structural selector fields, and requires both a precise
+postcondition kind and SHA-256 digest before returning `ready_for_measurement`.
+It never launches, activates, dispatches input, promotes a profile, or replays a
+native action. Missing, incomplete, ambiguous, presentation-only, unsupported,
+or unobserved targets remain candidates and carry a fresh Computer Use handoff
+with `native_action_replay_allowed=false`; rendered web content remains owned by
+the browser provider.
+
 Before that discovery boundary, `control limitations` exposes the local,
 versioned call/no-call ledger. It records known direct-provider boundaries,
 typed handoff-only cases, and constrained Mac Control routes so an agent does

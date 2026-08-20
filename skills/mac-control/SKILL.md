@@ -563,6 +563,26 @@ separate bounded `windowed_pages` traversal: up to 8 discovered AX windows, 256 
 and 16,000 total nodes. Only complete page/window coverage can promote the broad profile; omitted
 windows/pages or a truncated page keep it stale and are reported in the audit evidence.
 
+For one native task, use the separate task-specific verifier after the broad audit and
+before considering a route ready:
+
+```sh
+macctl control capability-verify --app "ChatGPT" --task focus-control \
+  --target-fingerprint chatgpt-current-v1 --route accessibility \
+  --role AXButton --identifier <stable-id> \
+  --postcondition-kind <kind> --postcondition-digest <sha256> --json
+```
+
+The verifier observes one fresh, bounded Accessibility surface using structural
+selectors only; it never launches, activates, or dispatches input. A unique actionable
+target without a precise postcondition returns `needs_postcondition`. A unique target
+with a postcondition kind and SHA-256 digest returns `ready_for_measurement`, while
+missing, incomplete, ambiguous, presentation-only, unsupported, or not-running
+surfaces remain candidates and include a redacted Computer Use handoff with fresh
+state, unique relocation, provider-native action, and postcondition readback steps.
+`native_action_replay_allowed=false` remains a hard boundary. Rendered web content
+still belongs to the browser connector.
+
 As part of this off-critical-path audit, inspect both the current bundle overlay's declared
 app-disclosure signals and general app-owned capability surfaces. The generic scanner recognizes
 keyboard navigation, shortcut catalogs, quick switchers, command palettes, keyboard search, and

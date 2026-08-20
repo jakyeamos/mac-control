@@ -44,6 +44,7 @@ documentation, and test change.
 | A task has a fresh measured candidate for this app/version/target | The eligible manifest candidate | Rank complete-action latency, p95 latency, then recoveries after all gates pass. |
 | An ideal-state task has a stable built-in shortcut or exact customizable command surface | Declare shortcut acceleration and a shortcut candidate when assigned | Preserve semantic command identity, contextual availability, conflict handling, reversible custom assignment, and the same independent task oracle. |
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
+| A fresh native task surface needs bounded verification before routing | `control capability-verify` | Observe one bounded structural AX surface; require an exact postcondition digest before readiness and preserve Computer Use for candidate, ambiguous, or unsupported results. |
 | Known limitation preflight is needed before considering Mac Control | `control limitations` | Read the local versioned call/no-call ledger without daemon or Accessibility probing. |
 | A new boundary was observed and should be retained for review | `control limitations propose --stdin` | Append one owner-only `unproven` candidate without mutating the canonical ledger. |
 | Review candidates already recorded by agents | `control limitations proposals` | Read the append-only candidate store; candidates have no routing or execution authority. |
@@ -73,6 +74,10 @@ documentation, and test change.
   for that visible focus transition.
 - Activate a known Save button in a native app: use semantic Accessibility with the button's
   stable role and title before sequential Tab navigation.
+- Verify a current native task surface without acting: use `control capability-verify` with
+  a stable structural selector. Supply the exact postcondition kind and SHA-256 digest before
+  treating a unique actionable target as ready; otherwise preserve the redacted Computer Use
+  handoff and do not replay a native action.
 - Press one identifier-addressable control in a known background window: use the action-intent
   front door only when the exact PID/instance/window tuple and a same-window desired-state
   selector are available; consume the short-lived resolution once and do not fall back.

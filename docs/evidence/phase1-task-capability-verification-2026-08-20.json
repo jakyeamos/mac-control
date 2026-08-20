@@ -1,0 +1,101 @@
+{
+  "schema": "mac-control-phase1-task-capability-verification/v1",
+  "recorded_at": "2026-08-20T15:59:53Z",
+  "phase": "phase_1",
+  "repository": {
+    "branch": "dev",
+    "implementation_commit": "065d595",
+    "source_root": "/Users/jakyeamos/projects/mac-control"
+  },
+  "current_app_identities": [
+    {
+      "name": "ChatGPT",
+      "bundle_id": "com.openai.codex",
+      "bundle_version": "26.803.61601",
+      "path": "/Applications/ChatGPT.app",
+      "is_running": false,
+      "accessibility_observation": "blocked_application_not_running"
+    },
+    {
+      "name": "Spotify",
+      "bundle_id": "com.spotify.client",
+      "bundle_version": "1.2.96.518",
+      "path": "/Applications/Spotify.app",
+      "is_running": false,
+      "accessibility_observation": "blocked_application_not_running"
+    }
+  ],
+  "source_verification": {
+    "capability": "control.capability_verify",
+    "swift_build": "passed",
+    "full_swift_tests": {
+      "status": "passed",
+      "test_count": 334
+    },
+    "focused_capability_verification_tests": {
+      "status": "passed",
+      "test_count": 3
+    },
+    "read_only": true,
+    "action_dispatched": false,
+    "states_covered": [
+      "ready_for_measurement",
+      "needs_postcondition",
+      "candidate",
+      "ambiguous",
+      "unsupported"
+    ],
+    "postcondition_gate": "A unique actionable native target is not ready until the caller supplies a postcondition kind and 64-character SHA-256 digest."
+  },
+  "installed_runtime": {
+    "macctl_path": "/Users/jakyeamos/.local/bin/macctl",
+    "macctl_version": "0.1.0",
+    "capability_verify_command": "absent_from_installed_help",
+    "skill_projection": "source_and_canonical_projection_match",
+    "projection_check": "passed"
+  },
+  "live_runtime": {
+    "daemon_installed": true,
+    "daemon_launchd_loaded": false,
+    "daemon_healthy": false,
+    "daemon_socket_observation": "connection_refused",
+    "launch_agent_observation": "service_not_found_in_user_gui_domain",
+    "source_cli_probes": [
+      {
+        "app": "ChatGPT",
+        "route": "accessibility",
+        "status": "blocked",
+        "reason": "daemon_unavailable",
+        "ax_tree_observed": false
+      },
+      {
+        "app": "Spotify",
+        "route": "scroll",
+        "status": "blocked",
+        "reason": "daemon_unavailable",
+        "ax_tree_observed": false
+      }
+    ],
+    "apps_launched": 0,
+    "native_actions_dispatched": 0,
+    "computer_use_actions_dispatched": 0,
+    "route_promotions_claimed": 0
+  },
+  "handoff_boundary": {
+    "ambiguous_or_unsupported_controls": "preserve_existing_computer_use_handoff",
+    "fresh_state_required": true,
+    "native_action_replay_allowed": false,
+    "required_provider_steps": [
+      "get_app_state",
+      "locate_one_unique_current_target",
+      "perform_provider_native_action",
+      "read_back_declared_postcondition"
+    ],
+    "rendered_web_content": "browser_provider"
+  },
+  "limitations": [
+    "No live AX tree was available because ChatGPT and Spotify were not running.",
+    "The installed daemon LaunchAgent was not loaded, so installed/live behavior could not be verified.",
+    "The installed macctl binary predates capability-verify; source and installed command surfaces remain separate evidence layers."
+  ]
+}
