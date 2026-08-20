@@ -199,6 +199,7 @@ public struct ControlCapabilityProfile: Codable, Equatable {
             "control.limitations",
             "control.capability_audit",
             "control.capability_audit_batch",
+            "control.capability_verify",
             "control.capability_leads",
             "control.blocker_observations",
             "window_scoped_accessibility_selector",

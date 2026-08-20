@@ -401,6 +401,63 @@ public struct AgentProviderHandoffPlan: Codable, Equatable {
             ]
         )
     }
+
+    /// The recovery sequence for a task-specific surface that Mac Control
+    /// observed but cannot safely execute. The receiving Computer Use provider
+    /// must refresh state, relocate the target, perform its own action, and
+    /// verify the caller-declared postcondition. Native replay is forbidden.
+    public static func taskCapability(
+        target: AgentProviderHandoffTarget?,
+        reason: String,
+        postconditionKind: String
+    ) -> AgentProviderHandoffPlan {
+        let provider = "computer_use"
+        return AgentProviderHandoffPlan(
+            provider: provider,
+            reason: reason,
+            action: "task-specific-control",
+            freshStateRequired: true,
+            nativeActionReplayAllowed: false,
+            focusPolicy: .foreground,
+            foregroundOracle: "target_foreground_unchanged",
+            targetSource: "original_request_selector",
+            target: target,
+            postconditionKind: postconditionKind,
+            steps: [
+                AgentProviderHandoffStep(
+                    id: "refresh_state",
+                    provider: provider,
+                    operation: "get_app_state",
+                    targetSource: "application",
+                    verification: "fresh_state_observed"
+                ),
+                AgentProviderHandoffStep(
+                    id: "relocate_target",
+                    provider: provider,
+                    operation: "locate_unique_target",
+                    targetSource: "original_request_selector",
+                    verification: "target_unique_in_fresh_state"
+                ),
+                AgentProviderHandoffStep(
+                    id: "execute_action",
+                    provider: provider,
+                    operation: "activate_or_click",
+                    targetSource: "fresh_target",
+                    verification: "dispatch_only_until_readback"
+                ),
+                AgentProviderHandoffStep(
+                    id: "verify_postcondition",
+                    provider: provider,
+                    operation: "get_app_state",
+                    targetSource: "fresh_target",
+                    verification: "declared_postcondition_verified_and_foreground_preserved",
+                    parameters: [
+                        "postcondition_digest_source": .string("original_request")
+                    ]
+                )
+            ]
+        )
+    }
 }
 
 public struct AgentActionOutcome: Codable, Equatable {

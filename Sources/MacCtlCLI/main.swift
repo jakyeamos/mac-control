@@ -663,7 +663,7 @@ struct CLI {
 
     private func runControl(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl control status|limitations|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
+            throw CLIError.usage("Usage: macctl control status|limitations|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-verify|capability-audit-batch")
         }
         switch subcommand {
         case "status":
@@ -702,6 +702,79 @@ struct CLI {
                 params["max_depth"] = .number(Double(value))
             }
             return render(sendOrLocal(method: "control.capability_audit", params: params, localFallback: false))
+        case "capability-verify":
+            var params: [String: JSONValue] = [
+                "app": .string(try requiredOption("--app", from: args)),
+                "task": .string(try requiredOption("--task", from: args)),
+                "target_fingerprint": .string(try requiredOption("--target-fingerprint", from: args)),
+                "route": .string(try requiredOption("--route", from: args))
+            ]
+            try addControlTargetSurface(from: args, to: &params)
+            if let postconditionKind = try optionalOption("--postcondition-kind", from: args) {
+                params["postcondition_kind"] = .string(postconditionKind)
+            }
+            if let postconditionDigest = try optionalOption("--postcondition-digest", from: args) {
+                params["postcondition_digest"] = .string(postconditionDigest)
+            }
+            if let processID = try optionalOption("--process-id", from: args) {
+                guard let value = Int32(processID), value > 0 else {
+                    throw CLIError.usage("--process-id must be a positive 32-bit process ID")
+                }
+                params["process_id"] = .number(Double(value))
+            }
+            if let instanceRef = try optionalOption("--instance-ref", from: args) {
+                params["instance_ref"] = .string(instanceRef)
+            }
+            if let windowRef = try optionalOption("--window-ref", from: args) {
+                params["window_ref"] = .string(windowRef)
+            }
+            if let maxNodes = try optionalOption("--max-nodes", from: args) {
+                guard let value = Int(maxNodes), value > 0 else {
+                    throw CLIError.usage("--max-nodes must be a positive integer")
+                }
+                params["max_nodes"] = .number(Double(value))
+            }
+            if let maxDepth = try optionalOption("--max-depth", from: args) {
+                guard let value = Int(maxDepth), value >= 0 else {
+                    throw CLIError.usage("--max-depth must be a non-negative integer")
+                }
+                params["max_depth"] = .number(Double(value))
+            }
+            var selector: [String: JSONValue] = [:]
+            let stringOptions: [(String, String)] = [
+                ("--role", "role"),
+                ("--identifier", "identifier"),
+                ("--locator-digest", "locatorDigest"),
+                ("--ancestor-digest", "ancestorDigest"),
+                ("--geometry-digest", "geometryDigest"),
+                ("--title", "title"),
+                ("--subrole", "subrole"),
+                ("--contains-text", "containsText"),
+                ("--image-anchor", "imageAnchor"),
+                ("--window-title", "windowTitle"),
+                ("--window-identifier", "windowIdentifier")
+            ]
+            for (option, key) in stringOptions {
+                if let value = try optionalOption(option, from: args) {
+                    selector[key] = .string(value)
+                }
+            }
+            let numberOptions: [(String, String)] = [
+                ("--normalized-x", "normalizedX"),
+                ("--normalized-y", "normalizedY"),
+                ("--raw-x", "rawX"),
+                ("--raw-y", "rawY")
+            ]
+            for (option, key) in numberOptions {
+                if let raw = try optionalOption(option, from: args) {
+                    guard let value = Double(raw) else {
+                        throw CLIError.usage("(option) must be a number")
+                    }
+                    selector[key] = .number(value)
+                }
+            }
+            params["selector"] = .object(selector)
+            return render(sendOrLocal(method: "control.capability_verify", params: params, localFallback: false))
         case "capability-audit-batch":
             var params: [String: JSONValue] = [:]
             if let apps = try optionalOption("--apps", from: args) {
@@ -870,7 +943,7 @@ struct CLI {
             }
             return render(sendControlRequest(method: "control.perform", params: params))
         default:
-            throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-audit-batch")
+            throw CLIError.usage("Usage: macctl control status|authorization|hands-off|perform|batch|capabilities|capability-audit|capability-verify|capability-audit-batch")
         }
     }
 
@@ -1729,6 +1802,7 @@ struct CLI {
         macctl control hands-off status
         macctl control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]
         macctl control capability-audit --app <app> [--max-nodes N] [--max-depth N]
+        macctl control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role> [--identifier <id> | --locator-digest <digest>] [--postcondition-kind <kind> --postcondition-digest <sha256>]
         macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
         macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
         macctl control batch --app <app> --actions-stdin --confirm [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>] [--hands-off-session-id <id>]

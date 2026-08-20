@@ -133,6 +133,7 @@ private enum SemanticScrollExecution {
 
 private struct CapabilityAuditExecution {
     let profile: CapabilityAuditProfile
+    let tree: AccessibilityTreeReport
     let initialMaxNodes: Int
     let initialMaxDepth: Int
     let effectiveMaxNodes: Int
@@ -161,6 +162,7 @@ public final class MacCtlService {
         "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
         "accessibility.tree", "accessibility.audit", "ideal-state.audit", "app.list",
         "app.instances", "app.bind", "window.displays", "window.list", "window.inspect",
+        "control.capability_verify",
         "action.resolve",
         "workflow.list", "workflow.validate", "approval.list", "receipts.list",
         "receipts.status", "receipts.trace", "logs", "shortcut.audit", "shortcut.inspect"
@@ -944,6 +946,8 @@ public final class MacCtlService {
                 return try controlCapabilityAudit(request)
             case "control.capability_audit_batch":
                 return try controlCapabilityAuditBatch(request)
+            case "control.capability_verify":
+                return try controlCapabilityVerify(request)
             case "shortcut.audit":
                 return try shortcutAudit(request)
             case "shortcut.propose":
@@ -2374,6 +2378,233 @@ public final class MacCtlService {
         )
     }
 
+    private func controlCapabilityVerify(_ request: RequestEnvelope) throws -> ResponseEnvelope {
+        let targetSurface = try requestedControlTargetSurface(from: request)
+        if targetSurface == .webContent {
+            throw ControlProviderHandoffRequired(targetSurface: targetSurface)
+        }
+
+        let applicationName = try requiredString(request, key: "app")
+        let taskID = try requiredString(request, key: "task")
+        let targetFingerprint = try requiredString(request, key: "target_fingerprint")
+        guard let route = try requestedControlRoute(from: request) else {
+            throw WorkflowExecutionError.missingParameter("route")
+        }
+        guard let selector = try requestedControlSelector(from: request) else {
+            throw WorkflowExecutionError.missingParameter("selector")
+        }
+        let postconditionKind = try optionalTargetString(request, key: "postcondition_kind")
+        let suppliedPostconditionDigest = try optionalTargetString(request, key: "postcondition_digest")
+        let postconditionDigest: String?
+        if let suppliedPostconditionDigest {
+            guard suppliedPostconditionDigest.range(
+                of: "^[0-9a-fA-F]{64}$",
+                options: .regularExpression
+            ) != nil else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "postcondition_digest must be a 64-character SHA-256 hex digest"
+                )
+            }
+            guard postconditionKind != nil else {
+                throw WorkflowExecutionError.unsafeInput(
+                    "postcondition_kind is required when postcondition_digest is supplied"
+                )
+            }
+            postconditionDigest = suppliedPostconditionDigest.lowercased()
+        } else {
+            postconditionDigest = nil
+        }
+
+        var application = try resolveApplication(applicationName)
+        var execution: CapabilityAuditExecution?
+        let evaluation: TaskCapabilityVerificationEvaluation
+        let supportsBoundedAX = route == .accessibility || route == .scroll
+        if supportsBoundedAX, application.isRunning, application.processID != nil {
+            // Re-resolve the exact target before reading the tree. This keeps
+            // process/instance/window selectors fail-closed without launching
+            // or activating the app.
+            application = try runningAccessibilityApplication(from: request)
+            let audit = try auditCapabilityProfile(
+                application: application,
+                maxNodes: try requestedNonNegativeInt(
+                    from: request,
+                    key: "max_nodes",
+                    defaultValue: CapabilityAuditBounds.defaultMaxNodes
+                ),
+                maxDepth: try requestedNonNegativeInt(
+                    from: request,
+                    key: "max_depth",
+                    defaultValue: CapabilityAuditBounds.defaultMaxDepth
+                )
+            )
+            execution = audit
+            evaluation = TaskCapabilityVerificationMatcher.evaluate(
+                selector: selector,
+                route: route,
+                tree: audit.tree,
+                postconditionKind: postconditionKind,
+                postconditionDigest: postconditionDigest,
+                coverageComplete: audit.coverageComplete
+            )
+        } else if !supportsBoundedAX {
+            execution = nil
+            evaluation = TaskCapabilityVerificationEvaluation(
+                state: .unsupported,
+                reason: "route_requires_external_provider"
+            )
+        } else {
+            execution = nil
+            evaluation = TaskCapabilityVerificationEvaluation(
+                state: .candidate,
+                reason: application.isRunning
+                    ? "accessibility_surface_unavailable"
+                    : "application_not_running"
+            )
+        }
+
+        let observationPersisted: Bool
+        if execution != nil {
+            let providerState = currentCapabilityProviderState()
+            observationPersisted = try capabilityProfileStore.recordTaskObservation(
+                application: application,
+                osVersion: currentOSVersion(),
+                providerState: providerState,
+                taskID: taskID,
+                targetFingerprint: targetFingerprint,
+                route: route,
+                selector: selector,
+                reason: evaluation.reason
+            ) != nil
+        } else {
+            observationPersisted = false
+        }
+
+        let handoffPlan: AgentProviderHandoffPlan? = if evaluation.requiresComputerUseHandoff {
+            AgentProviderHandoffPlan.taskCapability(
+                target: redactedHandoffTarget(from: request),
+                reason: "task_capability_(evaluation.reason)",
+                postconditionKind: postconditionKind ?? "caller_declared_postcondition_required"
+            )
+        } else {
+            nil
+        }
+        let outcomeState: AgentActionOutcomeState
+        let failureClass: String?
+        let fallbackAllowed: Bool
+        let recommendedProvider: String?
+        let nextAction: String
+        switch evaluation.state {
+        case .ambiguous:
+            outcomeState = .targetAmbiguous
+            failureClass = "target_ambiguous"
+            fallbackAllowed = true
+            recommendedProvider = "computer_use"
+            nextAction = "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        case .candidate:
+            outcomeState = evaluation.reason == "bounded_surface_incomplete"
+                ? .targetResolutionIncomplete
+                : .targetMissing
+            failureClass = evaluation.reason == "bounded_surface_incomplete"
+                ? "target_resolution_incomplete"
+                : "target_missing"
+            fallbackAllowed = true
+            recommendedProvider = "computer_use"
+            nextAction = "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        case .unsupported:
+            outcomeState = .actionUnavailable
+            failureClass = "action_unavailable"
+            fallbackAllowed = true
+            recommendedProvider = "computer_use"
+            nextAction = "get_app_state_then_relocate_target_and_verify_with_computer_use"
+        case .needsPostcondition:
+            outcomeState = .verificationUnavailable
+            failureClass = "postcondition_required_before_dispatch"
+            fallbackAllowed = false
+            recommendedProvider = nil
+            nextAction = "declare_precise_postcondition_and_reobserve"
+        case .readyForMeasurement:
+            outcomeState = .verificationUnavailable
+            failureClass = nil
+            fallbackAllowed = false
+            recommendedProvider = "mac_control"
+            nextAction = "submit_approval_gated_action_with_same_target_and_postcondition"
+        }
+        let outcome = AgentActionOutcome(
+            state: outcomeState,
+            route: route.rawValue,
+            verification: "read_only_task_surface_observed",
+            failureClass: failureClass,
+            fallbackAllowed: fallbackAllowed,
+            recommendedProvider: recommendedProvider,
+            freshStateRequired: evaluation.requiresComputerUseHandoff,
+            nextAction: nextAction,
+            handoffPlan: handoffPlan
+        )
+
+        let profile = execution?.profile
+        let tree = execution?.tree
+        var metadata: [String: JSONValue] = [
+            "task_id": .string(taskID),
+            "target_fingerprint_digest": .string(CapabilityProfileDigest.make(targetFingerprint)),
+            "route": .string(route.rawValue),
+            "verification_state": .string(evaluation.state.rawValue),
+            "reason": .string(evaluation.reason),
+            "target_match_count": .number(Double(evaluation.targetMatchCount)),
+            "tree_node_count": .number(Double(tree?.nodeCount ?? 0)),
+            "tree_truncated": .bool(tree?.truncated ?? false),
+            "coverage_complete": .bool(evaluation.coverageComplete),
+            "action_dispatched": .bool(false),
+            "observation_persisted": .bool(observationPersisted)
+        ]
+        if let treeSignature = profile?.identity.treeSignature {
+            metadata["tree_signature"] = .string(treeSignature)
+        }
+        if let profileState = profile?.state {
+            metadata["profile_state"] = .string(profileState.rawValue)
+        }
+        if let postconditionKind {
+            metadata["postcondition_kind"] = .string(postconditionKind)
+        }
+        if let postconditionDigest {
+            metadata["postcondition_digest"] = .string(postconditionDigest)
+        }
+        let report = TaskCapabilityVerificationReport(
+            application: WarmPathApplicationIdentity(application: application),
+            taskID: taskID,
+            targetFingerprintDigest: CapabilityProfileDigest.make(targetFingerprint),
+            route: route,
+            state: evaluation.state,
+            postconditionKind: postconditionKind,
+            postconditionDigest: postconditionDigest,
+            treeSignature: profile?.identity.treeSignature,
+            treeNodeCount: tree?.nodeCount ?? 0,
+            treeTruncated: tree?.truncated ?? false,
+            coverageComplete: evaluation.coverageComplete,
+            profileState: profile?.state,
+            targetMatchCount: evaluation.targetMatchCount,
+            targetLocatorDigests: evaluation.targetLocatorDigests,
+            observedActions: evaluation.observedActions,
+            reason: evaluation.reason,
+            recommendedProvider: recommendedProvider,
+            freshStateRequired: evaluation.requiresComputerUseHandoff,
+            nativeActionReplayAllowed: false,
+            nextAction: nextAction,
+            handoffPlan: handoffPlan
+        )
+        return try success(
+            request,
+            status: evaluation.requiresComputerUseHandoff ? .blocked : .succeeded,
+            value: report,
+            evidence: [Evidence(
+                kind: "control_capability_verification",
+                message: "A bounded, redacted task surface was observed without dispatching an action; executable route promotion remains gated",
+                source: "macctld",
+                metadata: metadata
+            )],
+            outcome: outcome
+        )
+    }
+
     private func controlCapabilityAuditBatch(_ request: RequestEnvelope) throws -> ResponseEnvelope {
         let runID = request.params["run_id"]?.stringValue
         let resumed = runID != nil
@@ -2736,6 +2967,7 @@ public final class MacCtlService {
         )
         return CapabilityAuditExecution(
             profile: try capabilityProfileStore.save(profile),
+            tree: tree,
             initialMaxNodes: initialMaxNodes,
             initialMaxDepth: initialMaxDepth,
             effectiveMaxNodes: effectiveMaxNodes,
@@ -6571,7 +6803,7 @@ public final class MacCtlService {
                 "keyboard.lease.acquire", "keyboard.lease.release", "keyboard.lease.physical-suppression", "keyboard.lease.navigation-mode",
                 "keyboard.freeze.acquire", "keyboard.freeze.status", "keyboard.freeze.release",
                 "keyboard.navigate", "keyboard.send",
-                "control.status", "control.perform", "control.batch", "control.capabilities", "control.limitations", "control.capability_audit", "control.capability_audit_batch", "control.outcome", "control.center.snapshot", "control.stop_active",
+                "control.status", "control.perform", "control.batch", "control.capabilities", "control.limitations", "control.capability_audit", "control.capability_audit_batch", "control.capability_verify", "control.outcome", "control.center.snapshot", "control.stop_active",
                 "control.authorization.prepare", "control.authorization.bind", "control.authorization.list", "control.authorization.resolve",
                 "daemon.lifecycle.prepare",
                 "route.list", "route.inspect", "route.benchmark", "route.register",
@@ -6614,6 +6846,7 @@ public final class MacCtlService {
                 "browser completion remains orchestrator_declared until a browser-owned attestation channel is available",
                 "control.capability_audit performs a bounded read-only Accessibility/provider audit and persists only redacted identity descriptors; it never dispatches an action",
                 "control.capability_audit_batch audits at most 24 explicit or catalog-selected apps, persists one redacted resumable receipt per app, serializes AX access, and never launches apps or dispatches actions",
+                "control.capability_verify matches one task selector against a fresh bounded redacted AX surface, requires a precise postcondition digest before readiness, persists candidate-only observation evidence, and never dispatches or promotes a route",
                 "selector addressability identifies a requested route but never invents a universal fallback ladder",
                 "only an explicit pre-action target-not-found failure may advance through a declared fallback chain",
                 "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",

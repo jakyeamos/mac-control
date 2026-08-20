@@ -667,6 +667,20 @@ public enum CapabilityProfileBuilder {
         )
     }
 
+    /// Builds the same redacted locator identity used by broad profiles for a
+    /// node in a fresh tree. Task-specific verification uses this helper so a
+    /// read-only observation and a later action resolver cannot disagree about
+    /// locator or ancestor digests.
+    public static func locatorDescriptor(
+        for node: AccessibilityTreeNode,
+        nodesByPath: [String: AccessibilityTreeNode]
+    ) -> CapabilityLocatorDescriptor? {
+        CapabilityLocatorDescriptor.from(
+            treeNode: node,
+            ancestorDigest: ancestorDigest(for: node, nodesByPath: nodesByPath)
+        )
+    }
+
     public static func build(
         application: AppInfo,
         osVersion: String,
@@ -675,11 +689,8 @@ public enum CapabilityProfileBuilder {
         now: Date = Date()
     ) -> CapabilityAuditProfile {
         let nodesByPath = Dictionary(uniqueKeysWithValues: tree.nodes.map { ($0.path, $0) })
-        let allLocators = tree.nodes.compactMap { node in
-            CapabilityLocatorDescriptor.from(
-                treeNode: node,
-                ancestorDigest: ancestorDigest(for: node, nodesByPath: nodesByPath)
-            )
+        let allLocators = tree.nodes.compactMap {
+            locatorDescriptor(for: $0, nodesByPath: nodesByPath)
         }
         let locators = deduplicateLocators(allLocators)
         let hasPress = tree.nodes.contains { $0.actions.contains("AXPress") }
@@ -1463,6 +1474,36 @@ public final class CapabilityProfileStore {
         )
         try persist(profile)
         return profile
+    }
+
+    /// Records a fresh task-surface observation without allowing a read-only
+    /// tree match to promote, demote, or invalidate an executable capability.
+    /// The wrapper deliberately records ambiguous/candidate evidence only.
+    @discardableResult
+    public func recordTaskObservation(
+        application: AppInfo,
+        osVersion: String,
+        providerState: CapabilityProviderState,
+        taskID: String,
+        targetFingerprint: String,
+        route: ControlActionRoute,
+        selector: Selector?,
+        reason: String
+    ) throws -> CapabilityAuditProfile? {
+        let normalizedReason = reason.hasPrefix("read_only_")
+            ? reason
+            : "read_only_\(reason)"
+        return try recordTaskVerification(
+            application: application,
+            osVersion: osVersion,
+            providerState: providerState,
+            taskID: taskID,
+            targetFingerprint: targetFingerprint,
+            route: route,
+            selector: selector,
+            kind: .ambiguous,
+            reason: normalizedReason
+        )
     }
 
     private func invalidateSupersededProfiles(by profile: CapabilityAuditProfile) throws {
