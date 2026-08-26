@@ -2,7 +2,7 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "mac-control"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-20",
+  "last_reviewed": "2026-08-26",
   "surfaces": [
     {
       "id": "matrix-maintenance",
@@ -71,6 +71,41 @@
         "macctl app instances --app ChatGPT --json",
         "macctl app instances --app Spotify --json",
         "control capability-verify read-only probes for ChatGPT and Spotify"
+      ]
+    },
+    {
+      "type": "change",
+      "reason": "Task-specific capability verification now accepts a redacted structural neighborhood digest for repeated state-changing controls, including Spotify Play/Pause. The digest is recomputed from non-dispatching AX structure by both the verifier and later resolver; incomplete, stale, or non-unique evidence remains on the Computer Use handoff, with native replay disabled.",
+      "surfaces": [
+        "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
+        "Sources/MacCtlCore/CapabilityProfiles.swift",
+        "Sources/MacCtlCore/CapabilityVerification.swift",
+        "Sources/MacCtlCore/AccessibilityController.swift",
+        "Sources/MacCtlCore/Models.swift",
+        "Sources/MacCtlCore/MacCtlService.swift",
+        "Sources/MacCtlCLI/main.swift",
+        "Tests/MacCtlCoreTests/CapabilityVerificationTests.swift",
+        "Tests/MacCtlCoreTests/MacCtlCoreTests.swift",
+        "README.md",
+        ".agents/context/commands.md",
+        "skills/mac-control/SKILL.md",
+        "skills/mac-control/references/routing.md",
+        "Tests/SkillTests/test_mac_control_skill.py",
+        "~/.agents/skills/mac-control/SKILL.md",
+        "~/.codex/skills/mac-control/"
+      ],
+      "validation": [
+        "swift build",
+        "swift test --filter CapabilityVerificationTests",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "macctl control limitations --json",
+        "installed macctl capability-verify command-surface check",
+        "macctl release check --json",
+        "direct Spotify capability verification probe when the daemon and Accessibility surface are available"
       ]
     }
   ]

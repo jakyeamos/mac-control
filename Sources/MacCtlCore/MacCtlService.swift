@@ -2482,7 +2482,7 @@ public final class MacCtlService {
         let handoffPlan: AgentProviderHandoffPlan? = if evaluation.requiresComputerUseHandoff {
             AgentProviderHandoffPlan.taskCapability(
                 target: redactedHandoffTarget(from: request),
-                reason: "task_capability_(evaluation.reason)",
+                reason: "task_capability_\(evaluation.reason)",
                 postconditionKind: postconditionKind ?? "caller_declared_postcondition_required"
             )
         } else {
@@ -2550,6 +2550,9 @@ public final class MacCtlService {
             "verification_state": .string(evaluation.state.rawValue),
             "reason": .string(evaluation.reason),
             "target_match_count": .number(Double(evaluation.targetMatchCount)),
+            "target_structural_digests": .array(
+                evaluation.targetStructuralDigests.map(JSONValue.string)
+            ),
             "tree_node_count": .number(Double(tree?.nodeCount ?? 0)),
             "tree_truncated": .bool(tree?.truncated ?? false),
             "coverage_complete": .bool(evaluation.coverageComplete),
@@ -2601,6 +2604,7 @@ public final class MacCtlService {
             profileState: profile?.state,
             targetMatchCount: evaluation.targetMatchCount,
             targetLocatorDigests: evaluation.targetLocatorDigests,
+            targetStructuralDigests: evaluation.targetStructuralDigests,
             observedActions: evaluation.observedActions,
             reason: evaluation.reason,
             recommendedProvider: recommendedProvider,
@@ -6870,7 +6874,7 @@ public final class MacCtlService {
                 "visual and coordinate routes require task-manifest opt-in and report the selected route and fallback chain",
                 "every semantic action revalidates the lease and foreground state and records redacted verification metadata",
                 "atomic semantic control reasserts stable foreground, owns an ephemeral app lease, and releases it on every exit path",
-                "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique; repeated descriptors can use redacted ancestorDigest and geometryDigest), re-resolves it, and compares bounded structural viewport metadata",
+                "semantic scroll targets a unique AXScrollArea selector (identifier optional when role-only resolution is unique; repeated descriptors can use redacted ancestorDigest, geometryDigest, or structuralDigest), re-resolves it, and compares bounded structural viewport metadata",
                 "semantic scroll and native row-activation failures expose fallback_allowed, failure_class, and explicit Computer Use handoff metadata",
                 "accessibility trees are bounded and redacted; AX values, private text, screenshots, and OCR are excluded",
                 "task plans are approved by exact digest, checkpointed atomically, and never resume automatically",
@@ -7639,7 +7643,7 @@ public final class MacCtlService {
         guard let application else { return nil }
 
         let selectorKeys = [
-            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "title", "subrole", "containsText",
+            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "structuralDigest", "title", "subrole", "containsText",
             "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor",
             "windowTitle", "windowIdentifier"
         ]
@@ -8753,7 +8757,7 @@ public final class MacCtlService {
 
     private func redactedHandoffTarget(from request: RequestEnvelope) -> AgentProviderHandoffTarget? {
         let selectorKeys = [
-            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "title", "subrole", "containsText",
+            "role", "identifier", "locatorDigest", "ancestorDigest", "geometryDigest", "structuralDigest", "title", "subrole", "containsText",
             "normalizedX", "normalizedY", "rawX", "rawY", "imageAnchor", "windowTitle", "windowIdentifier"
         ]
         let selectorObject = request.params["selector"]?.objectValue ?? [:]

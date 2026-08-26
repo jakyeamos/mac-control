@@ -208,6 +208,9 @@ public final class AccessibilityController: FocusedElementInspecting {
             window,
             selector: selector,
             ancestorIdentityDigests: [],
+            structuralAncestorSignatures: [],
+            parentElement: nil,
+            siblingElements: [],
             maxNodes: nodeLimit,
             found: &found,
             identities: &identities,
@@ -258,6 +261,9 @@ public final class AccessibilityController: FocusedElementInspecting {
             window,
             selector: selector,
             ancestorIdentityDigests: [],
+            structuralAncestorSignatures: [],
+            parentElement: nil,
+            siblingElements: [],
             maxNodes: nodeLimit,
             found: &found,
             identities: &identities,
@@ -299,7 +305,12 @@ public final class AccessibilityController: FocusedElementInspecting {
         let scopedWindows = try scopedWindows(windows, selector: selector)
         if !hasWindowScope,
            let focused = elementAttribute(application, kAXFocusedUIElementAttribute),
-           self.matches(focused, selector: selector, ancestorDigest: nil) {
+           self.matches(
+               focused,
+               selector: selector,
+               ancestorDigest: nil,
+               structuralDigest: nil
+           ) {
             append(focused)
         }
         for window in scopedWindows {
@@ -308,6 +319,9 @@ public final class AccessibilityController: FocusedElementInspecting {
                 window,
                 selector: selector,
                 ancestorIdentityDigests: [],
+                structuralAncestorSignatures: [],
+                parentElement: nil,
+                siblingElements: [],
                 maxNodes: nodeLimit,
                 found: &found,
                 identities: &identities,
@@ -320,7 +334,8 @@ public final class AccessibilityController: FocusedElementInspecting {
         // rather than descendants of AXWindows. Walk both surfaces while
         // de-duplicating handles so a structurally unique result remains
         // addressable without coordinates.
-        if !hasWindowScope {
+        if !hasWindowScope,
+           selector.structuralDigest == nil || found.isEmpty {
             let applicationChildren = (attribute(application, kAXChildrenAttribute) as? [AXUIElement]) ?? []
             for child in applicationChildren {
                 guard found.count < 2 else { break }
@@ -343,6 +358,9 @@ public final class AccessibilityController: FocusedElementInspecting {
                     child,
                     selector: selector,
                     ancestorIdentityDigests: [],
+                    structuralAncestorSignatures: [],
+                    parentElement: nil,
+                    siblingElements: [],
                     maxNodes: nodeLimit,
                     found: &found,
                     identities: &identities,
@@ -351,7 +369,12 @@ public final class AccessibilityController: FocusedElementInspecting {
                     truncated: &truncated
                 )
             }
-            if self.matches(application, selector: selector, ancestorDigest: nil) {
+            if self.matches(
+                application,
+                selector: selector,
+                ancestorDigest: nil,
+                structuralDigest: nil
+            ) {
                 append(application)
             }
         }
@@ -783,6 +806,9 @@ public final class AccessibilityController: FocusedElementInspecting {
         _ element: AXUIElement,
         selector: Selector,
         ancestorIdentityDigests: [String],
+        structuralAncestorSignatures: [String],
+        parentElement: AXUIElement?,
+        siblingElements: [AXUIElement],
         maxNodes: Int,
         found: inout [AXUIElement],
         identities: inout Set<UInt64>,
@@ -802,10 +828,23 @@ public final class AccessibilityController: FocusedElementInspecting {
             return
         }
         visited += 1
+        let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        let structuralDigest: String? = if selector.structuralDigest != nil {
+            liveStructuralDigest(
+                for: element,
+                parent: parentElement,
+                siblingElements: siblingElements,
+                ancestorSignatures: structuralAncestorSignatures,
+                children: children
+            )
+        } else {
+            nil
+        }
         if self.matches(
             element,
             selector: selector,
-            ancestorDigest: makeAncestorDigest(ancestorIdentityDigests)
+            ancestorDigest: makeAncestorDigest(ancestorIdentityDigests),
+            structuralDigest: structuralDigest
         ) {
             let identity = UInt64(CFHash(element))
             if identities.insert(identity).inserted {
@@ -818,12 +857,22 @@ public final class AccessibilityController: FocusedElementInspecting {
         } else {
             childAncestors = ancestorIdentityDigests + [liveLocatorDigest(for: element)]
         }
-        let children = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        let childStructuralAncestors: [String]
+        if selector.structuralDigest == nil {
+            childStructuralAncestors = []
+        } else {
+            childStructuralAncestors = structuralAncestorSignatures + [
+                liveStructuralSignature(for: element, children: children)
+            ]
+        }
         for child in children {
             search(
                 child,
                 selector: selector,
                 ancestorIdentityDigests: childAncestors,
+                structuralAncestorSignatures: childStructuralAncestors,
+                parentElement: element,
+                siblingElements: children,
                 maxNodes: maxNodes,
                 found: &found,
                 identities: &identities,
@@ -1076,7 +1125,8 @@ public final class AccessibilityController: FocusedElementInspecting {
     private func matches(
         _ element: AXUIElement,
         selector: Selector,
-        ancestorDigest: String?
+        ancestorDigest: String?,
+        structuralDigest: String?
     ) -> Bool {
         if let role = selector.role, role != (attribute(element, kAXRoleAttribute) as? String) {
             return false
@@ -1095,6 +1145,10 @@ public final class AccessibilityController: FocusedElementInspecting {
         }
         if let expectedGeometryDigest = selector.geometryDigest,
            expectedGeometryDigest != liveGeometryDigest(for: element) {
+            return false
+        }
+        if let expectedStructuralDigest = selector.structuralDigest,
+           expectedStructuralDigest != structuralDigest {
             return false
         }
         if let title = selector.title,
@@ -1122,7 +1176,8 @@ public final class AccessibilityController: FocusedElementInspecting {
             }
         }
         return selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil
-            || selector.ancestorDigest != nil || selector.geometryDigest != nil || selector.title != nil || selector.subrole != nil
+            || selector.ancestorDigest != nil || selector.geometryDigest != nil || selector.structuralDigest != nil
+            || selector.title != nil || selector.subrole != nil
             || selector.containsText != nil
     }
 
@@ -1154,6 +1209,50 @@ public final class AccessibilityController: FocusedElementInspecting {
     private func liveGeometryDigest(for element: AXUIElement) -> String? {
         guard let frame = try? bounds(of: element) else { return nil }
         return CapabilityProfileDigest.geometry(frame)
+    }
+
+    /// Rebuilds the redacted structural neighborhood digest emitted by a
+    /// bounded capability observation. The resolver reads only Accessibility
+    /// metadata and never dispatches an action while proving the selector.
+    private func liveStructuralDigest(
+        for element: AXUIElement,
+        parent: AXUIElement?,
+        siblingElements: [AXUIElement],
+        ancestorSignatures: [String],
+        children: [AXUIElement]
+    ) -> String? {
+        guard let parent else { return nil }
+        let elementIdentity = UInt64(CFHash(element))
+        let siblings = siblingElements
+            .filter { UInt64(CFHash($0)) != elementIdentity }
+            .map { liveStructuralSignature(for: $0) }
+            .sorted()
+        return AccessibilityStructuralEvidence.makeDigest(
+            targetSignature: liveStructuralSignature(for: element, children: children),
+            parentSignature: liveStructuralSignature(for: parent, children: siblingElements),
+            ancestorSignatures: ancestorSignatures,
+            siblingSignatures: siblings,
+            relativeGeometry: AccessibilityStructuralEvidence.relativeGeometry(
+                nodeBounds: try? bounds(of: element),
+                parentBounds: try? bounds(of: parent)
+            )
+        )
+    }
+
+    private func liveStructuralSignature(
+        for element: AXUIElement,
+        children: [AXUIElement]? = nil
+    ) -> String {
+        let role = attribute(element, kAXRoleAttribute) as? String
+        let childCount = children?.count
+            ?? ((attribute(element, kAXChildrenAttribute) as? [AXUIElement])?.count ?? 0)
+        return AccessibilityStructuralEvidence.structuralSignature(
+            role: role,
+            subrole: attribute(element, kAXSubroleAttribute) as? String,
+            actions: actionNames(of: element),
+            childCount: childCount,
+            scrollable: role == "AXScrollArea"
+        )
     }
 
     private func makeAncestorDigest(_ identities: [String]) -> String? {

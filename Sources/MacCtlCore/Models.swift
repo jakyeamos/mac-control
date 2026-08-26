@@ -705,6 +705,10 @@ public struct Selector: Codable, Equatable {
     /// Optional redacted geometry digest for repeated descriptors whose
     /// structural ancestry is still identical. Raw bounds remain in-process.
     public let geometryDigest: String?
+    /// Optional redacted structural neighborhood digest. It is recomputed
+    /// from the live Accessibility tree before an action and never dispatches
+    /// anything during verification or resolution.
+    public let structuralDigest: String?
     public let title: String?
     public let subrole: String?
     public let containsText: String?
@@ -725,6 +729,7 @@ public struct Selector: Codable, Equatable {
         locatorDigest: String? = nil,
         ancestorDigest: String? = nil,
         geometryDigest: String? = nil,
+        structuralDigest: String? = nil,
         title: String? = nil,
         subrole: String? = nil,
         containsText: String? = nil,
@@ -741,6 +746,7 @@ public struct Selector: Codable, Equatable {
         self.locatorDigest = locatorDigest
         self.ancestorDigest = ancestorDigest
         self.geometryDigest = geometryDigest
+        self.structuralDigest = structuralDigest
         self.title = title
         self.subrole = subrole
         self.containsText = containsText
@@ -754,7 +760,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var addressability: SelectorAddressability {
-        if role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || title != nil || subrole != nil
+        if role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || structuralDigest != nil || title != nil || subrole != nil
             || windowTitle != nil || windowIdentifier != nil {
             return .accessibility
         }
@@ -781,7 +787,7 @@ public struct Selector: Codable, Equatable {
     }
 
     public var hasTarget: Bool {
-        role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || title != nil || subrole != nil
+        role != nil || identifier != nil || locatorDigest != nil || ancestorDigest != nil || geometryDigest != nil || structuralDigest != nil || title != nil || subrole != nil
             || containsText != nil || imageAnchor != nil
             || (normalizedX != nil && normalizedY != nil)
             || (rawX != nil && rawY != nil)

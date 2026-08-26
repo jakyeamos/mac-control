@@ -17,6 +17,7 @@ public struct TaskCapabilityVerificationEvaluation: Equatable {
     public let reason: String
     public let targetMatchCount: Int
     public let targetLocatorDigests: [String]
+    public let targetStructuralDigests: [String]
     public let observedActions: [String]
     public let coverageComplete: Bool
 
@@ -25,6 +26,7 @@ public struct TaskCapabilityVerificationEvaluation: Equatable {
         reason: String,
         targetMatchCount: Int = 0,
         targetLocatorDigests: [String] = [],
+        targetStructuralDigests: [String] = [],
         observedActions: [String] = [],
         coverageComplete: Bool = false
     ) {
@@ -32,6 +34,7 @@ public struct TaskCapabilityVerificationEvaluation: Equatable {
         self.reason = reason
         self.targetMatchCount = max(0, targetMatchCount)
         self.targetLocatorDigests = Array(Set(targetLocatorDigests)).sorted()
+        self.targetStructuralDigests = Array(Set(targetStructuralDigests)).sorted()
         self.observedActions = Array(Set(observedActions)).sorted()
         self.coverageComplete = coverageComplete
     }
@@ -67,6 +70,7 @@ public struct TaskCapabilityVerificationReport: Codable, Equatable {
     public let profileState: CapabilityProfileState?
     public let targetMatchCount: Int
     public let targetLocatorDigests: [String]
+    public let targetStructuralDigests: [String]
     public let observedActions: [String]
     public let reason: String
     public let recommendedProvider: String?
@@ -74,6 +78,34 @@ public struct TaskCapabilityVerificationReport: Codable, Equatable {
     public let nativeActionReplayAllowed: Bool
     public let nextAction: String?
     public let handoffPlan: AgentProviderHandoffPlan?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case application
+        case taskID
+        case targetFingerprintDigest
+        case route
+        case state
+        case readOnly
+        case actionDispatched
+        case postconditionKind
+        case postconditionDigest
+        case treeSignature
+        case treeNodeCount
+        case treeTruncated
+        case coverageComplete
+        case profileState
+        case targetMatchCount
+        case targetLocatorDigests
+        case targetStructuralDigests
+        case observedActions
+        case reason
+        case recommendedProvider
+        case freshStateRequired
+        case nativeActionReplayAllowed
+        case nextAction
+        case handoffPlan
+    }
 
     public init(
         application: WarmPathApplicationIdentity,
@@ -90,6 +122,7 @@ public struct TaskCapabilityVerificationReport: Codable, Equatable {
         profileState: CapabilityProfileState?,
         targetMatchCount: Int,
         targetLocatorDigests: [String],
+        targetStructuralDigests: [String] = [],
         observedActions: [String],
         reason: String,
         recommendedProvider: String? = nil,
@@ -116,6 +149,7 @@ public struct TaskCapabilityVerificationReport: Codable, Equatable {
         self.profileState = profileState
         self.targetMatchCount = max(0, targetMatchCount)
         self.targetLocatorDigests = Array(Set(targetLocatorDigests)).sorted()
+        self.targetStructuralDigests = Array(Set(targetStructuralDigests)).sorted()
         self.observedActions = Array(Set(observedActions)).sorted()
         self.reason = reason
         self.recommendedProvider = recommendedProvider
@@ -123,6 +157,35 @@ public struct TaskCapabilityVerificationReport: Codable, Equatable {
         self.nativeActionReplayAllowed = nativeActionReplayAllowed
         self.nextAction = nextAction
         self.handoffPlan = handoffPlan
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        application = try container.decode(WarmPathApplicationIdentity.self, forKey: .application)
+        taskID = try container.decode(String.self, forKey: .taskID)
+        targetFingerprintDigest = try container.decode(String.self, forKey: .targetFingerprintDigest)
+        route = try container.decode(ControlActionRoute.self, forKey: .route)
+        state = try container.decode(TaskCapabilityVerificationState.self, forKey: .state)
+        readOnly = try container.decode(Bool.self, forKey: .readOnly)
+        actionDispatched = try container.decode(Bool.self, forKey: .actionDispatched)
+        postconditionKind = try container.decodeIfPresent(String.self, forKey: .postconditionKind)
+        postconditionDigest = try container.decodeIfPresent(String.self, forKey: .postconditionDigest)
+        treeSignature = try container.decodeIfPresent(String.self, forKey: .treeSignature)
+        treeNodeCount = try container.decode(Int.self, forKey: .treeNodeCount)
+        treeTruncated = try container.decode(Bool.self, forKey: .treeTruncated)
+        coverageComplete = try container.decode(Bool.self, forKey: .coverageComplete)
+        profileState = try container.decodeIfPresent(CapabilityProfileState.self, forKey: .profileState)
+        targetMatchCount = try container.decode(Int.self, forKey: .targetMatchCount)
+        targetLocatorDigests = try container.decode([String].self, forKey: .targetLocatorDigests)
+        targetStructuralDigests = try container.decodeIfPresent([String].self, forKey: .targetStructuralDigests) ?? []
+        observedActions = try container.decode([String].self, forKey: .observedActions)
+        reason = try container.decode(String.self, forKey: .reason)
+        recommendedProvider = try container.decodeIfPresent(String.self, forKey: .recommendedProvider)
+        freshStateRequired = try container.decode(Bool.self, forKey: .freshStateRequired)
+        nativeActionReplayAllowed = try container.decode(Bool.self, forKey: .nativeActionReplayAllowed)
+        nextAction = try container.decodeIfPresent(String.self, forKey: .nextAction)
+        handoffPlan = try container.decodeIfPresent(AgentProviderHandoffPlan.self, forKey: .handoffPlan)
     }
 }
 
@@ -182,6 +245,7 @@ public enum TaskCapabilityVerificationMatcher {
         }
         let complete = coverageComplete && !tree.truncated
         let locatorDigests = matchedNodes.map { $0.1.identityDigest }
+        let structuralDigests = matchedNodes.compactMap { $0.0.structuralDigest }
         let actions = matchedNodes.flatMap { $0.0.actions }
         guard !matchedNodes.isEmpty else {
             return TaskCapabilityVerificationEvaluation(
@@ -196,6 +260,7 @@ public enum TaskCapabilityVerificationMatcher {
                 reason: "target_ambiguous",
                 targetMatchCount: matchedNodes.count,
                 targetLocatorDigests: locatorDigests,
+                targetStructuralDigests: structuralDigests,
                 observedActions: actions,
                 coverageComplete: complete
             )
@@ -207,6 +272,7 @@ public enum TaskCapabilityVerificationMatcher {
                 reason: "bounded_surface_incomplete",
                 targetMatchCount: 1,
                 targetLocatorDigests: [locator.identityDigest],
+                targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                 observedActions: node.actions,
                 coverageComplete: false
             )
@@ -217,6 +283,7 @@ public enum TaskCapabilityVerificationMatcher {
                 reason: "target_not_actionable",
                 targetMatchCount: 1,
                 targetLocatorDigests: [locator.identityDigest],
+                targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                 observedActions: node.actions,
                 coverageComplete: true
             )
@@ -241,6 +308,7 @@ public enum TaskCapabilityVerificationMatcher {
                         : "accessibility_activation_action_unavailable",
                     targetMatchCount: 1,
                     targetLocatorDigests: [locator.identityDigest],
+                    targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                     observedActions: node.actions,
                     coverageComplete: true
                 )
@@ -252,6 +320,7 @@ public enum TaskCapabilityVerificationMatcher {
                     reason: "scroll_target_role_unavailable",
                     targetMatchCount: 1,
                     targetLocatorDigests: [locator.identityDigest],
+                    targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                     observedActions: node.actions,
                     coverageComplete: true
                 )
@@ -264,6 +333,7 @@ public enum TaskCapabilityVerificationMatcher {
                     reason: "scroll_action_unavailable",
                     targetMatchCount: 1,
                     targetLocatorDigests: [locator.identityDigest],
+                    targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                     observedActions: node.actions,
                     coverageComplete: true
                 )
@@ -279,6 +349,7 @@ public enum TaskCapabilityVerificationMatcher {
                 reason: "precise_postcondition_required",
                 targetMatchCount: 1,
                 targetLocatorDigests: [locator.identityDigest],
+                targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
                 observedActions: node.actions,
                 coverageComplete: true
             )
@@ -288,6 +359,7 @@ public enum TaskCapabilityVerificationMatcher {
             reason: "unique_actionable_surface_observed",
             targetMatchCount: 1,
             targetLocatorDigests: [locator.identityDigest],
+            targetStructuralDigests: node.structuralDigest.map { [$0] } ?? [],
             observedActions: node.actions,
             coverageComplete: true
         )
@@ -311,6 +383,10 @@ public enum TaskCapabilityVerificationMatcher {
         }
         if let geometryDigest = selector.geometryDigest,
            locator.geometryDigest != geometryDigest {
+            return false
+        }
+        if let structuralDigest = selector.structuralDigest,
+           node.structuralDigest != structuralDigest {
             return false
         }
         return true

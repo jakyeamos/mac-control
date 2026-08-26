@@ -44,6 +44,11 @@ public struct AccessibilityTreeNode: Codable, Equatable {
     public let bounds: CGRect?
     public let childCount: Int
     public let scrollable: Bool
+    /// A redacted digest of the node's structural neighborhood. It is derived
+    /// from roles, actions, child counts, ancestor/sibling structure, and
+    /// parent-relative geometry; labels, values, screenshots, and AX handles
+    /// are never part of this evidence.
+    public let structuralDigest: String?
 
     public init(
         path: String,
@@ -56,7 +61,8 @@ public struct AccessibilityTreeNode: Codable, Equatable {
         state: AccessibilityTreeNodeState,
         bounds: CGRect?,
         childCount: Int,
-        scrollable: Bool
+        scrollable: Bool,
+        structuralDigest: String? = nil
     ) {
         self.path = path
         self.depth = depth
@@ -69,6 +75,7 @@ public struct AccessibilityTreeNode: Codable, Equatable {
         self.bounds = bounds
         self.childCount = childCount
         self.scrollable = scrollable
+        self.structuralDigest = structuralDigest
     }
 }
 
@@ -162,10 +169,185 @@ public struct AccessibilityTreeReport: Codable, Equatable {
         self.nodeCount = nodeCount
         self.truncated = truncated
         self.redacted = redacted
-        self.nodes = nodes
+        let structuralEvidenceComplete = !truncated && (coverage?.complete ?? true)
+        // A structural digest is useful only when the bounded report has the
+        // complete neighborhood needed to compute it. Incomplete reports keep
+        // their original nodes so a partial observation cannot be reused as a
+        // false unique target proof.
+        self.nodes = AccessibilityStructuralEvidence.annotate(
+            nodes,
+            enabled: structuralEvidenceComplete
+        )
         self.identifierMatchCounts = identifierMatchCounts
         self.nameMatchCounts = nameMatchCounts
         self.coverage = coverage
+    }
+}
+
+/// Builds stable, non-dispatching structural evidence for an Accessibility
+/// node. The digest intentionally excludes visible labels and AX values so a
+/// playback control can remain addressable while its Play/Pause state changes.
+/// It also excludes traversal paths and raw coordinates; only the immediate
+/// neighborhood and geometry normalized to the parent are used.
+enum AccessibilityStructuralEvidence {
+    private static let version = "accessibility-structural-v1"
+    private static let maximumAncestors = 16
+
+    static func annotate(
+        _ nodes: [AccessibilityTreeNode],
+        enabled: Bool
+    ) -> [AccessibilityTreeNode] {
+        guard enabled else { return nodes }
+        let nodesByPath = Dictionary(uniqueKeysWithValues: nodes.map { ($0.path, $0) })
+        return nodes.map { node in
+            guard node.structuralDigest == nil,
+                  let digest = digest(for: node, nodesByPath: nodesByPath) else {
+                return node
+            }
+            return AccessibilityTreeNode(
+                path: node.path,
+                depth: node.depth,
+                role: node.role,
+                subrole: node.subrole,
+                identifier: node.identifier,
+                label: node.label,
+                actions: node.actions,
+                state: node.state,
+                bounds: node.bounds,
+                childCount: node.childCount,
+                scrollable: node.scrollable,
+                structuralDigest: digest
+            )
+        }
+    }
+
+    static func digest(
+        for node: AccessibilityTreeNode,
+        nodesByPath: [String: AccessibilityTreeNode]
+    ) -> String? {
+        guard let parentPathValue = parentPath(of: node.path),
+              parentPathValue != "0",
+              let parent = nodesByPath[parentPathValue] else {
+            // The recursive application root (`0`) is a traversal anchor. A
+            // digest that depends on it would disagree with the windowed and
+            // live resolvers, which begin at the concrete AX window.
+            return nil
+        }
+
+        let ancestors = ancestorNodes(
+            startingAt: parentPathValue,
+            nodesByPath: nodesByPath
+        )
+        let siblings = nodesByPath.values
+            .filter {
+                $0.path != node.path
+                    && parentPath(of: $0.path) == parentPathValue
+            }
+            .map(structuralSignature)
+            .sorted()
+
+        return makeDigest(
+            targetSignature: structuralSignature(node),
+            parentSignature: structuralSignature(parent),
+            ancestorSignatures: ancestors.map(structuralSignature),
+            siblingSignatures: siblings,
+            relativeGeometry: relativeGeometry(
+                nodeBounds: node.bounds,
+                parentBounds: parent.bounds
+            )
+        )
+    }
+
+    static func makeDigest(
+        targetSignature: String,
+        parentSignature: String,
+        ancestorSignatures: [String],
+        siblingSignatures: [String],
+        relativeGeometry: String?
+    ) -> String {
+        CapabilityProfileDigest.make([
+            version,
+            "target=\(targetSignature)",
+            "parent=\(parentSignature)",
+            "ancestors=\(ancestorSignatures.suffix(maximumAncestors).joined(separator: ";"))",
+            "siblings=\(siblingSignatures.sorted().joined(separator: ";"))",
+            "relative=\(relativeGeometry ?? "unavailable")"
+        ].joined(separator: "|"))
+    }
+
+    static func structuralSignature(
+        role: String?,
+        subrole: String?,
+        actions: [String],
+        childCount: Int,
+        scrollable: Bool
+    ) -> String {
+        [
+            role ?? "",
+            subrole ?? "",
+            actions.sorted().joined(separator: ","),
+            String(max(0, childCount)),
+            scrollable ? "1" : "0"
+        ].joined(separator: "/")
+    }
+
+    static func relativeGeometry(
+        nodeBounds: CGRect?,
+        parentBounds: CGRect?
+    ) -> String? {
+        guard let nodeBounds, let parentBounds,
+              parentBounds.width > 0,
+              parentBounds.height > 0,
+              nodeBounds.minX.isFinite,
+              nodeBounds.minY.isFinite,
+              nodeBounds.width.isFinite,
+              nodeBounds.height.isFinite,
+              parentBounds.minX.isFinite,
+              parentBounds.minY.isFinite,
+              parentBounds.width.isFinite,
+              parentBounds.height.isFinite else {
+            return nil
+        }
+        let values = [
+            (nodeBounds.minX - parentBounds.minX) / parentBounds.width,
+            (nodeBounds.minY - parentBounds.minY) / parentBounds.height,
+            nodeBounds.width / parentBounds.width,
+            nodeBounds.height / parentBounds.height
+        ]
+        return values
+            .map { String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), Double($0)) }
+            .joined(separator: ",")
+    }
+
+    private static func structuralSignature(_ node: AccessibilityTreeNode) -> String {
+        structuralSignature(
+            role: node.role,
+            subrole: node.subrole,
+            actions: node.actions,
+            childCount: node.childCount,
+            scrollable: node.scrollable
+        )
+    }
+
+    private static func ancestorNodes(
+        startingAt path: String,
+        nodesByPath: [String: AccessibilityTreeNode]
+    ) -> [AccessibilityTreeNode] {
+        var paths: [String] = []
+        var current: String? = path
+        while let value = current,
+              paths.count < maximumAncestors {
+            if value != "0", nodesByPath[value] != nil {
+                paths.append(value)
+            }
+            current = parentPath(of: value)
+        }
+        return paths.reversed().compactMap { nodesByPath[$0] }
+    }
+
+    private static func parentPath(of path: String) -> String? {
+        guard let separator = path.lastIndex(of: "/") else { return nil }
+        return String(path[..<separator])
     }
 }
 

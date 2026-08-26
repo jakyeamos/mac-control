@@ -233,7 +233,7 @@ stores only `foreground_oracle=foreground_unchanged` and the redacted
 
 Agent-facing control discovery and batching are available through:
 `control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]`,
-`control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role>`,
+`control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role> [--structural-digest <digest>]`,
 `control capability-audit-batch --all-applicable [--run-id <id>] [--max-apps <n>]`,
 and `control batch --app <app> --actions-stdin --confirm`. Capability output
 classifies the app descriptively and distinguishes fresh daemon-executed routes
@@ -258,6 +258,13 @@ returns `needs_postcondition`; a unique actionable target with both returns
 `ready_for_measurement`. Missing, incomplete, ambiguous, presentation-only,
 unsupported, or not-running results remain candidates and preserve a redacted
 Computer Use handoff with fresh state and readback; native replay is disabled.
+A complete tree can expose `structuralDigest` for a repeated control such as a
+Spotify playback button. It is a redacted SHA-256 neighborhood digest over
+roles, subroles, actions, child counts, ancestor/sibling shape, and
+parent-relative geometry; labels, values, screenshots, paths, and AX handles
+are excluded. The verifier and later resolver recompute it without dispatching,
+and a missing, stale, incomplete, or non-unique structural match remains on the
+Computer Use handoff.
 Batching owns one bounded app lease, revalidates every step, stops on the first
 unverified action, and releases the lease on every exit path. Semantic scroll
 remains an explicit `control perform` action so a Computer Use handoff is visible.

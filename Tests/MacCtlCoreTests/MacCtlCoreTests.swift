@@ -49,6 +49,24 @@ final class MacCtlCoreTests: XCTestCase {
         XCTAssertEqual(Selector(rawX: 100, rawY: 200).addressability, .rawCoordinate)
         XCTAssertEqual(Selector(locatorDigest: "audit-locator").addressability, .accessibility)
         XCTAssertTrue(Selector(locatorDigest: "audit-locator").hasTarget)
+        let structuralSelector = Selector(
+            role: "AXButton",
+            structuralDigest: String(repeating: "a", count: 64)
+        )
+        XCTAssertEqual(structuralSelector.addressability, .accessibility)
+        XCTAssertTrue(structuralSelector.hasTarget)
+    }
+
+    func testStructuralSelectorRoundTripsWithoutVisibleText() throws {
+        let selector = Selector(
+            role: "AXButton",
+            structuralDigest: String(repeating: "b", count: 64)
+        )
+
+        XCTAssertEqual(
+            try JSONCodec.decode(Selector.self, from: JSONCodec.encode(selector)),
+            selector
+        )
     }
 
     func testAuditLocatorDigestRoundTripsIntoActionSelectors() throws {

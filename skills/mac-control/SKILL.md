@@ -588,6 +588,13 @@ surfaces remain candidates and include a redacted Computer Use handoff with fres
 state, unique relocation, provider-native action, and postcondition readback steps.
 `native_action_replay_allowed=false` remains a hard boundary. Rendered web content
 still belongs to the browser connector.
+When a complete audit exposes a repeated control whose label changes with state,
+such as Spotify Play/Pause, pass its redacted `structuralDigest` with
+`--structural-digest <digest>`. The digest is derived from roles, subroles,
+actions, child counts, ancestor/sibling shape, and parent-relative geometry; it
+does not include labels, values, screenshots, paths, or AX handles. Verification
+and the later resolver recompute it without dispatching. Missing, stale,
+incomplete, or non-unique structural evidence keeps the Computer Use handoff.
 
 As part of this off-critical-path audit, inspect both the current bundle overlay's declared
 app-disclosure signals and general app-owned capability surfaces. The generic scanner recognizes

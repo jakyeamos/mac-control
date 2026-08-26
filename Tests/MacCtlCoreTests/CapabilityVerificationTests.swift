@@ -82,6 +82,83 @@ final class CapabilityVerificationTests: XCTestCase {
         XCTAssertTrue(incomplete.requiresComputerUseHandoff)
     }
 
+    func testMatcherUsesStableStructuralEvidenceForSpotifyPlaybackControl() throws {
+        let app = spotifyApplication()
+        let playingTree = makeSpotifyPlaybackTree(application: app, playbackLabel: "Play")
+        let playingNode = try XCTUnwrap(playingTree.nodes.first { $0.path == "0/0/0" })
+        let structuralDigest = try XCTUnwrap(playingNode.structuralDigest)
+        XCTAssertEqual(structuralDigest.count, 64)
+        XCTAssertNotNil(structuralDigest.range(of: "^[0-9a-f]{64}$", options: .regularExpression))
+
+        let pausedTree = makeSpotifyPlaybackTree(application: app, playbackLabel: "Pause")
+        let pausedNode = try XCTUnwrap(pausedTree.nodes.first { $0.path == "0/0/0" })
+        XCTAssertEqual(pausedNode.structuralDigest, structuralDigest)
+
+        let evaluation = TaskCapabilityVerificationMatcher.evaluate(
+            selector: Selector(role: "AXButton", structuralDigest: structuralDigest),
+            route: .accessibility,
+            tree: pausedTree,
+            postconditionKind: "playback_state_changed",
+            postconditionDigest: String(repeating: "a", count: 64),
+            coverageComplete: true
+        )
+        XCTAssertEqual(evaluation.state, .readyForMeasurement)
+        XCTAssertEqual(evaluation.targetMatchCount, 1)
+        XCTAssertEqual(evaluation.targetStructuralDigests, [structuralDigest])
+        XCTAssertFalse(evaluation.requiresComputerUseHandoff)
+
+        let incompleteCoverage = AccessibilityTreeCoverage(
+            mode: "windowed_pages",
+            windowCount: 1,
+            pageCount: 1,
+            pages: [],
+            omittedPageCount: 1,
+            complete: false
+        )
+        let incompleteTree = makeSpotifyPlaybackTree(
+            application: app,
+            playbackLabel: "Pause",
+            coverage: incompleteCoverage
+        )
+        XCTAssertNil(incompleteTree.nodes.first { $0.path == "0/0/0" }?.structuralDigest)
+        let incompleteEvaluation = TaskCapabilityVerificationMatcher.evaluate(
+            selector: Selector(role: "AXButton", structuralDigest: structuralDigest),
+            route: .accessibility,
+            tree: incompleteTree,
+            postconditionKind: "playback_state_changed",
+            postconditionDigest: String(repeating: "c", count: 64),
+            coverageComplete: false
+        )
+        XCTAssertEqual(incompleteEvaluation.state, .candidate)
+        XCTAssertEqual(incompleteEvaluation.reason, "bounded_surface_incomplete")
+        XCTAssertTrue(incompleteEvaluation.requiresComputerUseHandoff)
+    }
+
+    func testMatcherKeepsComputerUseWhenStructuralEvidenceIsNotUnique() throws {
+        let app = spotifyApplication()
+        let tree = makeSpotifyPlaybackTree(
+            application: app,
+            playbackLabel: "Play",
+            duplicateGeometry: true
+        )
+        let structuralDigest = try XCTUnwrap(
+            tree.nodes.first { $0.path == "0/0/0" }?.structuralDigest
+        )
+        let evaluation = TaskCapabilityVerificationMatcher.evaluate(
+            selector: Selector(role: "AXButton", structuralDigest: structuralDigest),
+            route: .accessibility,
+            tree: tree,
+            postconditionKind: "playback_state_changed",
+            postconditionDigest: String(repeating: "b", count: 64),
+            coverageComplete: true
+        )
+
+        XCTAssertEqual(evaluation.state, .ambiguous)
+        XCTAssertEqual(evaluation.targetMatchCount, 2)
+        XCTAssertEqual(evaluation.targetStructuralDigests, [structuralDigest])
+        XCTAssertTrue(evaluation.requiresComputerUseHandoff)
+    }
+
     func testServiceRecordsCandidateObservationWithoutDispatchingAction() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("macctl-capability-verification-(UUID().uuidString)", isDirectory: true)
@@ -254,6 +331,99 @@ final class CapabilityVerificationTests: XCTestCase {
             isRunning: true,
             processID: 404,
             bundleVersion: "26.803.61601"
+        )
+    }
+
+    private func spotifyApplication() -> AppInfo {
+        AppInfo(
+            name: "Spotify",
+            bundleID: "com.spotify.client",
+            path: "/Applications/Spotify.app",
+            isRunning: true,
+            processID: 505,
+            bundleVersion: "1.2.96.518"
+        )
+    }
+
+    private func makeSpotifyPlaybackTree(
+        application: AppInfo,
+        playbackLabel: String,
+        duplicateGeometry: Bool = false,
+        coverage: AccessibilityTreeCoverage? = nil
+    ) -> AccessibilityTreeReport {
+        let state = AccessibilityTreeNodeState(
+            enabled: true,
+            focused: false,
+            selected: false,
+            expanded: nil,
+            visible: true,
+            settable: false,
+            hasValue: false
+        )
+        let root = AccessibilityTreeNode(
+            path: "0",
+            depth: 0,
+            role: "AXApplication",
+            subrole: nil,
+            identifier: nil,
+            label: nil,
+            actions: [],
+            state: state,
+            bounds: nil,
+            childCount: 1,
+            scrollable: false
+        )
+        let playbackBar = AccessibilityTreeNode(
+            path: "0/0",
+            depth: 1,
+            role: "AXGroup",
+            subrole: nil,
+            identifier: nil,
+            label: nil,
+            actions: [],
+            state: state,
+            bounds: CGRect(x: 0, y: 800, width: 1200, height: 80),
+            childCount: 2,
+            scrollable: false
+        )
+        let play = AccessibilityTreeNode(
+            path: "0/0/0",
+            depth: 2,
+            role: "AXButton",
+            subrole: nil,
+            identifier: nil,
+            label: playbackLabel,
+            actions: ["AXPress"],
+            state: state,
+            bounds: CGRect(x: 1080, y: 820, width: 32, height: 32),
+            childCount: 0,
+            scrollable: false
+        )
+        let next = AccessibilityTreeNode(
+            path: "0/0/1",
+            depth: 2,
+            role: "AXButton",
+            subrole: nil,
+            identifier: nil,
+            label: "Next",
+            actions: ["AXPress"],
+            state: state,
+            bounds: duplicateGeometry
+                ? CGRect(x: 1080, y: 820, width: 32, height: 32)
+                : CGRect(x: 1130, y: 820, width: 32, height: 32),
+            childCount: 0,
+            scrollable: false
+        )
+        return AccessibilityTreeReport(
+            application: application,
+            maxNodes: 20,
+            maxDepth: 5,
+            nodeCount: 4,
+            truncated: false,
+            nodes: [root, playbackBar, play, next],
+            identifierMatchCounts: [:],
+            nameMatchCounts: [playbackLabel: 1, "Next": 1],
+            coverage: coverage
         )
     }
 

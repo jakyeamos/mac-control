@@ -417,6 +417,7 @@ struct CLI {
                 ("--locator-digest", "locatorDigest"),
                 ("--ancestor-digest", "ancestorDigest"),
                 ("--geometry-digest", "geometryDigest"),
+                ("--structural-digest", "structuralDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -750,6 +751,7 @@ struct CLI {
                 ("--locator-digest", "locatorDigest"),
                 ("--ancestor-digest", "ancestorDigest"),
                 ("--geometry-digest", "geometryDigest"),
+                ("--structural-digest", "structuralDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -912,6 +914,7 @@ struct CLI {
                 ("--locator-digest", "locatorDigest"),
                 ("--ancestor-digest", "ancestorDigest"),
                 ("--geometry-digest", "geometryDigest"),
+                ("--structural-digest", "structuralDigest"),
                 ("--title", "title"),
                 ("--subrole", "subrole"),
                 ("--contains-text", "containsText"),
@@ -1805,7 +1808,7 @@ struct CLI {
         macctl control hands-off status
         macctl control capabilities --app <app> [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>]
         macctl control capability-audit --app <app> [--max-nodes N] [--max-depth N]
-        macctl control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role> [--identifier <id> | --locator-digest <digest>] [--postcondition-kind <kind> --postcondition-digest <sha256>]
+        macctl control capability-verify --app <app> --task <id> --target-fingerprint <fingerprint> --route accessibility|scroll --role <role> [--identifier <id> | --locator-digest <digest> | --structural-digest <digest>] [--postcondition-kind <kind> --postcondition-digest <sha256>]
         macctl control capability-audit-batch --all-applicable [--max-apps N] [--run-id ID]
         macctl control capability-audit-batch --apps <app[,app...]> [--max-apps N]
         macctl control batch --app <app> --actions-stdin --confirm [--focus-policy automatic|foreground|background] [--target-surface mac-app-ui|web-content] [--task <id> --target-fingerprint <fingerprint>] [--hands-off-session-id <id>]

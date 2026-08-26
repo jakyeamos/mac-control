@@ -864,15 +864,24 @@ with native replay disabled. When the initial recursive surface is truncated,
 the verifier records bounded adaptive retries and window-aware/page traversal
 metadata before matching; incomplete coverage still remains a candidate.
 Rendered web content remains a browser-connector task.
+For controls whose visible label changes with state, such as Spotify's
+Play/Pause control, a complete audit node can provide `structuralDigest`; pass
+that redacted digest with `--structural-digest <digest>` alongside the role.
+The digest uses stable neighborhood structure and parent-relative geometry, not
+the label or AX value, so Play and Pause can resolve to the same control. The
+daemon recomputes the evidence before any action; missing, stale, incomplete,
+or non-unique matches retain the Computer Use handoff.
 A fresh locator's `identityDigest` can be passed back through
 `control perform --locator-digest <digest>` (optionally combined with role,
 subrole, identifier, window scope, and the locator's redacted
-`ancestorDigest` and optional `geometryDigest`). The ancestor digest
-disambiguates repeated local descriptors inside one window, while the geometry
-digest is a redacted digest of the element bounds; raw coordinates, visible
-ancestor text, and AX element references are never persisted. The daemon
-recomputes the complete redacted descriptor, ancestor chain, and geometry from
-the live AX tree and fails closed unless exactly one current element matches,
+`ancestorDigest`, optional `geometryDigest`, or optional `structuralDigest`).
+The ancestor digest disambiguates repeated local descriptors inside one window,
+the geometry digest is a redacted digest of the element bounds, and the
+structural digest covers the target's redacted neighborhood without labels or
+values; raw coordinates, visible ancestor text, and AX element references are
+never persisted. The daemon recomputes the complete redacted descriptor,
+ancestor chain, geometry, and structural neighborhood from the live AX tree and
+fails closed unless exactly one current element matches,
 closing the audit-to-action handoff. If duplicate scroll locators remain after
 these discriminators, the broad semantic-scroll capability stays a candidate
 until task-specific evidence resolves the ambiguity. A role-only
@@ -1159,7 +1168,8 @@ with a unique `AXScrollArea` selector. An identifier is preferred, but optional
 when role-only resolution returns exactly one container. If repeated scroll
 containers share the same local descriptor, pass both the audit's
 `identityDigest` and `ancestorDigest`; when the audit reports repeated
-structural matches, also pass its redacted `geometryDigest`. Mac Control
+structural matches, also pass its redacted `geometryDigest` or
+`structuralDigest`. Mac Control
 verifies that the selected container can still be resolved after the action:
 
 ```sh

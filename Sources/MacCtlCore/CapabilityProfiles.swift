@@ -139,6 +139,9 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
     /// coordinates never leave the process; tree changes invalidate profiles
     /// that depend on this descriptor.
     public let geometryDigest: String?
+    /// Redacted structural neighborhood evidence for repeated controls whose
+    /// role/identity/ancestor/geometry descriptors are still not unique.
+    public let structuralDigest: String?
     public let identityDigest: String
 
     public init(
@@ -150,6 +153,7 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         scrollable: Bool = false,
         ancestorDigest: String? = nil,
         geometryDigest: String? = nil,
+        structuralDigest: String? = nil,
         identityDigest: String? = nil
     ) {
         self.role = role
@@ -160,6 +164,7 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         self.scrollable = scrollable
         self.ancestorDigest = ancestorDigest
         self.geometryDigest = geometryDigest
+        self.structuralDigest = structuralDigest
         self.identityDigest = identityDigest ?? CapabilityProfileDigest.make([
             role ?? "",
             subrole ?? "",
@@ -185,7 +190,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             actions: treeNode.actions,
             scrollable: treeNode.scrollable,
             ancestorDigest: ancestorDigest,
-            geometryDigest: treeNode.bounds.map(CapabilityProfileDigest.geometry)
+            geometryDigest: treeNode.bounds.map(CapabilityProfileDigest.geometry),
+            structuralDigest: treeNode.structuralDigest
         )
     }
 
@@ -197,7 +203,8 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
         actions: [String],
         scrollable: Bool,
         ancestorDigest: String? = nil,
-        geometryDigest: String? = nil
+        geometryDigest: String? = nil,
+        structuralDigest: String? = nil
     ) -> CapabilityLocatorDescriptor {
         CapabilityLocatorDescriptor(
             role: role,
@@ -207,13 +214,15 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             actions: actions,
             scrollable: scrollable,
             ancestorDigest: ancestorDigest,
-            geometryDigest: geometryDigest
+            geometryDigest: geometryDigest,
+            structuralDigest: structuralDigest
         )
     }
 
     public static func from(selector: Selector, route: ControlActionRoute) -> CapabilityLocatorDescriptor? {
         guard selector.role != nil || selector.identifier != nil || selector.locatorDigest != nil
-            || selector.ancestorDigest != nil || selector.geometryDigest != nil || selector.title != nil else {
+            || selector.ancestorDigest != nil || selector.geometryDigest != nil
+            || selector.structuralDigest != nil || selector.title != nil else {
             return nil
         }
         let actions: [String]
@@ -234,6 +243,7 @@ public struct CapabilityLocatorDescriptor: Codable, Equatable {
             scrollable: route == .scroll,
             ancestorDigest: selector.ancestorDigest,
             geometryDigest: selector.geometryDigest,
+            structuralDigest: selector.structuralDigest,
             identityDigest: selector.locatorDigest
         )
     }
@@ -658,7 +668,8 @@ public enum CapabilityProfileBuilder {
                 node.actions.sorted().joined(separator: ","),
                 node.scrollable ? "1" : "0",
                 node.bounds.map(CapabilityProfileDigest.geometry) ?? "",
-                String(node.childCount)
+                String(node.childCount),
+                node.structuralDigest ?? ""
             ].joined(separator: "|")
         }.joined(separator: "||")
         let coverage = tree.coverage?.signature ?? "recursive"
@@ -1228,7 +1239,7 @@ public enum CapabilityProfileBuilder {
         var seen = Set<String>()
         return locators.filter {
             seen.insert(
-                "\($0.identityDigest)|\($0.ancestorDigest ?? "")|\($0.geometryDigest ?? "")"
+                "\($0.identityDigest)|\($0.ancestorDigest ?? "")|\($0.geometryDigest ?? "")|\($0.structuralDigest ?? "")"
             ).inserted
         }
     }
@@ -1238,7 +1249,7 @@ public enum CapabilityProfileBuilder {
     ) -> Bool {
         var counts: [String: Int] = [:]
         for locator in locators {
-            let key = "\(locator.identityDigest)|\(locator.ancestorDigest ?? "")|\(locator.geometryDigest ?? "")"
+            let key = "\(locator.identityDigest)|\(locator.ancestorDigest ?? "")|\(locator.geometryDigest ?? "")|\(locator.structuralDigest ?? "")"
             counts[key, default: 0] += 1
         }
         return counts.values.contains { $0 > 1 }
