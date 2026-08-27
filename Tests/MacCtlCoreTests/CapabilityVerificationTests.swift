@@ -111,8 +111,8 @@ final class CapabilityVerificationTests: XCTestCase {
             mode: "windowed_pages",
             windowCount: 1,
             pageCount: 1,
-            pages: [],
             omittedPageCount: 1,
+            pages: [],
             complete: false
         )
         let incompleteTree = makeSpotifyPlaybackTree(
