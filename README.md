@@ -45,7 +45,14 @@ The first command installs `macctl` at `~/.local/bin/macctl` and packages the
 daemon at `~/.local/share/macctl/macctld.app`. The second command installs and
 loads the user LaunchAgent, which executes the bundle's
 `Contents/MacOS/macctld` binary. Use `~/.local/bin/macctl daemon restart` after
-rebuilding and reinstalling.
+rebuilding and reinstalling. When the plist is still present but launchd
+explicitly reports that the job is missing, use
+`~/.local/bin/macctl daemon ensure --json` for an idempotent registration
+repair. It bootstraps only that explicitly missing job, never boots out a
+registered job, and verifies the installed/runtime parity, owner-only socket,
+and daemon identity before reporting success. A registered-but-unhealthy or
+unclassified launchd state returns `daemon_registration_failed` without trying
+to repair it.
 
 Every binary install, LaunchAgent install, restart, and removal first asks the
 live daemon for a short atomic lifecycle drain. Pending proposals,
@@ -82,6 +89,7 @@ install.
 swift run macctl install
 ~/.local/bin/macctl daemon install
 swift run macctl daemon status
+~/.local/bin/macctl daemon ensure --json
 ~/.local/bin/macctl daemon restart
 ~/.local/bin/macctl daemon remove
 ```

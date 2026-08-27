@@ -104,6 +104,9 @@ class MacControlSkillTests(unittest.TestCase):
             "owner-only file per submission",
             "forces the candidate\nstate to `unproven`",
             "reviewed source-controlled ledger",
+            "macctl daemon ensure --json",
+            "daemon_registration_failed",
+            "registered-but-unhealthy",
         ):
             self.assertIn(marker, text)
 
@@ -177,6 +180,9 @@ class MacControlSkillTests(unittest.TestCase):
             "menu state unchanged",
             "marker-bound unique-bundle fixture",
             "`action resolve` then one-shot `action run`",
+            "LaunchAgent plist exists but `launchctl print` explicitly reports the job is missing",
+            "daemon ensure --json",
+            "daemon_registration_failed",
         ):
             self.assertIn(marker, text)
 

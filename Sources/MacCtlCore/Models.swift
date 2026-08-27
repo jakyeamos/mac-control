@@ -1380,6 +1380,7 @@ public enum MacCtlErrorCode: String {
     case unsupportedMethod = "unsupported_method"
     case daemonUnavailable = "daemon_unavailable"
     case daemonLifecycleBlocked = "daemon_lifecycle_blocked"
+    case daemonRegistrationFailed = "daemon_registration_failed"
     case workflowNotFound = "workflow_not_found"
     case workflowInvalid = "workflow_invalid"
     case permissionDenied = "permission_denied"

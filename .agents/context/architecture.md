@@ -75,6 +75,14 @@ are the durable evidence boundary. TCC permissions, launchd, and the Aqua
 session remain user-controlled external systems; unsupported providers are not
 silently substituted into this boundary.
 
+LaunchAgent registration repair is a separate lifecycle boundary. The explicit
+`macctl daemon ensure` path may bootstrap only an installed plist whose
+`launchctl print` result explicitly identifies the job as missing, and then
+verifies the registered job, installed/runtime parity, owner-only socket, and
+daemon identity. It never boots out a registered job; unclassified and
+registered-but-unhealthy observations remain typed blockers for an explicit
+owner-directed repair.
+
 Local sibling providers may use `approval.external.prepare -> status -> consume`
 for the same human-decision boundary without receiving Mac Control's private
 approval token. The daemon retains a session-only record bound to the exact

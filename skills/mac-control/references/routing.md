@@ -46,6 +46,7 @@ documentation, and test change.
 | Fast capability discovery is needed before routing | `control capabilities` | Probe route metadata and read a cached broad profile without walking AX. |
 | A fresh native task surface needs bounded verification before routing | `control capability-verify` | Observe one bounded structural AX surface; use a redacted structural neighborhood digest for repeated state-changing controls when complete evidence makes it unique, require an exact postcondition digest before readiness, and preserve Computer Use for candidate, ambiguous, or unsupported results. |
 | Live app process state is needed for targeting | Daemon-backed `app list` or exact `app instances` | A socket-unavailable or sandbox-blind catalog is unknown/blocked, never evidence that the app is stopped. |
+| The LaunchAgent plist exists but `launchctl print` explicitly reports the job is missing | `macctl daemon ensure --json` | Bootstrap only the explicitly missing registration, then verify LaunchAgent identity, runtime parity, owner-only transport, and daemon identity; registered or unclassified states remain `daemon_registration_failed`. |
 | Known limitation preflight is needed before considering Mac Control | `control limitations` | Read the local versioned call/no-call ledger without daemon or Accessibility probing. |
 | A new boundary was observed and should be retained for review | `control limitations propose --stdin` | Append one owner-only `unproven` candidate without mutating the canonical ledger. |
 | Review candidates already recorded by agents | `control limitations proposals` | Read the append-only candidate store; candidates have no routing or execution authority. |
@@ -81,6 +82,10 @@ documentation, and test change.
   Supply the exact postcondition kind and SHA-256 digest before treating a unique actionable
   target as ready; otherwise preserve the redacted Computer Use handoff and do not replay a
   native action.
+- Repair only the exact stale registration split: use `macctl daemon ensure --json` when
+  the plist exists and `launchctl print` explicitly says the job is missing. It is not a
+  substitute for reinstalling a changed package or restarting a registered-but-unhealthy
+  daemon, and it must return `daemon_registration_failed` for an unclassified state.
 - Press one identifier-addressable control in a known background window: use the action-intent
   front door only when the exact PID/instance/window tuple and a same-window desired-state
   selector are available; consume the short-lived resolution once and do not fall back.

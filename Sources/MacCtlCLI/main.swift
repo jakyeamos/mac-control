@@ -69,21 +69,30 @@ struct CLI {
                 throw CLIError.usage("Unknown command: \(command)")
             }
         } catch {
-            let lifecycleFailure: Bool
+            let responseStatus: OperationStatus
+            let errorCode: String
+            let errorDetails: [String: JSONValue]
             switch error {
             case LaunchAgentError.lifecycleBlocked, LaunchAgentError.lifecycleInterlockUnavailable:
-                lifecycleFailure = true
+                responseStatus = .blocked
+                errorCode = MacCtlErrorCode.daemonLifecycleBlocked.rawValue
+                errorDetails = [:]
+            case LaunchAgentError.registrationFailed(_, let details):
+                responseStatus = .blocked
+                errorCode = MacCtlErrorCode.daemonRegistrationFailed.rawValue
+                errorDetails = details
             default:
-                lifecycleFailure = false
+                responseStatus = .failed
+                errorCode = "cli_error"
+                errorDetails = [:]
             }
             let response = ResponseEnvelope(
                 requestID: UUID().uuidString,
-                status: lifecycleFailure ? .blocked : .failed,
+                status: responseStatus,
                 error: MacCtlError(
-                    code: lifecycleFailure
-                        ? MacCtlErrorCode.daemonLifecycleBlocked.rawValue
-                        : "cli_error",
-                    message: error.localizedDescription
+                    code: errorCode,
+                    message: error.localizedDescription,
+                    details: errorDetails
                 )
             )
             return render(response)
@@ -1580,7 +1589,7 @@ struct CLI {
 
     private func runDaemon(_ args: [String]) throws -> Int32 {
         guard let subcommand = args.first else {
-            throw CLIError.usage("Usage: macctl daemon install|remove|restart|status")
+            throw CLIError.usage("Usage: macctl daemon install|ensure|remove|restart|status")
         }
         let manager = LaunchAgentManager(lifecycleInterlock: DaemonLifecycleInterlock(
             allowLegacyIdleSnapshot: args.contains("--allow-legacy-idle-snapshot")
@@ -1597,10 +1606,12 @@ struct CLI {
             return renderValue(try manager.remove())
         case "restart":
             return renderValue(try manager.restart())
+        case "ensure":
+            return renderValue(try manager.ensure())
         case "status":
             return renderValue(manager.status())
         default:
-            throw CLIError.usage("Usage: macctl daemon install|remove|restart|status")
+            throw CLIError.usage("Usage: macctl daemon install|ensure|remove|restart|status")
         }
     }
 
@@ -1837,7 +1848,7 @@ struct CLI {
         macctl task status|cancel <task-id>
         macctl adapter capabilities [--json]
         macctl adapter diagnostics --adapter-id vscode --fixture-id <id> [--max-age-seconds <seconds>] [--json]
-        macctl daemon install|remove|restart|status [--allow-legacy-idle-snapshot]
+        macctl daemon install|ensure|remove|restart|status [--allow-legacy-idle-snapshot]
         macctl logs [--json]
         macctl install [--allow-legacy-idle-snapshot]
         """)

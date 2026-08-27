@@ -7,6 +7,7 @@ restart:
 swift build
 swift run macctl install
 ~/.local/bin/macctl daemon install
+~/.local/bin/macctl daemon ensure --json
 ~/.local/bin/macctl daemon restart
 ~/.local/bin/macctl release check --json
 ```
@@ -18,6 +19,14 @@ persist approval or lease authority across a restart. For the first migration
 from a daemon without this method only, confirm the control center is idle and
 pass `--allow-legacy-idle-snapshot`; remove the flag after the new daemon has
 started.
+
+`daemon ensure` is the narrow registration-repair operation. It reads
+`launchctl` first and calls `bootstrap` only when the installed plist exists and
+launchd explicitly reports the job as missing; it does not boot out or reload a
+registered job. It verifies the resulting LaunchAgent, installed/runtime
+parity, owner-only socket, and daemon identity. Use the explicit install or
+restart path for a changed package or a registered-but-unhealthy daemon; an
+unclassified launchd result remains a typed blocker.
 
 `macctld.app` is installed under `~/.local/share/macctl/` and launched through
 the user `gui/<uid>` `launchd` domain by a LaunchAgent. The stable bundle identity and persisted signing

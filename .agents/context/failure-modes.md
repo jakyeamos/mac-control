@@ -7,6 +7,11 @@ Expected safety outcomes are explicit:
   evidence before retrying.
 - `unknown`: the daemon or socket cannot establish authoritative state. Do not
   infer permission or successful execution from a CLI fallback.
+- `daemon_registration_failed`: `daemon ensure` could not prove the exact
+  plist-present/job-missing condition or could not verify its postcondition. It
+  never bootstraps an unclassified or registered-but-unhealthy job; inspect the
+  machine-readable details and choose an explicit install/restart repair only
+  when the evidence supports it.
 - `approval_expired` or `approval_denied`: create a new plan; never reuse or
   mutate an old token.
 - foreground/focus mismatch: stop the workflow, record verification failure,
@@ -46,8 +51,11 @@ Expected safety outcomes are explicit:
   agents.
 
 Use `doctor --json`, `status --json`, `receipts status --json`, and
-`release check --json` for diagnosis. Recovery may rebuild/reinstall the
-packaged daemon and restart the user LaunchAgent, but must not manufacture
+`release check --json` for diagnosis. For the exact split state where the plist
+exists and `launchctl print` explicitly says the job is missing, recovery may
+use `daemon ensure --json`; other registration failures require the matching
+explicit install/restart path. Recovery may rebuild/reinstall the packaged
+daemon and restart the user LaunchAgent, but must not manufacture
 receipts or alter a device/account to make a gate green. Unsupported provider
 surfaces remain blocked; do not replace them with an unverified local route or
 manufacture live evidence. A foreground handoff, if still necessary, is

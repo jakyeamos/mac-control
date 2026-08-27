@@ -74,6 +74,7 @@ public enum LaunchAgentError: Error, LocalizedError {
     case signingFailed(String)
     case lifecycleBlocked(String)
     case lifecycleInterlockUnavailable(String)
+    case registrationFailed(String, [String: JSONValue])
 
     public var errorDescription: String? {
         switch self {
@@ -91,7 +92,82 @@ public enum LaunchAgentError: Error, LocalizedError {
             return "Daemon lifecycle change blocked: \(message)"
         case .lifecycleInterlockUnavailable(let message):
             return "Could not verify the daemon lifecycle interlock: \(message)"
+        case .registrationFailed(let message, _):
+            return "Daemon registration repair failed: \(message)"
         }
+    }
+}
+
+public enum LaunchAgentRegistrationState: String, Codable, Equatable {
+    case registered
+    case missing
+    case unavailable
+}
+
+public enum LaunchAgentEnsureAction: String, Codable, Equatable {
+    case alreadyRegistered = "already_registered"
+    case bootstrapped
+}
+
+/// Read-only evidence collected after an explicit LaunchAgent registration
+/// repair. The daemon identity is taken from the owner-only status response;
+/// callers cannot supply it as an assertion.
+public struct DaemonRegistrationVerification: Codable, Equatable {
+    public let installedRuntimeParity: InstalledRuntimeParityStatus
+    public let socketExists: Bool
+    public let socketOwnerOnly: Bool
+    public let daemonProcessID: Int32?
+    public let daemonRuntimeContext: String?
+    public let daemonRuntimeIdentity: RuntimeIdentity?
+    public let daemonIdentityMatches: Bool
+    public let verified: Bool
+    public let failureReasons: [String]
+
+    public init(
+        installedRuntimeParity: InstalledRuntimeParityStatus,
+        socketExists: Bool,
+        socketOwnerOnly: Bool,
+        daemonProcessID: Int32? = nil,
+        daemonRuntimeContext: String? = nil,
+        daemonRuntimeIdentity: RuntimeIdentity? = nil,
+        daemonIdentityMatches: Bool,
+        verified: Bool,
+        failureReasons: [String] = []
+    ) {
+        self.installedRuntimeParity = installedRuntimeParity
+        self.socketExists = socketExists
+        self.socketOwnerOnly = socketOwnerOnly
+        self.daemonProcessID = daemonProcessID
+        self.daemonRuntimeContext = daemonRuntimeContext
+        self.daemonRuntimeIdentity = daemonRuntimeIdentity
+        self.daemonIdentityMatches = daemonIdentityMatches
+        self.verified = verified
+        self.failureReasons = failureReasons
+    }
+}
+
+public struct DaemonEnsureReport: Codable, Equatable {
+    public let schemaVersion: String
+    public let action: LaunchAgentEnsureAction
+    public let repairAttempted: Bool
+    public let before: LaunchAgentStatus
+    public let after: LaunchAgentStatus
+    public let verification: DaemonRegistrationVerification
+
+    public init(
+        action: LaunchAgentEnsureAction,
+        repairAttempted: Bool,
+        before: LaunchAgentStatus,
+        after: LaunchAgentStatus,
+        verification: DaemonRegistrationVerification,
+        schemaVersion: String = "daemon-ensure/v1"
+    ) {
+        self.schemaVersion = schemaVersion
+        self.action = action
+        self.repairAttempted = repairAttempted
+        self.before = before
+        self.after = after
+        self.verification = verification
     }
 }
 
@@ -166,21 +242,88 @@ public struct LaunchAgentStatus: Codable, Equatable {
         }
         return parts.joined(separator: ", ")
     }
+
+    /// Distinguishes a launchctl observation that explicitly says the job is
+    /// absent from an observation that could not be trusted. Repair may only
+    /// bootstrap the former.
+    public var registrationState: LaunchAgentRegistrationState {
+        guard launchdLoaded == false else { return .registered }
+        let diagnostic = (spawnError ?? "").lowercased()
+        if diagnostic.contains("could not find service")
+            || diagnostic.contains("service not found")
+            || diagnostic.contains("no such process") {
+            return .missing
+        }
+        return .unavailable
+    }
+}
+
+internal struct LaunchAgentPaths: Equatable {
+    let label: String
+    let launchAgentURL: URL
+    let expectedExecutableURL: URL
+    let logURL: URL
+
+    static let production = LaunchAgentPaths(
+        label: MacCtlPaths.launchAgentLabel,
+        launchAgentURL: MacCtlPaths.launchAgentURL,
+        expectedExecutableURL: MacCtlPaths.daemonAppExecutableURL,
+        logURL: MacCtlPaths.logURL
+    )
 }
 
 public final class LaunchAgentManager {
-    private let fileManager = FileManager.default
+    internal typealias ProcessExecutor = (_ executable: String, _ arguments: [String], _ timeout: TimeInterval) throws -> ProcessResult
+    internal typealias RuntimeVerifier = (_ expectedProcessID: Int32?, _ expectedExecutablePath: String) -> DaemonRegistrationVerification
+
+    private let fileManager: FileManager
     private let lifecycleInterlock: DaemonLifecycleInterlock
+    private let processRunner: ProcessExecutor
+    private let runtimeVerifier: RuntimeVerifier
+    private let paths: LaunchAgentPaths
+    private let verificationTimeout: TimeInterval
+    private let pollInterval: TimeInterval
 
     public init(lifecycleInterlock: DaemonLifecycleInterlock = DaemonLifecycleInterlock()) {
+        self.fileManager = .default
         self.lifecycleInterlock = lifecycleInterlock
+        self.processRunner = { executable, arguments, timeout in
+            try ProcessRunner.run(executable: executable, arguments: arguments, timeout: timeout)
+        }
+        self.runtimeVerifier = { expectedProcessID, expectedExecutablePath in
+            LaunchAgentManager.liveRuntimeVerification(
+                expectedProcessID: expectedProcessID,
+                expectedExecutablePath: expectedExecutablePath
+            )
+        }
+        self.paths = .production
+        self.verificationTimeout = 3
+        self.pollInterval = 0.1
+    }
+
+    internal init(
+        lifecycleInterlock: DaemonLifecycleInterlock = DaemonLifecycleInterlock(),
+        fileManager: FileManager = .default,
+        processRunner: @escaping ProcessExecutor,
+        runtimeVerifier: @escaping RuntimeVerifier,
+        paths: LaunchAgentPaths,
+        verificationTimeout: TimeInterval = 3,
+        pollInterval: TimeInterval = 0.1
+    ) {
+        self.fileManager = fileManager
+        self.lifecycleInterlock = lifecycleInterlock
+        self.processRunner = processRunner
+        self.runtimeVerifier = runtimeVerifier
+        self.paths = paths
+        self.verificationTimeout = verificationTimeout
+        self.pollInterval = pollInterval
     }
 
     public func install(daemonExecutable: String) throws -> LaunchAgentStatus {
         guard fileManager.isExecutableFile(atPath: daemonExecutable) else {
             throw LaunchAgentError.daemonExecutableMissing
         }
-        let expectedPath = URL(fileURLWithPath: MacCtlPaths.daemonAppExecutableURL.path).standardizedFileURL.path
+        let expectedPath = paths.expectedExecutableURL.standardizedFileURL.path
         let suppliedPath = URL(fileURLWithPath: daemonExecutable).standardizedFileURL.path
         guard suppliedPath == expectedPath else {
             throw LaunchAgentError.invalidDaemonIdentity(suppliedPath)
@@ -188,19 +331,19 @@ public final class LaunchAgentManager {
         _ = try lifecycleInterlock.prepare(operation: .install, launchAgentStatus: status())
         try MacCtlPaths.ensureDirectories()
         try fileManager.createDirectory(
-            at: MacCtlPaths.launchAgentURL.deletingLastPathComponent(),
+            at: paths.launchAgentURL.deletingLastPathComponent(),
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
         let dictionary: [String: Any] = [
-            "Label": MacCtlPaths.launchAgentLabel,
+            "Label": paths.label,
             "ProgramArguments": [daemonExecutable],
             "RunAtLoad": true,
             "KeepAlive": true,
             "ProcessType": "Interactive",
             "LimitLoadToSessionType": "Aqua",
-            "StandardOutPath": MacCtlPaths.logURL.path,
-            "StandardErrorPath": MacCtlPaths.logURL.path
+            "StandardOutPath": paths.logURL.path,
+            "StandardErrorPath": paths.logURL.path
         ]
         let data = try PropertyListSerialization.data(
             fromPropertyList: dictionary,
@@ -208,10 +351,10 @@ public final class LaunchAgentManager {
             options: 0
         )
         do {
-            try data.write(to: MacCtlPaths.launchAgentURL, options: .atomic)
+            try data.write(to: paths.launchAgentURL, options: .atomic)
             try fileManager.setAttributes(
                 [.posixPermissions: 0o600],
-                ofItemAtPath: MacCtlPaths.launchAgentURL.path
+                ofItemAtPath: paths.launchAgentURL.path
             )
         } catch {
             throw LaunchAgentError.installFailed(error.localizedDescription)
@@ -222,18 +365,19 @@ public final class LaunchAgentManager {
     public func remove() throws -> LaunchAgentStatus {
         _ = try lifecycleInterlock.prepare(operation: .remove, launchAgentStatus: status())
         let domain = "gui/\(getuid())"
-        _ = try? ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["bootout", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
+        _ = try? processRunner(
+            "/bin/launchctl",
+            ["bootout", "\(domain)/\(paths.label)"],
+            10
         )
-        if fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path) {
-            try fileManager.removeItem(at: MacCtlPaths.launchAgentURL)
+        if fileManager.fileExists(atPath: paths.launchAgentURL.path) {
+            try fileManager.removeItem(at: paths.launchAgentURL)
         }
         return status()
     }
 
     public func restart() throws -> LaunchAgentStatus {
-        guard fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path) else {
+        guard fileManager.fileExists(atPath: paths.launchAgentURL.path) else {
             throw LaunchAgentError.launchctlFailed("LaunchAgent plist is not installed")
         }
         _ = try lifecycleInterlock.prepare(operation: .restart, launchAgentStatus: status())
@@ -242,38 +386,147 @@ public final class LaunchAgentManager {
 
     public func status() -> LaunchAgentStatus {
         let configuredExecutablePath = configuredExecutablePath()
-        let launchctlResult = try? ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["print", "gui/\(getuid())/\(MacCtlPaths.launchAgentLabel)"]
+        let launchctlResult = try? processRunner(
+            "/bin/launchctl",
+            ["print", "gui/\(getuid())/\(paths.label)"],
+            10
         )
         return LaunchAgentStatus.fromLaunchctlOutput(
-            plistPath: MacCtlPaths.launchAgentURL.path,
-            installed: fileManager.fileExists(atPath: MacCtlPaths.launchAgentURL.path),
+            plistPath: paths.launchAgentURL.path,
+            installed: fileManager.fileExists(atPath: paths.launchAgentURL.path),
             configuredExecutablePath: configuredExecutablePath,
-            expectedExecutablePath: MacCtlPaths.daemonAppExecutableURL.path,
+            expectedExecutablePath: paths.expectedExecutableURL.path,
             launchctlStatus: launchctlResult?.status ?? -1,
             output: launchctlResult?.stdout ?? "",
             stderr: launchctlResult?.stderr ?? ""
         )
     }
 
+    /// Idempotently repairs only the split state where the LaunchAgent plist
+    /// exists but launchd explicitly reports that the job is missing. A
+    /// registered-but-unhealthy job is observed and reported; it is never
+    /// booted out or retried by this command.
+    public func ensure() throws -> DaemonEnsureReport {
+        let before = status()
+        switch before.registrationState {
+        case .registered:
+            let verification = runtimeVerifier(before.processID, before.expectedExecutablePath)
+            let report = DaemonEnsureReport(
+                action: .alreadyRegistered,
+                repairAttempted: false,
+                before: before,
+                after: before,
+                verification: verification
+            )
+            guard launchAgentReady(before), verification.verified else {
+                throw registrationFailure(
+                    "LaunchAgent is registered but its health or runtime identity could not be verified",
+                    before: before,
+                    after: before,
+                    verification: verification,
+                    repairAttempted: false
+                )
+            }
+            return report
+
+        case .unavailable:
+            throw registrationFailure(
+                "launchd did not explicitly report the job as missing; no bootstrap was attempted",
+                before: before,
+                repairAttempted: false
+            )
+
+        case .missing:
+            guard before.installed else {
+                throw registrationFailure(
+                    "LaunchAgent plist is not installed; run macctl daemon install first",
+                    before: before,
+                    repairAttempted: false
+                )
+            }
+            guard let configuredPath = before.configuredExecutablePath,
+                  normalizedPath(configuredPath) == normalizedPath(before.expectedExecutablePath) else {
+                throw registrationFailure(
+                    "LaunchAgent plist does not point to the packaged daemon executable",
+                    before: before,
+                    repairAttempted: false
+                )
+            }
+            guard fileManager.isExecutableFile(atPath: before.expectedExecutablePath) else {
+                throw registrationFailure(
+                    "The packaged daemon executable is missing or not executable",
+                    before: before,
+                    repairAttempted: false
+                )
+            }
+
+            _ = try lifecycleInterlock.prepare(operation: .install, launchAgentStatus: before)
+            let domain = "gui/\(getuid())"
+            let bootstrapResult: ProcessResult
+            do {
+                bootstrapResult = try processRunner(
+                    "/bin/launchctl",
+                    ["bootstrap", domain, paths.launchAgentURL.path],
+                    10
+                )
+            } catch {
+                throw registrationFailure(
+                    "launchctl bootstrap could not be started: \(error.localizedDescription)",
+                    before: before,
+                    repairAttempted: true
+                )
+            }
+            guard bootstrapResult.status == 0 else {
+                let diagnostic = bootstrapResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw registrationFailure(
+                    diagnostic.isEmpty
+                        ? "launchctl bootstrap exited with status \(bootstrapResult.status)"
+                        : diagnostic,
+                    before: before,
+                    repairAttempted: true
+                )
+            }
+
+            let (after, verification) = waitForBootstrappedVerification()
+            let report = DaemonEnsureReport(
+                action: .bootstrapped,
+                repairAttempted: true,
+                before: before,
+                after: after,
+                verification: verification
+            )
+            guard launchAgentReady(after), verification.verified else {
+                throw registrationFailure(
+                    "bootstrap completed but the LaunchAgent postcondition was not verified",
+                    before: before,
+                    after: after,
+                    verification: verification,
+                    repairAttempted: true
+                )
+            }
+            return report
+        }
+    }
+
     private func reconcile() throws -> LaunchAgentStatus {
         let domain = "gui/\(getuid())"
-        _ = try? ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["bootout", "\(domain)/\(MacCtlPaths.launchAgentLabel)"]
+        _ = try? processRunner(
+            "/bin/launchctl",
+            ["bootout", "\(domain)/\(paths.label)"],
+            10
         )
-        let result = try ProcessRunner.run(
-            executable: "/bin/launchctl",
-            arguments: ["bootstrap", domain, MacCtlPaths.launchAgentURL.path]
+        let result = try processRunner(
+            "/bin/launchctl",
+            ["bootstrap", domain, paths.launchAgentURL.path],
+            10
         )
         guard result.status == 0 else {
             throw LaunchAgentError.launchctlFailed(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         var current = status()
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(verificationTimeout)
         while !current.loaded && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            RunLoop.current.run(until: Date().addingTimeInterval(pollInterval))
             current = status()
         }
         guard current.loaded else {
@@ -390,10 +643,10 @@ public final class LaunchAgentManager {
         }
 
         do {
-            let signingResult = try ProcessRunner.run(
-                executable: "/usr/bin/codesign",
-                arguments: ["--force", "--deep", "--sign", signingIdentity.hash, stagingURL.path],
-                timeout: 30
+            let signingResult = try processRunner(
+                "/usr/bin/codesign",
+                ["--force", "--deep", "--sign", signingIdentity.hash, stagingURL.path],
+                30
             )
             guard signingResult.status == 0 else {
                 let message = signingResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -417,7 +670,7 @@ public final class LaunchAgentManager {
     }
 
     private func configuredExecutablePath() -> String? {
-        guard let data = try? Data(contentsOf: MacCtlPaths.launchAgentURL),
+        guard let data = try? Data(contentsOf: paths.launchAgentURL),
               let propertyList = try? PropertyListSerialization.propertyList(
                   from: data,
                   options: [],
@@ -428,6 +681,151 @@ public final class LaunchAgentManager {
             return nil
         }
         return arguments.first
+    }
+
+    private func launchAgentReady(_ status: LaunchAgentStatus) -> Bool {
+        status.installed
+            && status.registrationState == .registered
+            && status.loaded
+            && status.healthy
+            && status.identityMatches
+            && status.processID != nil
+            && status.configuredExecutablePath.map(normalizedPath) == normalizedPath(status.expectedExecutablePath)
+            && status.activeExecutablePath.map(normalizedPath) == normalizedPath(status.expectedExecutablePath)
+            && status.spawnError == nil
+            && (status.lastExitCode == nil || status.lastExitCode == 0)
+    }
+
+    private func waitForBootstrappedVerification() -> (LaunchAgentStatus, DaemonRegistrationVerification) {
+        var current = status()
+        var verification = runtimeVerifier(current.processID, current.expectedExecutablePath)
+        let deadline = Date().addingTimeInterval(verificationTimeout)
+        while Date() < deadline && (!launchAgentReady(current) || !verification.verified) {
+            RunLoop.current.run(until: Date().addingTimeInterval(pollInterval))
+            current = status()
+            verification = runtimeVerifier(current.processID, current.expectedExecutablePath)
+        }
+        return (current, verification)
+    }
+
+    private func registrationFailure(
+        _ message: String,
+        before: LaunchAgentStatus,
+        after: LaunchAgentStatus? = nil,
+        verification: DaemonRegistrationVerification? = nil,
+        repairAttempted: Bool
+    ) -> LaunchAgentError {
+        var details: [String: JSONValue] = [
+            "repair_attempted": .bool(repairAttempted),
+            "before_registration_state": .string(before.registrationState.rawValue)
+        ]
+        if let beforeValue = try? JSONValue.fromEncodable(before) {
+            details["before"] = beforeValue
+        }
+        if let after {
+            details["after_registration_state"] = .string(after.registrationState.rawValue)
+            if let afterValue = try? JSONValue.fromEncodable(after) {
+                details["after"] = afterValue
+            }
+        }
+        if let verification,
+           let verificationValue = try? JSONValue.fromEncodable(verification) {
+            details["runtime_verification"] = verificationValue
+        }
+        return .registrationFailed(message, details)
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        Self.normalizedPath(path)
+    }
+
+    private static func liveRuntimeVerification(
+        expectedProcessID: Int32?,
+        expectedExecutablePath: String
+    ) -> DaemonRegistrationVerification {
+        let parity = InstalledRuntimeParity.evaluate(expectedProcessID: expectedProcessID)
+        var failures: [String] = []
+        if parity.state != "current" {
+            failures.append("installed_runtime_parity_\(parity.state)")
+        }
+
+        let socketExists = FileManager.default.fileExists(atPath: MacCtlPaths.socketURL.path)
+        let socketOwnerOnly = socketExists && MacCtlPaths.ownerOnlySocketPath()
+        if !socketExists {
+            failures.append("daemon_socket_missing")
+        } else if !socketOwnerOnly {
+            failures.append("daemon_socket_not_owner_only")
+        }
+
+        var daemonProcessID: Int32?
+        var daemonRuntimeContext: String?
+        var daemonRuntimeIdentity: RuntimeIdentity?
+        var daemonStatus: DaemonStatus?
+        if socketExists && socketOwnerOnly {
+            do {
+                let response = try UnixSocketClient().send(RequestEnvelope(method: "status"))
+                guard response.status == .succeeded else {
+                    failures.append("daemon_status_request_failed")
+                    return DaemonRegistrationVerification(
+                        installedRuntimeParity: parity,
+                        socketExists: socketExists,
+                        socketOwnerOnly: socketOwnerOnly,
+                        daemonIdentityMatches: false,
+                        verified: false,
+                        failureReasons: failures
+                    )
+                }
+                daemonStatus = try JSONCodec.decode(
+                    DaemonStatus.self,
+                    from: JSONCodec.encode(response.result)
+                )
+                daemonProcessID = daemonStatus?.processID
+                daemonRuntimeContext = daemonStatus?.runtimeContext
+                daemonRuntimeIdentity = daemonStatus?.runtimeIdentity
+            } catch {
+                failures.append("daemon_status_unavailable")
+            }
+        }
+
+        let daemonIdentityMatches: Bool
+        if let daemonStatus {
+            let identity = daemonStatus.runtimeIdentity
+            daemonIdentityMatches = daemonStatus.daemonName == "macctld"
+                && daemonStatus.runtimeContext == "daemon"
+                && daemonStatus.processID == expectedProcessID
+                && identity.processID == daemonStatus.processID
+                && identity.executablePath == expectedExecutablePath
+                && identity.bundlePath == MacCtlPaths.daemonAppURL.path
+                && identity.bundleIdentifier == MacCtlDaemonBundle.bundleIdentifier
+                && daemonStatus.socketPath == MacCtlPaths.socketURL.path
+                && daemonStatus.socketExists
+                && daemonStatus.socketOwnerOnly
+            if !daemonIdentityMatches {
+                failures.append("daemon_identity_mismatch")
+            }
+        } else {
+            daemonIdentityMatches = false
+        }
+
+        return DaemonRegistrationVerification(
+            installedRuntimeParity: parity,
+            socketExists: socketExists,
+            socketOwnerOnly: socketOwnerOnly,
+            daemonProcessID: daemonProcessID,
+            daemonRuntimeContext: daemonRuntimeContext,
+            daemonRuntimeIdentity: daemonRuntimeIdentity,
+            daemonIdentityMatches: daemonIdentityMatches,
+            verified: parity.state == "current"
+                && socketExists
+                && socketOwnerOnly
+                && daemonIdentityMatches
+                && failures.isEmpty,
+            failureReasons: failures
+        )
     }
 }
 

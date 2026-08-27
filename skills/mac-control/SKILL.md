@@ -240,6 +240,14 @@ Access prerequisite is `blocked`; follow the returned recovery instructions. Do 
 Full Keyboard Access, change TCC permissions, or install persistent components without the
 user's authority.
 
+For a stale split installation where the LaunchAgent plist remains but the user
+`launchd` domain explicitly reports that the job is missing, use the owner-controlled
+repair command `macctl daemon ensure --json`. It may call `bootstrap` once, then verifies
+LaunchAgent identity, installed/runtime parity, the owner-only socket, and the daemon's
+runtime identity. It never boots out a registered job. A registered-but-unhealthy or
+unclassified launchd result returns the typed `daemon_registration_failed` blocker; do
+not turn `daemon status` into a mutating repair or retry an ambiguous result.
+
 For the bounded showcase target, preview the product-owned synthetic research-session plan
 before attempting any live action:
 

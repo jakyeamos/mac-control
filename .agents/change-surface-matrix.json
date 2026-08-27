@@ -107,6 +107,41 @@
         "macctl release check --json",
         "direct Spotify capability verification probe when the daemon and Accessibility surface are available"
       ]
+    },
+    {
+      "type": "change",
+      "reason": "Added an explicit idempotent daemon registration repair path for the stale split state where the LaunchAgent plist remains but launchd has unregistered the job. The path bootstraps only an explicitly missing job, never boots out a registered job, and verifies LaunchAgent identity, runtime parity, owner-only transport, and daemon identity; the committed capability-verification test initializer was also repaired so the SwiftPM gate remains compilable.",
+      "surfaces": [
+        "Sources/MacCtlCore/LaunchAgentManager.swift",
+        "Sources/MacCtlCore/Models.swift",
+        "Sources/MacCtlCLI/main.swift",
+        "Tests/MacCtlCoreTests/LaunchAgentManagerTests.swift",
+        "Tests/MacCtlCoreTests/CapabilityVerificationTests.swift",
+        "README.md",
+        ".agents/context/architecture.md",
+        ".agents/context/commands.md",
+        ".agents/context/deployment.md",
+        ".agents/context/failure-modes.md",
+        "skills/mac-control/SKILL.md",
+        "skills/mac-control/references/routing.md",
+        "Tests/SkillTests/test_mac_control_skill.py",
+        "~/.agents/skills/mac-control/SKILL.md",
+        "~/.codex/skills/mac-control/"
+      ],
+      "validation": [
+        "swift build",
+        "swift test --filter LaunchAgentManagerTests",
+        "swift test --filter CapabilityVerificationTests",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py",
+        "python3 scripts/install_mac_control_skill.py install",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "swift run macctl control limitations --json",
+        "swift run macctl daemon ensure --json when launchd is already registered",
+        "swift run macctl release check --json"
+      ]
     }
   ]
 }

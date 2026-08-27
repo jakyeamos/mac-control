@@ -36,6 +36,13 @@ execution, and in-flight mutation block the drain. The explicit
 `--allow-legacy-idle-snapshot` option is only for the first upgrade from a
 pre-interlock daemon after owner-visible idle verification.
 
+`macctl daemon ensure --json` is a separate, idempotent registration repair.
+It bootstraps only when `launchctl print` explicitly reports the installed job
+as missing, then verifies the LaunchAgent, runtime parity, owner-only socket,
+and daemon identity. It never boots out a registered job; registered-but-
+unhealthy and unclassified launchd observations return the typed
+`daemon_registration_failed` blocker.
+
 Before any Mac Control assessment, use the zero-probe local ledger:
 `swift run macctl control limitations --json`. It reports the versioned
 `do_not_call`, `handoff_only`, and `call_with_constraints` boundaries without
@@ -56,7 +63,9 @@ projection gate; a repository-only skill update is a deployment gap.
 
 For read-only runtime diagnostics, use the built CLI only after the package
 build: `swift run macctl doctor --json`, `capabilities --json`, `status
---json`, `receipts status --json`, and `release check --json`. Release checks
+--json`, `receipts status --json`, and `release check --json`. `daemon ensure`
+is not a read-only diagnostic; it may bootstrap a missing LaunchAgent.
+Release checks
 must not manufacture live evidence or run workflows as a side effect. The
 `installed.runtime_parity` check compares the installer and daemon-start
 manifests with the active LaunchAgent PID and live executable, reporting
