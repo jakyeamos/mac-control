@@ -1,6 +1,9 @@
 {
   "schema_version": "change-surface-matrix/v1",
-  "subject": {"kind": "repository", "id": "mac-control"},
+  "subject": {
+    "kind": "repository",
+    "id": "mac-control"
+  },
   "owner": "repository-owner",
   "last_reviewed": "2026-08-26",
   "surfaces": [
@@ -10,7 +13,11 @@
       "path": ".agents/change-surface-matrix.json",
       "owner": "repository-owner",
       "condition": "A material feature, functionality, behavior, CLI/API, workflow, data, integration, security/privacy, or quality/release change is added or changed.",
-      "operations": ["add", "change", "remove"],
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
       "validation": [
         "Update this matrix in the same change with affected surfaces, contracts, documentation, tests, evidence, owners, and projections.",
         "For a purely internal refactor or isolated fix with no matrix impact, record a reviewed no-impact reason in the same change record; omission is not an implicit no-impact decision.",
@@ -18,22 +25,240 @@
       ],
       "status": "applicable"
     },
-    {"id": "swift-control-plane", "scope": "local", "path": "Sources/, Tests/, and scripts/", "owner": "repository-owner", "condition": "CLI, daemon, authority, action, or verification behavior changes", "operations": ["add", "change", "remove"], "validation": ["swift build", "swift test", "swift test --filter VSCodeDiagnosticsTests", "python3 scripts/check_environment_contract.py"], "status": "applicable"},
-    {"id": "external-provider-approval-broker", "scope": "local-and-external", "path": "Sources/MacCtlCore/ExternalApprovalStore.swift, Sources/MacCtlCore/MacCtlService.swift, Sources/MacCtlCore/Models.swift, Tests/MacCtlCoreTests/ExternalApprovalStoreTests.swift, README.md, AGENTS.md, .agents/context/, skills/mac-control/SKILL.md, and sibling provider integrations", "owner": "Mac Control and sibling-provider integration owners", "condition": "External provider approval metadata, binding, review, status, consumption, expiry, replay, documentation, or projection behavior changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter ExternalApprovalStoreTests", "swift test", "python3 -m unittest discover -s Tests/SkillTests", "python3 scripts/check_global_mac_control_projection.py", "direct installed prepare, approve or deny, exact-bound consume, and replay rejection verification"], "status": "applicable"},
-    {"id": "capability-limitations-ledger", "scope": "local", "path": "Sources/MacCtlCore/CapabilityLimitations.swift, Sources/MacCtlCore/ControlCapabilities.swift, Sources/MacCtlCore/MacCtlService.swift, Sources/MacCtlCore/Paths.swift, Sources/MacCtlCLI/main.swift, Tests/MacCtlCoreTests/, Tests/SkillTests/, README.md, AGENTS.md, .agents/context/, skills/mac-control/, and docs/MAC_CONTROL_ROADMAP.md", "owner": "repository-owner", "condition": "Known Mac Control call/no-call boundary, provider handoff, or limitations-ledger behavior changes", "operations": ["add", "change", "remove"], "validation": ["swift build", "swift test", "python3 -m unittest discover -s Tests/SkillTests", "python3 scripts/check_environment_contract.py"], "status": "applicable"},
-    {"id": "capability-limitations-proposal-lane", "scope": "local", "path": "Sources/MacCtlCore/CapabilityLimitations.swift, Sources/MacCtlCore/OwnerOnlyFileStore.swift, Sources/MacCtlCore/Paths.swift, Sources/MacCtlCLI/main.swift, Tests/MacCtlCoreTests/, Tests/SkillTests/, README.md, AGENTS.md, .agents/context/, skills/mac-control/, scripts/install_mac_control_skill.py, scripts/check_global_mac_control_projection.py, and docs/MAC_CONTROL_ROADMAP.md", "owner": "repository-owner", "condition": "Agent contribution, append-only persistence, review boundary, or trigger/projection behavior for newly observed Mac Control limitations changes", "operations": ["add", "change", "remove"], "validation": ["swift build", "swift test --filter LimitationProposal", "python3 -m unittest discover -s Tests/SkillTests", "python3 scripts/check_environment_contract.py", "python3 scripts/install_mac_control_skill.py check", "python3 scripts/check_global_mac_control_projection.py", "macctl control limitations --json", "macctl control limitations proposals --json"], "status": "applicable"},
-    {"id": "global-mac-control-instructions", "scope": "external", "path": "~/.agents/skills/mac-control/SKILL.md and ~/.codex/skills/mac-control/", "owner": "agent-runtime/installation-owner", "condition": "Mac Control agent skill, proposal lane, routing workflow, or trigger changes", "operations": ["add", "change", "remove"], "validation": ["python3 scripts/install_mac_control_skill.py install", "python3 scripts/install_mac_control_skill.py check", "python3 scripts/check_global_mac_control_projection.py", "python3 -m unittest discover -s Tests/SkillTests", "macctl control limitations --json", "macctl control limitations proposals --json"], "status": "applicable"},
-    {"id": "transient-safety-status-item", "scope": "local", "path": "Sources/MacCtlCore/ApprovalHUD.swift, Sources/MacCtlCore/ControlCenter.swift, Sources/MacCtlDaemon/main.swift, Tests/MacCtlCoreTests/ControlCenterTests.swift, README.md, AGENTS.md, .agents/context/, and skills/mac-control/SKILL.md", "owner": "repository-owner", "condition": "Menu-bar visibility, active-authority safety controls, health/lifecycle presentation, attention ownership, or Accessibility identifiers change", "operations": ["change", "remove"], "validation": ["swift test --filter ControlCenterTests", "swift test", "direct installed GUI verification of hidden idle, visible active authority, Stop & Release, lifecycle drain, and degraded health"], "status": "applicable"},
-    {"id": "installed-control-surface", "scope": "external", "path": "installed macctl, daemon, canonical ~/.agents/skills/mac-control/, and projected ~/.codex/skills/mac-control/", "owner": "installation-owner", "condition": "public command, protocol, install, lifecycle, skill, or trigger contract changes", "operations": ["add", "change", "remove"], "validation": ["python3 -m unittest discover -s Tests/SkillTests", "python3 scripts/install_mac_control_skill.py check", "python3 scripts/check_global_mac_control_projection.py", "macctl control limitations --json", "macctl control limitations proposals --json", "macctl release check --json"], "status": "applicable"},
-    {"id": "installed-runtime-parity", "scope": "external", "path": "Sources/MacCtlCore/InstalledRuntimeParity.swift, Sources/MacCtlCore/LaunchAgentManager.swift, Tests/MacCtlCoreTests/InstalledRuntimeParityTests.swift, README.md, .agents/context/deployment.md, .pronto/installed-runtime-parity.json, owner-only install/process manifests, release check, and Pronto repository projections", "owner": "Mac Control and Pronto integration owners", "condition": "build, signing, install, process identity, PID validation, freshness, or parity state changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter InstalledRuntimeParityTests", "swift test --filter testReleaseGateRequiresEveryTierOneEvidenceDimension", "installed macctl release check --json", "Pronto repo projection readback"], "status": "applicable"},
-    {"id": "ideal-state-consumers", "scope": "external", "path": ".mac-control/ideal-state.json, Quality Runner semantic source grounding, Pronto maturity display, and skills/mac-control/", "owner": "Mac Control, Quality Runner, and Pronto integration owners", "condition": "Ideal-state manifest schema, semantic claim, provider boundary, source-reference, score, or user-facing disposition changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter IdealStateTests", "uv run pytest -q tests/test_mac_control.py in Quality Runner", "Pronto mac_control_maturity tests and readback"], "status": "applicable"},
-    {"id": "vscode-diagnostics-fixture", "scope": "local", "path": "Sources/MacCtlCore/VSCodeDiagnostics.swift, fixtures/vscode-problems-extension/, scripts/vscode_diagnostics_fixture.py, Tests/MacCtlCoreTests/VSCodeDiagnosticsTests.swift, and Tests/BenchmarkTests/test_vscode_diagnostics_fixture.py", "owner": "repository-owner", "condition": "The native VS Code diagnostics adapter or disposable Problems-panel fixture changes", "operations": ["add", "change", "remove"], "validation": ["swift test --filter VSCodeDiagnosticsTests", "python3 -m unittest Tests.BenchmarkTests.test_vscode_diagnostics_fixture", "python3 scripts/vscode_diagnostics_fixture.py status <fixture-id>", "python3 -m unittest Tests.BenchmarkTests.test_vscode_diagnostics_fixture.VSCodeFixtureTests.test_find_vscode_app_accepts_bundle_declared_code_executable"], "status": "applicable"}
+    {
+      "id": "swift-control-plane",
+      "scope": "local",
+      "path": "Sources/, Tests/, and scripts/",
+      "owner": "repository-owner",
+      "condition": "CLI, daemon, authority, action, or verification behavior changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift build",
+        "swift test",
+        "swift test --filter VSCodeDiagnosticsTests",
+        "python3 scripts/check_environment_contract.py"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "external-provider-approval-broker",
+      "scope": "local-and-external",
+      "path": "Sources/MacCtlCore/ExternalApprovalStore.swift, Sources/MacCtlCore/MacCtlService.swift, Sources/MacCtlCore/Models.swift, Tests/MacCtlCoreTests/ExternalApprovalStoreTests.swift, README.md, AGENTS.md, .agents/context/, skills/mac-control/SKILL.md, and sibling provider integrations",
+      "owner": "Mac Control and sibling-provider integration owners",
+      "condition": "External provider approval metadata, binding, review, status, consumption, expiry, replay, documentation, or projection behavior changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter ExternalApprovalStoreTests",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "direct installed prepare, approve or deny, exact-bound consume, and replay rejection verification"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "capability-limitations-ledger",
+      "scope": "local",
+      "path": "Sources/MacCtlCore/CapabilityLimitations.swift, Sources/MacCtlCore/ControlCapabilities.swift, Sources/MacCtlCore/MacCtlService.swift, Sources/MacCtlCore/Paths.swift, Sources/MacCtlCLI/main.swift, Tests/MacCtlCoreTests/, Tests/SkillTests/, README.md, AGENTS.md, .agents/context/, skills/mac-control/, and docs/MAC_CONTROL_ROADMAP.md",
+      "owner": "repository-owner",
+      "condition": "Known Mac Control call/no-call boundary, provider handoff, or limitations-ledger behavior changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift build",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "capability-limitations-proposal-lane",
+      "scope": "local",
+      "path": "Sources/MacCtlCore/CapabilityLimitations.swift, Sources/MacCtlCore/OwnerOnlyFileStore.swift, Sources/MacCtlCore/Paths.swift, Sources/MacCtlCLI/main.swift, Tests/MacCtlCoreTests/, Tests/SkillTests/, README.md, AGENTS.md, .agents/context/, skills/mac-control/, scripts/install_mac_control_skill.py, scripts/check_global_mac_control_projection.py, and docs/MAC_CONTROL_ROADMAP.md",
+      "owner": "repository-owner",
+      "condition": "Agent contribution, append-only persistence, review boundary, or trigger/projection behavior for newly observed Mac Control limitations changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift build",
+        "swift test --filter LimitationProposal",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "macctl control limitations --json",
+        "macctl control limitations proposals --json"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "global-mac-control-instructions",
+      "scope": "external",
+      "path": "~/.agents/skills/mac-control/SKILL.md and ~/.codex/skills/mac-control/",
+      "owner": "agent-runtime/installation-owner",
+      "condition": "Mac Control agent skill, proposal lane, routing workflow, or trigger changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "python3 scripts/install_mac_control_skill.py install",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "macctl control limitations --json",
+        "macctl control limitations proposals --json"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "transient-safety-status-item",
+      "scope": "local",
+      "path": "Sources/MacCtlCore/ApprovalHUD.swift, Sources/MacCtlCore/ControlCenter.swift, Sources/MacCtlDaemon/main.swift, Tests/MacCtlCoreTests/ControlCenterTests.swift, README.md, AGENTS.md, .agents/context/, and skills/mac-control/SKILL.md",
+      "owner": "repository-owner",
+      "condition": "Menu-bar visibility, active-authority safety controls, health/lifecycle presentation, attention ownership, or Accessibility identifiers change",
+      "operations": [
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter ControlCenterTests",
+        "swift test",
+        "direct installed GUI verification of hidden idle, visible active authority, Stop & Release, lifecycle drain, and degraded health"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "installed-control-surface",
+      "scope": "external",
+      "path": "installed macctl, daemon, canonical ~/.agents/skills/mac-control/, and projected ~/.codex/skills/mac-control/",
+      "owner": "installation-owner",
+      "condition": "public command, protocol, install, lifecycle, skill, or trigger contract changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/install_mac_control_skill.py check",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "macctl control limitations --json",
+        "macctl control limitations proposals --json",
+        "macctl release check --json"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "installed-runtime-parity",
+      "scope": "external",
+      "path": "Sources/MacCtlCore/InstalledRuntimeParity.swift, Sources/MacCtlCore/LaunchAgentManager.swift, Tests/MacCtlCoreTests/InstalledRuntimeParityTests.swift, README.md, .agents/context/deployment.md, .pronto/installed-runtime-parity.json, owner-only install/process manifests, release check, and Pronto repository projections",
+      "owner": "Mac Control and Pronto integration owners",
+      "condition": "build, signing, install, process identity, PID validation, freshness, or parity state changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter InstalledRuntimeParityTests",
+        "swift test --filter testReleaseGateRequiresEveryTierOneEvidenceDimension",
+        "installed macctl release check --json",
+        "Pronto repo projection readback"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "ideal-state-consumers",
+      "scope": "external",
+      "path": ".mac-control/ideal-state.json, Quality Runner semantic source grounding, Pronto maturity display, and skills/mac-control/",
+      "owner": "Mac Control, Quality Runner, and Pronto integration owners",
+      "condition": "Ideal-state manifest schema, semantic claim, provider boundary, source-reference, score, or user-facing disposition changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter IdealStateTests",
+        "uv run pytest -q tests/test_mac_control.py in Quality Runner",
+        "Pronto mac_control_maturity tests and readback"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "vscode-diagnostics-fixture",
+      "scope": "local",
+      "path": "Sources/MacCtlCore/VSCodeDiagnostics.swift, fixtures/vscode-problems-extension/, scripts/vscode_diagnostics_fixture.py, Tests/MacCtlCoreTests/VSCodeDiagnosticsTests.swift, and Tests/BenchmarkTests/test_vscode_diagnostics_fixture.py",
+      "owner": "repository-owner",
+      "condition": "The native VS Code diagnostics adapter or disposable Problems-panel fixture changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter VSCodeDiagnosticsTests",
+        "python3 -m unittest Tests.BenchmarkTests.test_vscode_diagnostics_fixture",
+        "python3 scripts/vscode_diagnostics_fixture.py status <fixture-id>",
+        "python3 -m unittest Tests.BenchmarkTests.test_vscode_diagnostics_fixture.VSCodeFixtureTests.test_find_vscode_app_accepts_bundle_declared_code_executable"
+      ],
+      "status": "applicable"
+    },
+    {
+      "id": "source-association",
+      "scope": "local",
+      "path": "README.md; .project-compass/**; source, tests and distribution paths declared by development.json",
+      "owner": "repository-owner",
+      "condition": "Intent, source ownership or proof associations change.",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "Review canonical source constraints and exact affected local oracles.",
+        "Run source-bound Compass completion and independent authoritative QR when enrolled; preserve live and installed proof gaps."
+      ],
+      "status": "applicable"
+    }
   ],
   "unresolved_surfaces": [],
   "operation_evidence": {
-    "add": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift"]},
-    "change": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/MacCtlCoreTests.swift"]},
-    "remove": {"status": "passed", "evidence": ["Tests/MacCtlCoreTests/ControlCenterTests.swift"]}
+    "add": {
+      "status": "passed",
+      "evidence": [
+        "Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift"
+      ]
+    },
+    "change": {
+      "status": "passed",
+      "evidence": [
+        "Tests/MacCtlCoreTests/MacCtlCoreTests.swift"
+      ]
+    },
+    "remove": {
+      "status": "passed",
+      "evidence": [
+        "Tests/MacCtlCoreTests/ControlCenterTests.swift"
+      ]
+    }
   },
   "change_records": [
     {

@@ -1,0 +1,286 @@
+{
+  "schema": "compass-development/v1",
+  "revision": 1,
+  "inventory": {
+    "source": "git-tracked",
+    "include": [
+      ".github/**",
+      "Package.swift",
+      "Sources/**",
+      "Tests/**",
+      "fixtures/**",
+      "scripts/**",
+      "skills/**"
+    ],
+    "exclude": [],
+    "behavior_ref": ".project-compass/behaviors.json"
+  },
+  "bindings": [
+    {
+      "id": "source-reviewed-bootstrap-proposal",
+      "compass_id": "project",
+      "authority": "accepted",
+      "paths": [
+        ".agents/change-surface-matrix.json",
+        ".github/workflows/ci.yml",
+        ".project-compass/behaviors.json",
+        ".project-compass/development.json",
+        "Package.swift",
+        "README.md",
+        "Sources/MacCtlCLI/main.swift",
+        "Sources/MacCtlCore/AccessibilityController.swift",
+        "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
+        "Sources/MacCtlCore/AccessibilityWindowTargeting.swift",
+        "Sources/MacCtlCore/ActionIntent.swift",
+        "Sources/MacCtlCore/AppAdapters.swift",
+        "Sources/MacCtlCore/AppControlProfiles.swift",
+        "Sources/MacCtlCore/AppController.swift",
+        "Sources/MacCtlCore/ApplicationTargeting.swift",
+        "Sources/MacCtlCore/ApprovalHUD.swift",
+        "Sources/MacCtlCore/ApprovalStore.swift",
+        "Sources/MacCtlCore/AuthorizationNotice.swift",
+        "Sources/MacCtlCore/CapabilityAuditBatch.swift",
+        "Sources/MacCtlCore/CapabilityLimitations.swift",
+        "Sources/MacCtlCore/CapabilityProfiles.swift",
+        "Sources/MacCtlCore/CapabilityVerification.swift",
+        "Sources/MacCtlCore/CapsLockMonitor.swift",
+        "Sources/MacCtlCore/CaptureController.swift",
+        "Sources/MacCtlCore/ChromeExtensionShortcutController.swift",
+        "Sources/MacCtlCore/CodeSigning.swift",
+        "Sources/MacCtlCore/ControlCapabilities.swift",
+        "Sources/MacCtlCore/ControlCenter.swift",
+        "Sources/MacCtlCore/ControlSession.swift",
+        "Sources/MacCtlCore/ControlTargeting.swift",
+        "Sources/MacCtlCore/CrossProviderTrace.swift",
+        "Sources/MacCtlCore/DaemonLifecycleInterlock.swift",
+        "Sources/MacCtlCore/ExternalApprovalStore.swift",
+        "Sources/MacCtlCore/FocusSessionExecution.swift",
+        "Sources/MacCtlCore/FocusSessionLayout.swift",
+        "Sources/MacCtlCore/FocusSessionPlan.swift",
+        "Sources/MacCtlCore/FocusSessionVerification.swift",
+        "Sources/MacCtlCore/IdealState.swift",
+        "Sources/MacCtlCore/InputController.swift",
+        "Sources/MacCtlCore/InstalledRuntimeParity.swift",
+        "Sources/MacCtlCore/KeyboardControl.swift",
+        "Sources/MacCtlCore/LaunchAgentManager.swift",
+        "Sources/MacCtlCore/MacCtlService.swift",
+        "Sources/MacCtlCore/MenuCommandController.swift",
+        "Sources/MacCtlCore/Models.swift",
+        "Sources/MacCtlCore/NativeWindowManagement.swift",
+        "Sources/MacCtlCore/OperationReceiptStore.swift",
+        "Sources/MacCtlCore/OwnerOnlyFileStore.swift",
+        "Sources/MacCtlCore/Paths.swift",
+        "Sources/MacCtlCore/Permissions.swift",
+        "Sources/MacCtlCore/PhysicalKeyboardSuppression.swift",
+        "Sources/MacCtlCore/ReleaseEvidenceArchive.swift",
+        "Sources/MacCtlCore/ReleaseGate.swift",
+        "Sources/MacCtlCore/SearchAction.swift",
+        "Sources/MacCtlCore/ShortcutBindingStore.swift",
+        "Sources/MacCtlCore/ShortcutChord.swift",
+        "Sources/MacCtlCore/ShortcutDirectExecutor.swift",
+        "Sources/MacCtlCore/ShortcutEngine.swift",
+        "Sources/MacCtlCore/ShortcutModels.swift",
+        "Sources/MacCtlCore/ShortcutPredicateObserver.swift",
+        "Sources/MacCtlCore/ShortcutProvisioning.swift",
+        "Sources/MacCtlCore/TaskApprovalStore.swift",
+        "Sources/MacCtlCore/TaskCheckpointStore.swift",
+        "Sources/MacCtlCore/TaskControl.swift",
+        "Sources/MacCtlCore/TaskRunner.swift",
+        "Sources/MacCtlCore/UnixSocket.swift",
+        "Sources/MacCtlCore/VSCodeDiagnostics.swift",
+        "Sources/MacCtlCore/Version.swift",
+        "Sources/MacCtlCore/WarmPaths.swift",
+        "Sources/MacCtlCore/WorkflowExecutor.swift",
+        "Sources/MacCtlCore/WorkflowRegistry.swift",
+        "Sources/MacCtlDaemon/main.swift",
+        "Tests/BenchmarkTests/test_background_action_fixture.py",
+        "Tests/BenchmarkTests/test_control_benchmark.py",
+        "Tests/BenchmarkTests/test_vscode_diagnostics_fixture.py",
+        "Tests/BenchmarkTests/test_vscode_fixture.py",
+        "Tests/Fixtures/BackgroundActionFixture/main.swift",
+        "Tests/Fixtures/VSCodeProblemsExtension/extension.js",
+        "Tests/Fixtures/VSCodeProblemsExtension/package.json",
+        "Tests/Fixtures/VSCodeProblemsWorkspace/problem.ts",
+        "Tests/Fixtures/ideal-state-v2.json",
+        "Tests/Fixtures/ideal-state-v3.json",
+        "Tests/MacCtlCoreTests/AccessibilityActivationTests.swift",
+        "Tests/MacCtlCoreTests/ActionIntentTests.swift",
+        "Tests/MacCtlCoreTests/AdvertisedCapabilityTests.swift",
+        "Tests/MacCtlCoreTests/AuthorizationNoticeTests.swift",
+        "Tests/MacCtlCoreTests/AutomaticFocusPolicyTests.swift",
+        "Tests/MacCtlCoreTests/CapabilityVerificationTests.swift",
+        "Tests/MacCtlCoreTests/ControlCenterTests.swift",
+        "Tests/MacCtlCoreTests/CrossProviderTraceTests.swift",
+        "Tests/MacCtlCoreTests/DaemonLifecycleInterlockTests.swift",
+        "Tests/MacCtlCoreTests/ExactTargetingTests.swift",
+        "Tests/MacCtlCoreTests/ExternalApprovalStoreTests.swift",
+        "Tests/MacCtlCoreTests/FocusSessionPlanTests.swift",
+        "Tests/MacCtlCoreTests/IdealStateTests.swift",
+        "Tests/MacCtlCoreTests/InstalledRuntimeParityTests.swift",
+        "Tests/MacCtlCoreTests/LaunchAgentManagerTests.swift",
+        "Tests/MacCtlCoreTests/MacCtlCoreTests.swift",
+        "Tests/MacCtlCoreTests/NativeWindowManagementTests.swift",
+        "Tests/MacCtlCoreTests/ReleaseEvidenceArchiveTests.swift",
+        "Tests/MacCtlCoreTests/SearchActionTests.swift",
+        "Tests/MacCtlCoreTests/ShortcutTests.swift",
+        "Tests/MacCtlCoreTests/VSCodeDiagnosticsTests.swift",
+        "Tests/MacCtlCoreTests/VersionTests.swift",
+        "Tests/MacCtlCoreTests/WarmPathLayeringTests.swift",
+        "Tests/SkillTests/test_mac_control_skill.py",
+        "fixtures/vscode-problems-extension/extension.js",
+        "fixtures/vscode-problems-extension/package.json",
+        "scripts/background_action_fixture.py",
+        "scripts/check_environment_contract.py",
+        "scripts/check_global_mac_control_projection.py",
+        "scripts/control_benchmark.py",
+        "scripts/install_mac_control_skill.py",
+        "scripts/shortcut-smoke.sh",
+        "scripts/test-with-coverage.sh",
+        "scripts/vscode_diagnostics_fixture.py",
+        "scripts/vscode_fixture.py",
+        "skills/mac-control/SKILL.md",
+        "skills/mac-control/agents/openai.yaml",
+        "skills/mac-control/references/routing.md"
+      ],
+      "outcomes": [
+        "guarded-local-invocation",
+        "permission-aware-result",
+        "display-bound-layout",
+        "capability-evidence-flywheel",
+        "portable-agent-contract"
+      ],
+      "references": [
+        "README.md",
+        ".agents/context/architecture.md",
+        ".project-compass/compasses.json",
+        "Sources/MacCtlCore/TaskApprovalStore.swift",
+        "Sources/MacCtlCore/DaemonLifecycleInterlock.swift",
+        "Sources/MacCtlCore/ControlTargeting.swift",
+        "Sources/MacCtlCore/FocusSessionVerification.swift",
+        "Sources/MacCtlCore/ShortcutDirectExecutor.swift",
+        "Sources/MacCtlCore/UnixSocket.swift",
+        "scripts/install_mac_control_skill.py"
+      ],
+      "constraints": [
+        "Keep control local and owner-session scoped; never bypass TCC, permissions or explicit sensitive action authority.",
+        "Bind control to exact application, PID, launch instance and window identity; dispatch success does not prove the intended visible result.",
+        "Preserve expiring digest-bound single-use task authority and daemon lifecycle drain interlocks; unavailable and unhealthy states remain explicit blockers.",
+        "Require independent focus/window observations for layout success; capability readiness and browser orchestrator declarations do not grant execution or verified outcome authority.",
+        "Preserve redaction and installed runtime parity evidence separately from source tests; current installed daemon mismatch and legacy release-evidence dependency remain explicit gaps.",
+        "Keep four unregistered child contract drafts unratified; root source association does not enroll children, install skills, register LaunchAgents or update the runtime."
+      ],
+      "proof": [
+        {
+          "id": "exact-guarded-control-oracle",
+          "receipt": ".project-compass/evidence/exact-guarded-control.json",
+          "command": [
+            "swift",
+            "test",
+            "--filter",
+            "ExactTargetingTests"
+          ],
+          "oracle_ref": "Tests/MacCtlCoreTests/ExactTargetingTests.swift",
+          "behavior_ids": [
+            "exact-guarded-control"
+          ]
+        },
+        {
+          "id": "bounded-control-authority-oracle",
+          "receipt": ".project-compass/evidence/bounded-control-authority.json",
+          "command": [
+            "swift",
+            "test",
+            "--filter",
+            "DaemonLifecycleInterlockTests"
+          ],
+          "oracle_ref": "Tests/MacCtlCoreTests/DaemonLifecycleInterlockTests.swift",
+          "behavior_ids": [
+            "lifecycle-drain-classification"
+          ]
+        },
+        {
+          "id": "verified-focus-layout-oracle",
+          "receipt": ".project-compass/evidence/verified-focus-layout.json",
+          "command": [
+            "swift",
+            "test",
+            "--filter",
+            "FocusSessionPlanTests"
+          ],
+          "oracle_ref": "Tests/MacCtlCoreTests/FocusSessionPlanTests.swift",
+          "behavior_ids": [
+            "focus-plan-verification"
+          ]
+        },
+        {
+          "id": "evidence-only-capabilities-oracle",
+          "receipt": ".project-compass/evidence/evidence-only-capabilities.json",
+          "command": [
+            "swift",
+            "test",
+            "--filter",
+            "CapabilityVerificationTests"
+          ],
+          "oracle_ref": "Tests/MacCtlCoreTests/CapabilityVerificationTests.swift",
+          "behavior_ids": [
+            "non-dispatching-capability-candidates"
+          ]
+        },
+        {
+          "id": "runtime-parity-fixture",
+          "receipt": ".project-compass/evidence/redacted-release-evidence.json",
+          "command": [
+            "swift",
+            "test",
+            "--filter",
+            "InstalledRuntimeParityTests"
+          ],
+          "oracle_ref": "Tests/MacCtlCoreTests/InstalledRuntimeParityTests.swift",
+          "behavior_ids": [
+            "runtime-parity-classification"
+          ]
+        },
+        {
+          "id": "provider-neutral-distribution-oracle",
+          "receipt": ".project-compass/evidence/provider-neutral-distribution.json",
+          "command": [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "Tests/SkillTests"
+          ],
+          "oracle_ref": "Tests/SkillTests/test_mac_control_skill.py",
+          "behavior_ids": [
+            "provider-neutral-distribution"
+          ]
+        }
+      ],
+      "behavior_ids": [
+        "exact-guarded-control",
+        "lifecycle-drain-classification",
+        "focus-plan-verification",
+        "non-dispatching-capability-candidates",
+        "runtime-parity-classification",
+        "provider-neutral-distribution"
+      ],
+      "handoff_review": "One command-first per-user macOS control plane with source-grounded guarded invocation, focus/display sessions, capability evidence and installed agent-contract seams. The active registry contains only project; four child JSON contracts remain unregistered drafts and are preserved as such. Exact targeting combines app/PID/launch/window identities. Task approval is locked, expiry/digest-bound and consumed once. Lifecycle interlock blocks unavailable healthy-daemon drains, with explicit legacy exception and unhealthy recovery kept distinct. Focus verification consumes independent window observations, not action returns. Capability readiness does not dispatch/promote. Browser completion remains orchestrator_declared. Skill installer stages and restores replaced payloads and verifies canonical/projection identities. Existing live release gate still expects legacy approval evidence; README explicitly preserves that blocked gate pending its separate migration. Exact build, launcher, fixture and runtime support paths are included; their presence is not independent behavioral proof. Installed runtime parity fixtures do not alone establish redacted release evidence; that behavior remains an explicit unbound proof gap.",
+      "decision_id": "reviewed-existing-product-association"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "bootstrap-boundary-proposal",
+      "summary": "Exact action targeting, owner authority and visible verification; exact path-to-outcome association requires owner reconciliation.",
+      "source": "README.md",
+      "status": "proposed"
+    },
+    {
+      "id": "reviewed-existing-product-association",
+      "status": "accepted",
+      "source": "README.md",
+      "summary": "Associate documented existing root outcomes with exact source and bounded local oracles; preserve independent installed/live evidence gaps and existing ownership."
+    }
+  ]
+}
