@@ -1,0 +1,65 @@
+{
+  "schema": "compass-behavior-inventory/v1",
+  "behaviors": [
+    {
+      "id": "exact-guarded-control",
+      "title": "Resolve conjunctive process/window targets and fail closed on ambiguity, replacement or missing readback",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "bounded-control-authority",
+      "title": "Bind sensitive task authority and lifecycle drain to exact state without replay",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "verified-focus-layout",
+      "title": "Keep requested focus policy and observed exact display/window effects separate",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "evidence-only-capabilities",
+      "title": "Keep capability leads and declared browser completions separate from measured native proof",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "redacted-release-evidence",
+      "title": "Preserve bounded owner-only release evidence and exact installed/runtime parity",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "provider-neutral-distribution",
+      "title": "Install canonical skills with recoverable projection and identity checks",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "lifecycle-drain-classification",
+      "title": "Classify atomic drain, explicit legacy idle snapshot and unhealthy daemon blockers",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "non-dispatching-capability-candidates",
+      "title": "Require bounded unique capability matching and record candidate observations without dispatch",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "runtime-parity-classification",
+      "title": "Classify install and running identity freshness from source manifest fixtures",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    },
+    {
+      "id": "focus-plan-verification",
+      "title": "Bind focus plan and display identities to bounded independent observation fixtures",
+      "spec_ref": "README.md",
+      "authority": "accepted"
+    }
+  ]
+}

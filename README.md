@@ -1473,3 +1473,7 @@ must be blocked. Caps Lock no longer opens Mac Control UI.
 
 The project does not modify AIOS or career-ops. Career Ops can invoke this
 standalone control plane when a local macOS interaction is required.
+
+## Behavior intent and proof
+
+Canonical documented intent is associated with exact source and local oracles in [Compass](.project-compass/development.json), with [change routing](.agents/change-surface-matrix.json). Source fixture success does not establish installed, native, provider or external delivery parity. Existing ownership and separately required live evidence remain authoritative.
