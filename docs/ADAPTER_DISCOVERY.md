@@ -74,6 +74,8 @@ checks and returns `stale_snapshot` when necessary. Other adapters remain
 
 ## Verification snapshot: 2026-11-03
 
+Implementation revision: `7cc0891fba752b54ffee419ba90cd3377dcfe246`.
+
 - All 344 Swift tests passed with coverage enabled; the coverage script also
   passed 55 benchmark-fixture and seven skill tests. The environment check and
   skill structural validator passed.
@@ -88,8 +90,9 @@ checks and returns `stale_snapshot` when necessary. Other adapters remain
 - One earlier coverage run was invalidated when fixture startup changed the
   foreground during a focus-preservation test. Rerunning with stable foreground
   passed; the test and focus policy were not weakened.
-- Source CLI checks used the permitted local read-only fallback because the
-  installed LaunchAgent was not registered. Native semantic readback does not
+- Both the source CLI and installed CLI passed the fresh-fixture consumer check.
+  They used the permitted local read-only fallback because the installed
+  LaunchAgent was not registered. Native semantic readback does not
   establish running-daemon parity, keyboard authority, or visual Problems-panel
   acceptance. Persistent registration remains a separate owner-controlled step.
 - Pronto's exact repository route was blocked by an expired inventory scan and
@@ -97,6 +100,18 @@ checks and returns `stale_snapshot` when necessary. Other adapters remain
   records were preserved; direct source, custody, and Compass checks remain
   separate evidence. The unavailable Attentiond skill was not reconstructed.
 
-Authoritative Quality Runner, installed command/skill projection, and final
-integration receipts are recorded in the task handoff. This snapshot does not
-promote missing live Tier-1 release evidence to passing.
+- Authoritative Quality Runner passed on implementation revision `7cc0891` with
+  `release_readiness.eligible: true`. All six source-bound Compass proofs were
+  current at completion. Generated receipts were preserved outside the source
+  diff before the Compass completion check; no gate rule was changed.
+- The canonical Mac Control skill and Codex projection match the source. Package
+  installation preserved the existing signing selector and retained the previous
+  package for rollback. No LaunchAgent registration or start was performed.
+- The installed Tier-1 release check remains blocked: the daemon is not running
+  and fresh user-controlled GUI, keyboard, shortcut, and approval evidence is
+  missing. The next activation action is `macctl daemon ensure --json`, subject
+  to the owner's separate approval for missing persistent registration.
+
+Final exact-revision checks and source/installation artifacts are retained in
+the task handoff. This snapshot does not promote missing live Tier-1 release
+evidence to passing, and integration remains pending that activation review.
