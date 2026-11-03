@@ -1806,38 +1806,18 @@ public final class MacTaskActionExecutor: TaskActionExecuting {
             guard requestedRoute == nil || requestedRoute == .native else {
                 throw TaskActionExecutionError.unsupported("adapter_route_not_implemented")
             }
-            let fixtureID = try requiredParameter(action, key: "fixture_id")
-            let target = try vscodeDiagnosticsReader.target(fixtureID: fixtureID)
-            guard let application = appController.runningApplication(
-                bundleID: target.bundleID,
-                processID: target.processID
-            ) else {
+            let readback = try VSCodeDiagnosticsOperation.read(
+                parameters: action.parameters, reader: vscodeDiagnosticsReader, appController: appController)
+            guard manifest.supportedBundleIdentifiers.contains(readback.application.bundleID ?? "") else {
                 throw VSCodeDiagnosticsError.identityMismatch
             }
-            guard manifest.supportedBundleIdentifiers.contains(application.bundleID ?? "") else {
-                throw VSCodeDiagnosticsError.identityMismatch
-            }
-            let maxAge: TimeInterval
-            if let rawMaxAge = action.parameters["max_age_seconds"] {
-                guard let requestedMaxAge = rawMaxAge.doubleValue else {
-                    throw VSCodeDiagnosticsError.invalidMaxAge
-                }
-                maxAge = requestedMaxAge
-            } else {
-                maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
-            }
-            let observation = try vscodeDiagnosticsReader.read(
-                fixtureID: fixtureID,
-                application: application,
-                maxAge: maxAge
-            )
             return AppAdapterActionResult(
                 adapterID: adapterID,
                 operation: operationName,
                 route: .native,
                 mutating: false,
-                targetFingerprint: ControlTargetFingerprints.make(application: application, focus: nil),
-                observation: observation
+                targetFingerprint: ControlTargetFingerprints.make(application: readback.application, focus: nil),
+                observation: readback.observation
             ).asTaskReport()
         }
         let applicationName = action.parameters["app"]?.stringValue

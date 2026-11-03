@@ -114,6 +114,9 @@ VS Code Problems data has a native, read-only route and must not be collected
 by global keyboard input:
 
 ```sh
+swift run macctl adapter capabilities --adapter-id vscode --operation diagnostics.summary --json
+swift run macctl adapter capabilities --adapter-id vscode --operation diagnostics.summary \
+  --fixture-id <fixture-id> --json
 swift run macctl adapter diagnostics --adapter-id vscode \
   --fixture-id <fixture-id> --json
 python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> create <fixture-id>
@@ -121,6 +124,12 @@ python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> launch <fixt
 python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> status <fixture-id>
 python3 scripts/vscode_diagnostics_fixture.py --root <fixture-root> cleanup <fixture-id>
 ```
+
+Use the scoped operation's `contract` to form a request. Its input schema covers
+method parameters; its output schema covers the successful response `result`.
+`declared` means no fixture was checked, `unverified` means no invocation contract
+is supplied, and `available`/`blocked` are current read-only fixture assessments.
+Every execution revalidates; a prior available result never authorizes replay.
 
 The diagnostics launcher reads `CFBundleExecutable` (supporting current `Code`
 and older `Electron` bundles) and invokes `open -n` with the isolated profile so

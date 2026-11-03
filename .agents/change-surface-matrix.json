@@ -5,7 +5,7 @@
     "id": "mac-control"
   },
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-26",
+  "last_reviewed": "2026-11-03",
   "surfaces": [
     {
       "id": "matrix-maintenance",
@@ -237,6 +237,29 @@
         "Run source-bound Compass completion and independent authoritative QR when enrolled; preserve live and installed proof gaps."
       ],
       "status": "applicable"
+    },
+    {
+      "id": "scoped-adapter-discovery",
+      "scope": "local-and-external",
+      "path": "Sources/MacCtlCore/AdapterDiscovery.swift, AppAdapters.swift, VSCodeDiagnostics.swift, MacCtlService.swift, TaskControl.swift, TaskRunner.swift; Sources/MacCtlCLI/main.swift; Tests/MacCtlCoreTests/VSCodeDiagnosticsTests.swift; README.md; .agents/context/; skills/mac-control/; docs/ADAPTER_DISCOVERY.md; installed macctl and global skill projections",
+      "owner": "repository-owner",
+      "condition": "Adapter invocation schemas, filtering, readiness assessment, or shared diagnostics admission changes",
+      "operations": [
+        "add",
+        "change",
+        "remove"
+      ],
+      "validation": [
+        "swift test --filter VSCodeDiagnosticsTests",
+        "swift test",
+        "python3 -m unittest discover -s Tests/SkillTests",
+        "python3 scripts/check_environment_contract.py",
+        "python3 scripts/check_global_mac_control_projection.py",
+        "live scoped discovery followed by advertised invocation; missing/stale fixture blockers",
+        "fresh-context positive, negative, and boundary skill dogfooding",
+        "exact-current qr task release-check and installed macctl release check --json"
+      ],
+      "status": "applicable"
     }
   ],
   "unresolved_surfaces": [],
@@ -366,6 +389,21 @@
         "swift run macctl control limitations --json",
         "swift run macctl daemon ensure --json when launchd is already registered",
         "swift run macctl release check --json"
+      ]
+    },
+    {
+      "type": "change",
+      "reason": "Add scoped discovery and a self-describing invocation contract for the existing VS Code diagnostics fixture. Share typed admission/read checks across discovery, direct reads, and task execution; preserve current permissions, redaction, and browser/visual boundaries.",
+      "surfaces": [
+        "scoped-adapter-discovery",
+        "vscode-diagnostics-fixture",
+        "global-mac-control-instructions",
+        "installed-control-surface",
+        "installed-runtime-parity",
+        "source-association"
+      ],
+      "validation": [
+        "docs/ADAPTER_DISCOVERY.md"
       ]
     }
   ]

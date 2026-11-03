@@ -1,6 +1,6 @@
 {
   "schema": "compass-development/v1",
-  "revision": 1,
+  "revision": 2,
   "inventory": {
     "source": "git-tracked",
     "include": [
@@ -22,6 +22,8 @@
       "authority": "accepted",
       "paths": [
         ".agents/change-surface-matrix.json",
+        ".agents/context/README.md",
+        ".agents/context/commands.md",
         ".github/workflows/ci.yml",
         ".project-compass/behaviors.json",
         ".project-compass/development.json",
@@ -32,6 +34,7 @@
         "Sources/MacCtlCore/AccessibilityDiagnostics.swift",
         "Sources/MacCtlCore/AccessibilityWindowTargeting.swift",
         "Sources/MacCtlCore/ActionIntent.swift",
+        "Sources/MacCtlCore/AdapterDiscovery.swift",
         "Sources/MacCtlCore/AppAdapters.swift",
         "Sources/MacCtlCore/AppControlProfiles.swift",
         "Sources/MacCtlCore/AppController.swift",
@@ -127,6 +130,7 @@
         "Tests/MacCtlCoreTests/VersionTests.swift",
         "Tests/MacCtlCoreTests/WarmPathLayeringTests.swift",
         "Tests/SkillTests/test_mac_control_skill.py",
+        "docs/ADAPTER_DISCOVERY.md",
         "fixtures/vscode-problems-extension/extension.js",
         "fixtures/vscode-problems-extension/package.json",
         "scripts/background_action_fixture.py",

@@ -184,11 +184,21 @@ When the task needs semantic Problems data, use the native adapter instead of op
 the panel with keyboard input:
 
 ```sh
+macctl adapter capabilities --adapter-id vscode --operation diagnostics.summary --json
 macctl adapter diagnostics --adapter-id vscode --fixture-id <fixture-id> --json
 ```
 
+Use the scoped operation's `contract` for its description, CLI invocation, and
+typed input/output schemas; the output schema describes the response `result`.
+When the fixture ID is known, add `--fixture-id <fixture-id>` to the discovery
+command to inspect current readiness. `declared` has no fixture proof,
+`unverified` has no invocation contract, and `available` is only a current
+assessment. Every read rechecks identity, freshness, and redaction. A `blocked`
+result includes a stable reason; resolve it before retrying, without escalating
+to keyboard input. Discovery never establishes visual Problems-panel acceptance.
+
 The fixture extension owns a fresh snapshot from `vscode.languages.getDiagnostics` and the
-adapter returns only redacted severity/source/code/position summaries, counts, digests, and
+adapter returns only redacted counts, digests, freshness, and
 exact fixture identity. It is read-only and `background_safe`; it does not authorize or fall
 back to OS keyboard input. Use the dedicated disposable diagnostics harness when semantic
 fixture evidence is needed:

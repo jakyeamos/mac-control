@@ -17,6 +17,16 @@ public enum AppAdapterFocusSupport: String, Codable, Equatable, CaseIterable {
     case backgroundSafe = "background_safe"
 }
 
+/// An invocation contract, not a claim that its target is currently available.
+/// Schemas describe the method's params and successful result, respectively.
+public struct AppAdapterOperationContract: Codable, Equatable {
+    public let description: String
+    public let method: String
+    public let cli: String
+    public let inputSchema: JSONValue
+    public let outputSchema: JSONValue
+}
+
 public struct AppAdapterOperation: Codable, Equatable {
     public let name: String
     public let mutating: Bool
@@ -25,6 +35,7 @@ public struct AppAdapterOperation: Codable, Equatable {
     public let routes: [AppAdapterRoute]
     public let redactedObservationSchema: [String]
     public let focusSupport: AppAdapterFocusSupport
+    public let contract: AppAdapterOperationContract?
 
     public init(
         name: String,
@@ -33,7 +44,8 @@ public struct AppAdapterOperation: Codable, Equatable {
         requiredPermissions: [String] = [],
         routes: [AppAdapterRoute],
         redactedObservationSchema: [String] = [],
-        focusSupport: AppAdapterFocusSupport = .foregroundOnly
+        focusSupport: AppAdapterFocusSupport = .foregroundOnly,
+        contract: AppAdapterOperationContract? = nil
     ) {
         self.name = name
         self.mutating = mutating
@@ -42,6 +54,7 @@ public struct AppAdapterOperation: Codable, Equatable {
         self.routes = routes
         self.redactedObservationSchema = redactedObservationSchema
         self.focusSupport = focusSupport
+        self.contract = contract
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -52,6 +65,7 @@ public struct AppAdapterOperation: Codable, Equatable {
         case routes
         case redactedObservationSchema
         case focusSupport
+        case contract
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,6 +83,7 @@ public struct AppAdapterOperation: Codable, Equatable {
             AppAdapterFocusSupport.self,
             forKey: .focusSupport
         ) ?? .foregroundOnly
+        contract = try container.decodeIfPresent(AppAdapterOperationContract.self, forKey: .contract)
     }
 }
 
@@ -321,17 +336,7 @@ public final class AppAdapterRegistry {
             routes: [.appleScript],
             redactedObservationSchema: ["application", "draft_created"]
         )
-        let vscodeDiagnostics = AppAdapterOperation(
-            name: "diagnostics.summary",
-            mutating: false,
-            risk: .safe,
-            routes: [.native],
-            redactedObservationSchema: [
-                "fixture_id", "workspace_digest", "error_count", "warning_count",
-                "info_count", "hint_count", "diagnostic_digest", "generated_at"
-            ],
-            focusSupport: .backgroundSafe
-        )
+        let vscodeDiagnostics = VSCodeDiagnosticsOperation.manifest
 
         let core: [(String, String, String)] = [
             ("finder", "Finder", "com.apple.finder"),

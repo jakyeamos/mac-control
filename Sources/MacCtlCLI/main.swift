@@ -1349,7 +1349,17 @@ struct CLI {
         }
         switch subcommand {
         case "capabilities":
-            return render(sendOrLocal(method: "adapter.capabilities", params: [:], localFallback: true))
+            var params: [String: JSONValue] = [:]
+            for (option, key) in [("--adapter-id", "adapter_id"), ("--operation", "operation"), ("--fixture-id", "fixture_id")] {
+                if let value = try optionalOption(option, from: args) { params[key] = .string(value) }
+            }
+            if let raw = try optionalOption("--max-age-seconds", from: args) {
+                guard let age = Double(raw), age.isFinite else {
+                    throw CLIError.usage("--max-age-seconds must be a finite number")
+                }
+                params["max_age_seconds"] = .number(age)
+            }
+            return render(sendOrLocal(method: "adapter.capabilities", params: params, localFallback: true))
         case "diagnostics":
             let adapterID = try requiredOption("--adapter-id", from: args)
             let fixtureID = try requiredOption("--fixture-id", from: args)
@@ -1359,7 +1369,7 @@ struct CLI {
                 "fixture_id": .string(fixtureID)
             ]
             if let rawMaxAge = try optionalOption("--max-age-seconds", from: args) {
-                guard let maxAge = Double(rawMaxAge), maxAge.isFinite, maxAge > 0, maxAge <= 60 else {
+                guard let maxAge = Double(rawMaxAge), maxAge.isFinite, maxAge > 0, maxAge <= VSCodeDiagnosticsOperation.maximumAge else {
                     throw CLIError.usage("--max-age-seconds must be greater than zero and no more than 60")
                 }
                 params["max_age_seconds"] = .number(maxAge)
@@ -1846,7 +1856,7 @@ struct CLI {
         macctl task prepare --plan-stdin [--json]
         macctl task run|resume --plan-stdin --approval-token <token> [--lease-token <token>]
         macctl task status|cancel <task-id>
-        macctl adapter capabilities [--json]
+        macctl adapter capabilities [--adapter-id <id> [--operation <name> [--fixture-id <id> [--max-age-seconds <seconds>]]]] [--json]
         macctl adapter diagnostics --adapter-id vscode --fixture-id <id> [--max-age-seconds <seconds>] [--json]
         macctl daemon install|ensure|remove|restart|status [--allow-legacy-idle-snapshot]
         macctl logs [--json]

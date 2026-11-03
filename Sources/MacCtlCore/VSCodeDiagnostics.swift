@@ -1,6 +1,111 @@
 import CryptoKit
 import Foundation
 
+/// The native adapter owns both discovery and admission. All entry points use
+/// this same typed input and re-read the fixture at execution time.
+public enum VSCodeDiagnosticsOperation {
+    public static let maximumAge: TimeInterval = 60
+    static let parameterKeys: Set<String> = ["adapter_id", "operation", "fixture_id", "max_age_seconds"]
+
+    public struct Input {
+        public let fixtureID: String
+        public let maxAge: TimeInterval
+
+        public init(parameters: [String: JSONValue]) throws {
+            guard Set(parameters.keys).isSubset(of: parameterKeys),
+                  parameters["adapter_id"] == .string("vscode"),
+                  parameters["operation"] == .string("diagnostics.summary") else {
+                throw VSCodeDiagnosticsError.invalidParameters
+            }
+            guard let fixtureID = parameters["fixture_id"]?.stringValue,
+                  FileVSCodeDiagnosticsReader.isValidFixtureID(fixtureID) else {
+                throw VSCodeDiagnosticsError.invalidFixtureID
+            }
+            let maxAge: TimeInterval
+            if let raw = parameters["max_age_seconds"] {
+                guard let value = raw.doubleValue else { throw VSCodeDiagnosticsError.invalidMaxAge }
+                maxAge = value
+            } else {
+                maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
+            }
+            guard maxAge.isFinite, maxAge > 0, maxAge <= maximumAge else {
+                throw VSCodeDiagnosticsError.invalidMaxAge
+            }
+            self.fixtureID = fixtureID
+            self.maxAge = maxAge
+        }
+    }
+
+    public static func read(
+        parameters: [String: JSONValue], reader: VSCodeDiagnosticsReading, appController: AppController
+    ) throws -> (target: VSCodeFixtureTarget, application: AppInfo, observation: AppAdapterObservation) {
+        let input = try Input(parameters: parameters)
+        let target = try reader.target(fixtureID: input.fixtureID)
+        guard let application = appController.listRunningInstances(matching: target.bundleID)
+            .first(where: { $0.processID == target.processID && $0.bundleID == target.bundleID })?.application else {
+            throw VSCodeDiagnosticsError.identityMismatch
+        }
+        let observation = try reader.read(fixtureID: input.fixtureID, application: application, maxAge: input.maxAge)
+        return (target, application, observation)
+    }
+
+    public static var manifest: AppAdapterOperation {
+        let string: JSONValue = .object(["type": .string("string")])
+        let count: JSONValue = .object(["type": .string("integer"), "minimum": .number(0)])
+        let digest: JSONValue = .object(["type": .string("string"), "pattern": .string("^[a-f0-9]{64}$")])
+        let adapter: JSONValue = .object(["type": .string("string"), "const": .string("vscode")])
+        let operation: JSONValue = .object(["type": .string("string"), "const": .string("diagnostics.summary")])
+        let fields: [String: JSONValue] = [
+            "fixture_id": string, "workspace_digest": digest, "diagnostic_digest": digest,
+            "error_count": count, "warning_count": count, "info_count": count, "hint_count": count,
+            "generated_at": .object(["type": .string("string"), "format": .string("date-time")])
+        ]
+        let inputs: [String: JSONValue] = [
+            "adapter_id": adapter,
+            "operation": operation,
+            "fixture_id": .object([
+                "type": .string("string"), "minLength": .number(1), "maxLength": .number(48),
+                "pattern": .string("^[a-z0-9][a-z0-9_-]{0,47}(?![\\s\\S])"),
+                "description": .string("ID of an existing, ready disposable VS Code diagnostics fixture; never a filesystem path.")
+            ]),
+            "max_age_seconds": .object([
+                "type": .string("number"), "exclusiveMinimum": .number(0), "maximum": .number(maximumAge),
+                "default": .number(FileVSCodeDiagnosticsReader.defaultMaxAge),
+                "description": .string("Maximum accepted snapshot age in seconds; checked again for every read.")
+            ])
+        ]
+        return AppAdapterOperation(
+            name: "diagnostics.summary", mutating: false, risk: .safe, routes: [.native],
+            redactedObservationSchema: fields.keys.sorted(), focusSupport: .backgroundSafe,
+            contract: AppAdapterOperationContract(
+                description: "Read redacted diagnostic counts and digests from the exact running disposable VS Code fixture. No diagnostic messages, paths, keyboard input, or visual Problems-panel verification.",
+                method: "adapter.diagnostics",
+                cli: "macctl adapter diagnostics --adapter-id vscode --fixture-id <fixture_id> [--max-age-seconds <max_age_seconds>] --json",
+                inputSchema: objectSchema(inputs, required: ["adapter_id", "operation", "fixture_id"]),
+                outputSchema: objectSchema([
+                    "adapter_id": adapter, "operation": operation,
+                    "route": .object(["type": .string("string"), "const": .string("native")]),
+                    "observation": objectSchema([
+                        "adapterID": adapter, "operation": operation,
+                        "application": string,
+                        "state": .object(["type": .string("string"), "const": .string("ready")]),
+                        "fields": objectSchema(fields)
+                    ])
+                ])
+            )
+        )
+    }
+
+    private static func objectSchema(_ properties: [String: JSONValue], required: [String]? = nil) -> JSONValue {
+        .object([
+            "$schema": .string("https://json-schema.org/draft/2020-12/schema"),
+            "type": .string("object"), "properties": .object(properties),
+            "required": .array((required ?? properties.keys.sorted()).map(JSONValue.string)),
+            "additionalProperties": .bool(false)
+        ])
+    }
+}
+
 /// The exact process identity recorded by the disposable VS Code fixture.
 /// A bundle identifier alone is insufficient because a user may already have
 /// another VS Code window or process running.
@@ -143,15 +248,16 @@ public struct VSCodeDiagnosticsSnapshot: Codable, Equatable {
     }
 }
 
-public enum VSCodeDiagnosticsError: Error, LocalizedError, Equatable {
-    case invalidFixtureID
-    case fixtureDescriptorMissing
-    case fixtureNotReady
-    case snapshotMissing
-    case invalidSnapshot
-    case identityMismatch
-    case staleSnapshot
-    case invalidMaxAge
+public enum VSCodeDiagnosticsError: String, Error, LocalizedError, Equatable {
+    case invalidFixtureID = "invalid_fixture_id"
+    case fixtureDescriptorMissing = "fixture_descriptor_missing"
+    case fixtureNotReady = "fixture_not_ready"
+    case snapshotMissing = "snapshot_missing"
+    case invalidSnapshot = "invalid_snapshot"
+    case identityMismatch = "identity_mismatch"
+    case staleSnapshot = "stale_snapshot"
+    case invalidMaxAge = "invalid_max_age"
+    case invalidParameters = "invalid_parameters"
 
     public var errorDescription: String? {
         switch self {
@@ -171,6 +277,8 @@ public enum VSCodeDiagnosticsError: Error, LocalizedError, Equatable {
             return "VS Code fixture diagnostics snapshot is stale"
         case .invalidMaxAge:
             return "VS Code diagnostics max age must be greater than zero and no more than 60 seconds"
+        case .invalidParameters:
+            return "VS Code diagnostics accepts only adapter_id, operation, fixture_id, and max_age_seconds"
         }
     }
 }
@@ -266,7 +374,7 @@ public final class FileVSCodeDiagnosticsReader: VSCodeDiagnosticsReading {
         application: AppInfo,
         maxAge: TimeInterval = FileVSCodeDiagnosticsReader.defaultMaxAge
     ) throws -> AppAdapterObservation {
-        guard (0...60).contains(maxAge), maxAge > 0 else {
+        guard maxAge.isFinite, maxAge > 0, maxAge <= VSCodeDiagnosticsOperation.maximumAge else {
             throw VSCodeDiagnosticsError.invalidMaxAge
         }
         let target = try target(fixtureID: fixtureID)

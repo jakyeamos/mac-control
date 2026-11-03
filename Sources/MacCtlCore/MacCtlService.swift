@@ -902,10 +902,8 @@ public final class MacCtlService {
             case "adapter.capabilities":
                 return try success(
                     request,
-                    result: [
-                        "manifests": try JSONValue.fromEncodable(adapterRegistry.manifests()),
-                        "automation_permissions": try JSONValue.fromEncodable(adapterRegistry.automationPermissions())
-                    ],
+                    result: AdapterDiscovery.inspect(parameters: request.params, registry: adapterRegistry,
+                                                     reader: vscodeDiagnosticsReader, appController: appController),
                     evidence: [Evidence(
                         kind: "adapter_capabilities",
                         message: "Allowlisted adapter manifests and Automation diagnostics were inspected",
@@ -1868,43 +1866,23 @@ public final class MacCtlService {
         guard adapterID == "vscode", operation == "diagnostics.summary" else {
             throw AppAdapterError.unsupportedOperation(adapterID: adapterID, operation: operation)
         }
-        let fixtureID = try requiredString(request, key: "fixture_id")
-        let target = try vscodeDiagnosticsReader.target(fixtureID: fixtureID)
-        guard let application = appController.runningApplication(
-            bundleID: target.bundleID,
-            processID: target.processID
-        ) else {
-            throw VSCodeDiagnosticsError.identityMismatch
-        }
-        let maxAge: TimeInterval
-        if let rawMaxAge = request.params["max_age_seconds"] {
-            guard let requestedMaxAge = rawMaxAge.doubleValue else {
-                throw VSCodeDiagnosticsError.invalidMaxAge
-            }
-            maxAge = requestedMaxAge
-        } else {
-            maxAge = FileVSCodeDiagnosticsReader.defaultMaxAge
-        }
-        let observation = try vscodeDiagnosticsReader.read(
-            fixtureID: fixtureID,
-            application: application,
-            maxAge: maxAge
-        )
+        let readback = try VSCodeDiagnosticsOperation.read(
+            parameters: request.params, reader: vscodeDiagnosticsReader, appController: appController)
         return try success(
             request,
             result: [
                 "adapter_id": .string(adapterID),
                 "operation": .string(operation),
                 "route": .string(AppAdapterRoute.native.rawValue),
-                "observation": try JSONValue.fromEncodable(observation)
+                "observation": try JSONValue.fromEncodable(readback.observation)
             ],
             evidence: [Evidence(
                 kind: "vscode_diagnostics",
                 message: "VS Code extension-owned diagnostics were read without OS keyboard input",
                 source: "macctld",
                 metadata: [
-                    "fixture_id": .string(fixtureID),
-                    "process_id": .number(Double(target.processID)),
+                    "fixture_id": .string(readback.target.fixtureID),
+                    "process_id": .number(Double(readback.target.processID)),
                     "provider": .string("vscode.languages.getDiagnostics")
                 ]
             )]
@@ -8210,9 +8188,12 @@ public final class MacCtlService {
                 code = .taskBlocked
             }
             details["failure_class"] = .string(code.rawValue)
+        case is AdapterDiscoveryError:
+            status = .failed
+            code = .invalidRequest
         case let error as VSCodeDiagnosticsError:
             switch error {
-            case .invalidFixtureID, .invalidMaxAge:
+            case .invalidFixtureID, .invalidMaxAge, .invalidParameters:
                 status = .failed
                 code = .invalidRequest
                 details["retryable"] = .bool(false)
@@ -8223,6 +8204,7 @@ public final class MacCtlService {
                 details["retryable"] = .bool(true)
             }
             details["failure_class"] = .string("vscode_diagnostics_blocked")
+            details["reason"] = .string(error.rawValue)
             evidence = [Evidence(
                 kind: "vscode_diagnostics",
                 message: error.localizedDescription,

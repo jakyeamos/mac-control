@@ -1413,6 +1413,32 @@ declared Automation permission is available. Missing permission, ambiguous
 target, expired authority, and unsupported capability must be recorded as
 blocked evidence rather than bypassed.
 
+Scope discovery to the intended adapter and operation before constructing a
+request:
+
+```sh
+macctl adapter capabilities --adapter-id vscode --operation diagnostics.summary --json
+macctl adapter capabilities --adapter-id vscode --operation diagnostics.summary \
+  --fixture-id <fixture-id> --json
+```
+
+The VS Code operation supplies a `contract` with a description, CLI invocation,
+method, and JSON Schemas for request parameters and the successful response's
+`result`. Its schema permits an existing `fixture_id` and optional
+`max_age_seconds` (default 10, greater than zero, maximum 60). Unknown input
+fields and caller-supplied snapshots are rejected consistently by task plans
+and direct reads. Other operations retain their existing metadata; a missing
+contract is explicitly `unverified`.
+
+The response preserves `manifests` and `automation_permissions` and adds
+`schema_version: adapter-capabilities/v2` and per-operation `availability`.
+Without fixture context the VS Code operation is `declared`. With exact scope
+and fixture context it is `available` only after current identity, freshness,
+and redaction checks; otherwise it is `blocked` with a stable reason such as
+`fixture_descriptor_missing` or `stale_snapshot`. Discovery grants no execution
+authority: every subsequent read repeats the checks. See
+[the discovery contract and verification notes](docs/ADAPTER_DISCOVERY.md).
+
 #### VS Code Problems diagnostics
 
 Use the native extension-owned diagnostics route when the task needs semantic

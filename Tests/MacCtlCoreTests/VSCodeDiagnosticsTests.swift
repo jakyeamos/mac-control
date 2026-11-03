@@ -70,6 +70,109 @@ final class VSCodeDiagnosticsTests: XCTestCase {
         let encoded = String(decoding: try JSONCodec.encode(observation), as: UTF8.self)
         XCTAssertFalse(encoded.contains("message"))
         XCTAssertFalse(encoded.contains("Fixture error"))
+
+        let service = discoveryService(reader: reader)
+        let discovery = service.handle(RequestEnvelope(method: "adapter.capabilities", params: [
+            "adapter_id": .string("vscode"), "operation": .string("diagnostics.summary"),
+            "fixture_id": .string(fixtureID)
+        ]))
+        XCTAssertEqual(discovery.status, .succeeded)
+        XCTAssertEqual(discovery.result["availability"]?.arrayValue?.first?["state"], .string("available"))
+        let manifest = try XCTUnwrap(discovery.result["manifests"]?.arrayValue?.first)
+        let contract = try XCTUnwrap(manifest["operations"]?.arrayValue?.first?["contract"])
+        let properties = try XCTUnwrap(contract["inputSchema"]?["properties"]?.objectValue)
+        var parameters = properties.compactMapValues { $0["const"] }
+        parameters["fixture_id"] = .string(fixtureID)
+        let method = try XCTUnwrap(contract["method"]?.stringValue)
+        let response = service.handle(RequestEnvelope(method: method, params: parameters))
+        XCTAssertEqual(response.status, .succeeded)
+        XCTAssertEqual(response.result["observation"]?["fields"]?["error_count"], .number(1))
+        XCTAssertEqual(response.result["observation"]?["fields"]?["warning_count"], .number(1))
+        let fieldsSchema = try XCTUnwrap(contract["outputSchema"]?["properties"]?["observation"]?["properties"]?["fields"])
+        let outputFields = try XCTUnwrap(response.result["observation"]?["fields"]?.objectValue)
+        XCTAssertEqual(Set(outputFields.keys), Set(fieldsSchema["required"]?.arrayValue?.compactMap(\.stringValue) ?? []))
+        for (key, value) in outputFields {
+            let type = fieldsSchema["properties"]?[key]?["type"]?.stringValue
+            if key.hasSuffix("_count") {
+                XCTAssertEqual(type, "integer")
+                XCTAssertNotNil(value.doubleValue)
+            } else {
+                XCTAssertEqual(type, "string")
+                XCTAssertNotNil(value.stringValue)
+            }
+        }
+        let stale = VSCodeDiagnosticsSnapshot(
+            provider: snapshot.provider, fixtureID: fixtureID, bundleID: snapshot.bundleID,
+            workspaceDigest: workspaceDigest, generatedAt: now.addingTimeInterval(-11), diagnostics: snapshot.diagnostics
+        )
+        try JSONCodec.encode(stale).write(to: fixtureDirectory.appendingPathComponent("diagnostics.json"))
+        let retry = service.handle(RequestEnvelope(method: method, params: parameters))
+        XCTAssertEqual(retry.status, .blocked)
+        XCTAssertEqual(retry.error?.details["reason"], .string("stale_snapshot"))
+    }
+
+    func testScopedDiscoveryReportsDeclarationAndCurrentBlockers() throws {
+        let reader = DiscoveryDiagnosticsReader()
+        let service = discoveryService(reader: reader)
+        let scope: [String: JSONValue] = ["adapter_id": .string("vscode"), "operation": .string("diagnostics.summary")]
+        let declaration = service.handle(RequestEnvelope(method: "adapter.capabilities", params: scope))
+        XCTAssertEqual(declaration.result["manifests"]?.arrayValue?.count, 1)
+        XCTAssertEqual(declaration.result["manifests"]?.arrayValue?.first?["adapterID"], .string("vscode"))
+        XCTAssertEqual(declaration.result["availability"]?.arrayValue?.first?["state"], .string("declared"))
+        XCTAssertEqual(reader.reads, 0)
+        var parameters = scope
+        parameters["fixture_id"] = .string("problems_fixture")
+        for (error, reason) in [(VSCodeDiagnosticsError.fixtureDescriptorMissing, "fixture_descriptor_missing"), (.staleSnapshot, "stale_snapshot")] {
+            reader.error = error
+            let response = service.handle(RequestEnvelope(method: "adapter.capabilities", params: parameters))
+            XCTAssertEqual(response.status, .succeeded)
+            XCTAssertEqual(response.result["availability"]?.arrayValue?.first?["state"], .string("blocked"))
+            XCTAssertEqual(response.result["availability"]?.arrayValue?.first?["reason"], .string(reason))
+        }
+        let unknown = service.handle(RequestEnvelope(method: "adapter.capabilities", params: ["adapter_id": .string("missing")]))
+        XCTAssertNotEqual(unknown.status, .succeeded)
+        let ambiguous = service.handle(RequestEnvelope(method: "adapter.capabilities", params: ["fixture_id": .string("problems_fixture")]))
+        XCTAssertNotEqual(ambiguous.status, .succeeded)
+    }
+
+    func testDiagnosticsAdmissionAgreesAcrossDiscoveryExecutionAndTasks() {
+        let reader = DiscoveryDiagnosticsReader()
+        let service = discoveryService(reader: reader)
+        let base: [String: JSONValue] = [
+            "adapter_id": .string("vscode"), "operation": .string("diagnostics.summary"),
+            "fixture_id": .string("problems_fixture")
+        ]
+        let invalid: [(String, JSONValue?)] = [
+            ("fixture_id", nil), ("fixture_id", .string("../outside")), ("fixture_id", .string("fixture\n")),
+            ("max_age_seconds", .number(0)), ("max_age_seconds", .number(61)),
+            ("max_age_seconds", .string("10")), ("snapshot_path", .string("/tmp/untrusted"))
+        ]
+        for (key, value) in invalid {
+            var parameters = base
+            parameters[key] = value
+            let plan = TaskPlan(id: "diagnostics", name: "Diagnostics", summary: "Read fixture diagnostics", steps: [
+                TaskStep(id: "read", action: ActionSpec(kind: .adapter, surface: .macApp, parameters: parameters))
+            ])
+            XCTAssertFalse(TaskPlanValidator.validate(plan).valid, "Accepted invalid \(key)")
+            let execution = service.handle(RequestEnvelope(method: "adapter.diagnostics", params: parameters))
+            XCTAssertEqual(execution.status, .failed, "Accepted invalid \(key)")
+            if parameters["fixture_id"] != nil {
+                let discovery = service.handle(RequestEnvelope(method: "adapter.capabilities", params: parameters))
+                XCTAssertEqual(discovery.status, .failed, "Accepted invalid discovery \(key)")
+            }
+        }
+        XCTAssertEqual(reader.reads, 0, "Invalid input reached the reader")
+    }
+
+    private func discoveryService(reader: VSCodeDiagnosticsReading) -> MacCtlService {
+        let application = RunningApplicationDescriptor(
+            name: "Visual Studio Code", bundleID: "com.microsoft.VSCode",
+            path: "/Applications/Visual Studio Code.app", processID: 4242, launchDate: nil
+        )
+        return MacCtlService(
+            appController: AppController(runningApplicationProvider: { [application] }),
+            permissionContext: "test", vscodeDiagnosticsReader: reader
+        )
     }
 
     func testReaderRejectsWrongIdentityStaleSnapshotAndPrivateMessageFields() throws {
@@ -175,5 +278,21 @@ final class VSCodeDiagnosticsTests: XCTestCase {
             .appendingPathComponent("macctl-(name)-(UUID().uuidString)", isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return directory
+    }
+}
+
+private final class DiscoveryDiagnosticsReader: VSCodeDiagnosticsReading {
+    var reads = 0
+    var error = VSCodeDiagnosticsError.fixtureDescriptorMissing
+
+    func target(fixtureID: String) throws -> VSCodeFixtureTarget {
+        if error == .fixtureDescriptorMissing { throw error }
+        return VSCodeFixtureTarget(fixtureID: fixtureID, bundleID: "com.microsoft.VSCode", processID: 4242,
+                                   workspacePath: "/tmp/fixture", windowTitle: "fixture")
+    }
+
+    func read(fixtureID: String, application: AppInfo, maxAge: TimeInterval) throws -> AppAdapterObservation {
+        reads += 1
+        throw error
     }
 }

@@ -124,6 +124,11 @@ extension, window title, bundle, and PID. Its extension writes only a fresh,
 redacted diagnostics summary sourced from `vscode.languages.getDiagnostics`.
 The daemon verifies the exact identity and digest before returning the summary;
 it never uses the fixture as proof of frontmost/focus or visual acceptance.
+`VSCodeDiagnosticsOperation` owns the typed input, callable schemas, and shared
+read path used by discovery, direct reads, and task execution. `AdapterDiscovery`
+filters the existing registry by adapter/operation, reports declarations
+separately from current fixture availability, and never caches execution
+authority. Legacy operations without an invocation contract remain unverified.
 
 Focus routing is background-first and foreground-on-demand. Agent-facing CLI
 requests default to `automatic`: the daemon selects a verified background route

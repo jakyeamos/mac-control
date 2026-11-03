@@ -738,11 +738,10 @@ public enum TaskPlanValidator {
                 errors.append("Step \(stepID) adapter actions cannot contain arbitrary script or JXA")
             }
             if adapterID == "vscode", operation == "diagnostics.summary" {
-                if action.parameters["fixture_id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-                    errors.append("Step \(stepID) VS Code diagnostics requires fixture_id")
-                }
-                for key in ["diagnostics", "messages", "problems", "snapshot_path"] where action.parameters[key] != nil {
-                    errors.append("Step \(stepID) VS Code diagnostics does not accept caller-supplied \(key)")
+                do {
+                    _ = try VSCodeDiagnosticsOperation.Input(parameters: action.parameters)
+                } catch {
+                    errors.append("Step \(stepID) \(error.localizedDescription)")
                 }
             }
             let privateKeys = [
